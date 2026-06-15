@@ -107,6 +107,18 @@ class Settings(BaseSettings):
     # registry. Reuses ``memory_db_path`` (no new path setting).
     enable_reminders: bool = False
 
+    # --- Scheduled triggers (Tier 1; default off) ---
+    # Gates the whole ``/schedules`` REST surface *and* the background tick loop;
+    # off by default so the offline build exposes no scheduler routes (each ->
+    # 404) and starts no background work. When on, time-based triggers
+    # (interval/once/daily/weekly) fire named actions (e.g. ``due_reminders``),
+    # persisted in a sibling SQLite file alongside ``memory_db_path``.
+    enable_scheduler: bool = False
+    # How often the background ``run_loop`` ticks (seconds) when the scheduler is
+    # enabled. Only used by the un-unit-tested wall-clock loop; the tested
+    # ``tick(now)`` unit takes ``now`` injected, so this never affects test timing.
+    scheduler_tick_seconds: float = 30.0
+
     # --- Persona ---
     owner_address: str = "Boss"
 

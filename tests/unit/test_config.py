@@ -70,3 +70,40 @@ def test_alerting_fields_from_env(monkeypatch) -> None:  # type: ignore[no-untyp
     s = Settings(_env_file=None)
     assert s.alert_rate_limit_seconds == 60.0
     assert s.alert_dedupe is False
+
+
+def test_gemini_fallback_defaults() -> None:
+    s = Settings(_env_file=None)
+    assert s.llm_fallback_provider == "none"
+    assert s.gemini_api_key is None
+    assert s.gemini_base_url == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
+    assert s.gemini_model == "gemini-2.0-flash"
+
+
+def test_gemini_key_is_secret_and_not_in_repr() -> None:
+    s = Settings(_env_file=None, gemini_api_key="gemini-secret")
+    assert isinstance(s.gemini_api_key, SecretStr)
+    assert "gemini-secret" not in repr(s)
+    assert "gemini-secret" not in str(s)
+    assert s.gemini_api_key.get_secret_value() == "gemini-secret"
+
+
+def test_gemini_key_from_unprefixed_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-from-env")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    monkeypatch.setenv(
+        "GEMINI_BASE_URL", "https://example.test/v1beta/openai/"
+    )
+    s = Settings(_env_file=None)
+    assert isinstance(s.gemini_api_key, SecretStr)
+    assert s.gemini_api_key.get_secret_value() == "gemini-from-env"
+    assert s.gemini_model == "gemini-2.0-flash-exp"
+    assert s.gemini_base_url == "https://example.test/v1beta/openai/"
+
+
+def test_llm_fallback_provider_from_prefixed_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("FRIDAY_LLM_FALLBACK_PROVIDER", "gemini")
+    s = Settings(_env_file=None)
+    assert s.llm_fallback_provider == "gemini"

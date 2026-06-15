@@ -46,6 +46,27 @@ class Settings(BaseSettings):
     # surfaces as a ``ProviderError`` (env: ``FRIDAY_LLM_TIMEOUT_SECONDS``).
     llm_timeout_seconds: float = 60.0
 
+    # --- LLM fallback provider ---
+    # Which secondary provider :class:`FallbackLLM` uses when the primary fails.
+    # ``none`` (default) keeps the single-provider behaviour; ``gemini`` wraps
+    # the primary in a fallback to Gemini's OpenAI-compatible endpoint, but only
+    # when a Gemini key is present (env: ``FRIDAY_LLM_FALLBACK_PROVIDER``).
+    llm_fallback_provider: Literal["none", "gemini"] = "none"
+    # Gemini credentials/config, read from the provider-native ``GEMINI_*`` env
+    # vars unprefixed (matching the OpenAI-compatible convention) via aliases.
+    gemini_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GEMINI_API_KEY", "gemini_api_key"),
+    )
+    gemini_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai/",
+        validation_alias=AliasChoices("GEMINI_BASE_URL", "gemini_base_url"),
+    )
+    gemini_model: str = Field(
+        default="gemini-2.0-flash",
+        validation_alias=AliasChoices("GEMINI_MODEL", "gemini_model"),
+    )
+
     # --- Routing ---
     route_min_confidence: float = 0.55
 

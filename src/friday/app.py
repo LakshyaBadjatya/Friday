@@ -56,6 +56,7 @@ from friday.api.routes_reminders import router as reminders_router
 from friday.api.routes_schedules import router as schedules_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
+from friday.api.routes_study import router as study_router
 from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
@@ -103,6 +104,7 @@ from friday.studio.generator import (
     StudioService,
     Text3DProvider,
 )
+from friday.study.store import SQLiteStudyStore
 from friday.tools.agent_reach import AgentReachTool
 from friday.tools.base import Tool
 from friday.tools.home import HomeControlTool
@@ -338,6 +340,28 @@ def _build_journal_store(settings: Settings) -> SQLiteJournalStore:
         journal_path = str(base.with_suffix(base.suffix + ".journal"))
         base.parent.mkdir(parents=True, exist_ok=True)
     return SQLiteJournalStore(journal_path)
+
+
+def _build_study_store(settings: Settings) -> SQLiteStudyStore:
+    """Build the local-first SQLite study store alongside the long-term DB.
+
+    Reuses ``memory_db_path``: the flashcards + study sessions live in a sibling
+    file (``*.study.db``) next to the long-term database so they share the
+    gitignored ``data/`` directory; ``":memory:"`` stays ephemeral. The store's
+    clock is left at its wall-clock default (it stamps a session's ``at`` and a
+    reviewed card's ``due_at``); tested paths inject their own clock and
+    ``due_cards()`` is driven by a passed ``now``, never the wall clock. Built
+    eagerly (cheap, no I/O beyond schema init) and surfaced on the runtime; the
+    ``/study`` route self-guards on the flag.
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        study_path = ":memory:"
+    else:
+        base = Path(db_path)
+        study_path = str(base.with_suffix(base.suffix + ".study"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteStudyStore(study_path)
 
 
 def _build_journal_service(
@@ -810,6 +834,9 @@ class AppRuntime:
     #: The entity extractor over the live LLM; ``POST /graph/extract`` drives it for
     #: one NON-FATAL extraction pass that upserts into ``graph_store``.
     graph_extractor: EntityExtractor
+    #: The shared study store — the same one the ``/study`` routes read/write
+    #: (spaced-repetition flashcards + logged study sessions).
+    study_store: SQLiteStudyStore
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -858,6 +885,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
     meeting_capture = _build_meeting_capture(settings, llm, rag_ingestor)
     graph_store = _build_graph_store(settings)
     graph_extractor = EntityExtractor(llm)
+    study_store = _build_study_store(settings)
     critic = _build_critic(llm)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
@@ -898,6 +926,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         meeting_capture=meeting_capture,
         graph_store=graph_store,
         graph_extractor=graph_extractor,
+        study_store=study_store,
     )
 
 
@@ -1122,6 +1151,19 @@ def _wire_graph(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     app.state.graph_extractor = runtime.graph_extractor
 
 
+def _wire_study(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared study store on ``app.state`` when study is enabled.
+
+    The ``/study`` routes read ``app.state.study_store`` — the shared
+    :class:`SQLiteStudyStore` for spaced-repetition flashcards + logged study
+    sessions. Building it only when ``enable_study`` is set keeps the offline
+    default untouched (the routes self-guard on the flag and 404 when off).
+    """
+    if not settings.enable_study:
+        return
+    app.state.study_store = runtime.study_store
+
+
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Load owner-supplied plugins into the shared registry when enabled.
 
@@ -1177,6 +1219,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_protocols(app, settings, runtime)
     _wire_meetings(app, settings, runtime)
     _wire_graph(app, settings, runtime)
+    _wire_study(app, settings, runtime)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
     _wire_plugins(app, settings, runtime)
@@ -1309,6 +1352,10 @@ def create_app() -> FastAPI:
     # exposes no graph surface. The shared graph store + entity extractor are wired
     # onto app.state only when enabled.
     app.include_router(graph_router)
+    # Study / productivity (Tier 2) — always registered but self-guards on
+    # FRIDAY_ENABLE_STUDY (404 when off), so the offline default exposes no study
+    # surface. The shared study store is wired onto app.state only when enabled.
+    app.include_router(study_router)
     # Plugins / extensions (Tier 2) — always registered but self-guards on
     # FRIDAY_ENABLE_PLUGINS (404 when off), so the offline default exposes no
     # plugin surface. The plugins are loaded into the shared registry and the

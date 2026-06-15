@@ -45,6 +45,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import quote
 
 from pydantic import BaseModel
 
@@ -248,6 +249,47 @@ def _extract_n8n_description(text: str) -> str | None:
             if description:
                 return description
     return None
+
+
+# Light "maps" intent: an "open maps" turn deep-links to the local ``/maps``
+# globe; a "distance to <X>" / "show me distance to <X>" turn deep-links to
+# ``/maps?to=<X>`` (the destination URL-encoded) so the page geocodes + measures
+# it on load. Detected up front (the router has no MAPS mode) and answered
+# deterministically — no LLM call, so the link is always exact and offline-safe.
+# The ``distance`` rule is tried before the bare ``open maps`` so "show me
+# distance to ..." is never mistaken for a plain open.
+_MAPS_DISTANCE_RULES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:show\s+me\s+(?:the\s+)?|what'?s\s+the\s+|get\s+(?:me\s+)?(?:the\s+)?)?"
+        r"distance\s+(?:to|from\s+here\s+to)\s+(.+)",
+        re.IGNORECASE,
+    ),
+)
+_OPEN_MAPS_RULE: re.Pattern[str] = re.compile(
+    r"^\s*(?:open|show|launch|bring\s+up)\s+(?:the\s+)?maps?\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_maps_distance(text: str) -> str | None:
+    """Return the destination ``X`` of a "distance to <X>" command, or ``None``.
+
+    Matches the ordered :data:`_MAPS_DISTANCE_RULES` and returns the captured
+    destination with surrounding whitespace and a trailing period/quote stripped,
+    so ``"show me distance to New York City."`` yields ``"New York City"``.
+    """
+    for pattern in _MAPS_DISTANCE_RULES:
+        match = pattern.search(text)
+        if match is not None:
+            target = match.group(1).strip().strip("\"'").rstrip(".!?").strip()
+            if target:
+                return target
+    return None
+
+
+def _is_open_maps(text: str) -> bool:
+    """Whether ``text`` is a plain "open maps" command (no destination)."""
+    return _OPEN_MAPS_RULE.search(text) is not None
 
 
 def _extract_protocol_name(text: str) -> str | None:
@@ -824,6 +866,29 @@ class Orchestrator:
             f"({removed} record(s) removed)."
         )
 
+    # -- maps deep links (Tier 3) ------------------------------------------ #
+    def _open_maps_reply(self) -> str:
+        """A persona reply deep-linking to the local ``/maps`` globe."""
+        owner = get_settings().owner_address
+        return (
+            f"Opening the map, {owner} — here's the globe: /maps. Say a place to "
+            f"fly there, or ask for a distance."
+        )
+
+    def _distance_maps_reply(self, destination: str) -> str:
+        """A persona reply deep-linking to ``/maps?to=<destination>`` (encoded).
+
+        The destination is URL-encoded with :func:`urllib.parse.quote` (so a
+        space, ``&``, or ``?`` in the place name never breaks the query) and the
+        page geocodes + measures it on load. Reported deterministically (no LLM
+        call), so the link is always exact.
+        """
+        owner = get_settings().owner_address
+        link = f"/maps?to={quote(destination)}"
+        return (
+            f"On it, {owner} — pulling up the distance to {destination}: {link}"
+        )
+
     # -- n8n workflows (Tier 2) -------------------------------------------- #
     async def _make_n8n_workflow(self, description: str, state: GraphState) -> str:
         """Draft (and maybe import) an n8n workflow and report it in persona.
@@ -1107,6 +1172,22 @@ class Orchestrator:
         if forget_target is not None:
             state.mode = Mode.CONVERSATION
             state.response = self._forget(forget_target)
+            self._record(state)
+            return state
+
+        # 2d. A light "maps" intent deep-links to the local Maps globe. The
+        # ``distance to <X>`` form is checked BEFORE the bare ``open maps`` so
+        # "show me distance to ..." is never mistaken for a plain open. Answered
+        # deterministically (no LLM call); the router has no MAPS mode.
+        maps_destination = _extract_maps_distance(state.user_input)
+        if maps_destination is not None:
+            state.mode = Mode.CONVERSATION
+            state.response = self._distance_maps_reply(maps_destination)
+            self._record(state)
+            return state
+        if _is_open_maps(state.user_input):
+            state.mode = Mode.CONVERSATION
+            state.response = self._open_maps_reply()
             self._record(state)
             return state
 

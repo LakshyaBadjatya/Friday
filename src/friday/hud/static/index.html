@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>FRIDAY · HUD</title>
+  <link rel="stylesheet" href="/hud/static/hud.css" />
+
+  <!--
+    No-build, no-bundler cockpit. Everything here is plain ES2022 the browser runs
+    directly: no Node step, no webpack, no CDN modules. hud.js draws the particle
+    field, runs the arc-reactor boot sequence, and wires the Cmd/Ctrl-K command
+    palette to the existing same-origin endpoints (/chat, /admin/*).
+
+    SAFETY: this page NEVER eval()s anything from the server. The palette calls
+    JSON endpoints and renders their data as text — no server-sourced code is ever
+    executed. No secret is baked into the page; auth (if any) is the gateway's job.
+  -->
+</head>
+<body>
+  <!-- Drifting particle field, painted by hud.js behind the cockpit. -->
+  <canvas id="particles" aria-hidden="true"></canvas>
+
+  <!-- Arc-reactor boot sequence; hud.js fades it out once "online". -->
+  <div id="boot" aria-hidden="true">
+    <div class="boot-reactor">
+      <div class="ring r1"></div>
+      <div class="ring r2"></div>
+      <div class="ring r3"></div>
+      <div class="ring r4"></div>
+      <div class="core"></div>
+    </div>
+    <div class="boot-text" id="boot-text">initializing reactor…</div>
+    <div class="boot-bar"><i id="boot-bar"></i></div>
+  </div>
+
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">FRIDAY</span>
+        <span class="brand-sub">HUD</span>
+      </div>
+      <span class="kbd-hint">
+        <kbd>⌘</kbd><kbd>K</kbd> / <kbd>Ctrl</kbd><kbd>K</kbd> — command palette
+      </span>
+      <div id="conn-status" class="pill" title="Backend connection">
+        <span class="dot"></span><span class="conn-label">linking…</span>
+      </div>
+    </header>
+
+    <main id="stage">
+      <section id="reactor-wrap" aria-label="Arc reactor">
+        <div id="reactor">
+          <div class="ring r1"></div>
+          <div class="ring r2"></div>
+          <div class="ring r3"></div>
+          <div class="ring r4"></div>
+          <div class="core"></div>
+        </div>
+        <div class="reactor-caption">
+          REACTOR <strong id="reactor-state">ONLINE</strong>
+        </div>
+      </section>
+
+      <aside id="telemetry" aria-label="Telemetry">
+        <h2>Telemetry</h2>
+        <div class="metric">
+          <span class="label">requests</span>
+          <span class="value" id="m-requests">—</span>
+        </div>
+        <div class="metric">
+          <span class="label">tool calls</span>
+          <span class="value" id="m-tools">—</span>
+        </div>
+        <div class="metric">
+          <span class="label">errors</span>
+          <span class="value" id="m-errors">—</span>
+        </div>
+        <div class="metric">
+          <span class="label">sessions</span>
+          <span class="value" id="m-sessions">—</span>
+        </div>
+        <h2>Activity</h2>
+        <div id="log" aria-live="polite"></div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Command palette (Cmd/Ctrl-K): talks to /chat + /admin. -->
+  <div id="palette-overlay" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div id="palette">
+      <input
+        id="palette-input"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="Type a command, or ask FRIDAY anything…"
+        aria-label="Command palette input" />
+      <ul id="palette-list"></ul>
+      <div id="palette-result" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <script src="/hud/static/hud.js"></script>
+</body>
+</html>

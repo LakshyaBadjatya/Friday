@@ -504,6 +504,14 @@ class Settings(BaseSettings):
     enable_broker: bool = False
 
     # --- Gateway hardening (Phase 6) ---
+    # The uvicorn bind host the CLI ``serve`` default uses *and* the host the
+    # startup exposure check reads. Defaults to the loopback ``127.0.0.1`` so the
+    # local-first gateway is reachable only from the machine itself. When this is
+    # set to a non-loopback address (e.g. ``0.0.0.0``) AND ``require_auth`` is off,
+    # startup logs a prominent WARNING that FRIDAY is exposed to the network with
+    # no auth — an advisory nudge (boot is NEVER refused, so local dev keeps
+    # working). Read from ``FRIDAY_BIND_HOST``.
+    bind_host: str = "127.0.0.1"
     # When true, every route except ``/health`` requires an ``Authorization:
     # Bearer <key>`` header whose key is in ``api_keys``; missing/invalid -> 401.
     # Default off keeps the local-first gateway open (no credentials needed).

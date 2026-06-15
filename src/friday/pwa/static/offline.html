@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a84ff" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>FRIDAY — Offline</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05060a;
+        --fg: #e8eef6;
+        --muted: #8a93a6;
+        --accent: #0a84ff;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: grid;
+        place-items: center;
+        min-height: 100svh;
+        padding: 2rem;
+        background:
+          radial-gradient(1200px 600px at 50% -10%, rgba(10, 132, 255, 0.18), transparent 60%),
+          var(--bg);
+        color: var(--fg);
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        text-align: center;
+      }
+      main { max-width: 28rem; }
+      .orb {
+        width: 88px;
+        height: 88px;
+        margin: 0 auto 1.5rem;
+        border-radius: 50%;
+        background: radial-gradient(circle at 50% 38%, #6fb8ff, var(--accent) 55%, #043b73 100%);
+        box-shadow: 0 0 0 6px rgba(10, 132, 255, 0.12), 0 0 48px rgba(10, 132, 255, 0.45);
+        animation: pulse 2.4s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); opacity: 0.92; }
+        50% { transform: scale(1.06); opacity: 1; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .orb { animation: none; }
+      }
+      h1 { font-size: 1.6rem; margin: 0 0 0.5rem; letter-spacing: 0.04em; }
+      p { color: var(--muted); margin: 0 0 1.75rem; }
+      .actions { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+      a.button, button.button {
+        appearance: none;
+        border: 1px solid rgba(10, 132, 255, 0.5);
+        background: rgba(10, 132, 255, 0.12);
+        color: var(--fg);
+        padding: 0.6rem 1.2rem;
+        border-radius: 0.6rem;
+        font: inherit;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      a.button:hover, button.button:hover { background: rgba(10, 132, 255, 0.22); }
+      .hint { margin-top: 2rem; font-size: 0.85rem; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="orb" aria-hidden="true"></div>
+      <h1>FRIDAY is offline</h1>
+      <p>
+        The network is unreachable right now. FRIDAY is local-first, so the
+        cockpit will reconnect as soon as you are back online.
+      </p>
+      <div class="actions">
+        <button class="button" type="button" id="retry">Retry</button>
+        <a class="button" href="/hud">Open the HUD</a>
+      </div>
+      <p class="hint">This shell was served from the on-device cache.</p>
+    </main>
+    <script>
+      "use strict";
+      // Retry the original navigation (reload) when the user taps Retry.
+      document.getElementById("retry").addEventListener("click", function () {
+        window.location.reload();
+      });
+      // Register the root-scope service worker so the app is installable and the
+      // offline shell stays available. No-op where service workers are absent.
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker
+            .register("/service-worker.js", { scope: "/" })
+            .catch(function () {
+              /* registration failures are non-fatal for the offline shell */
+            });
+        });
+      }
+    </script>
+  </body>
+</html>

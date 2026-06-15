@@ -1,0 +1,15 @@
+{
+  "name": "FRIDAY",
+  "short_name": "FRIDAY",
+  "description": "FRIDAY — your local-first personal AI cockpit.",
+  "lang": "en",
+  "dir": "ltr",
+  "display": "standalone",
+  "orientation": "any",
+  "start_url": "/hud",
+  "scope": "/",
+  "background_color": "#05060a",
+  "theme_color": "#0a84ff",
+  "categories": ["productivity", "utilities"],
+  "icons": []
+}

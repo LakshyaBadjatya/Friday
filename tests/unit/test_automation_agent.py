@@ -22,12 +22,23 @@ wall-clock. The executor is a pure loop over an in-memory ``Job``.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from pydantic import ValidationError
 
 from friday.agents.automation import AutomationAgent, Job
 from friday.agents.base import Agent, AgentResult
 from friday.core.state import GraphState, Mode
+from friday.providers.llm import FakeLLM
+from friday.reminders.store import SQLiteReminderStore
+from friday.tools.base import Tool
+from friday.tools.registry import ToolRegistry
+from friday.tools.reminders import (
+    CompleteReminderTool,
+    CreateReminderTool,
+    ListRemindersTool,
+)
 
 
 def _state(job: Job, session_id: str = "auto-test") -> GraphState:
@@ -167,3 +178,76 @@ async def test_empty_job_runs_no_steps_and_reports_so() -> None:
 
     assert result.memory_writes == []
     assert "0" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# Reminder tools via the registry (Tier 1)
+# --------------------------------------------------------------------------- #
+def _reminder_registry(store: SQLiteReminderStore) -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(cast(Tool, CreateReminderTool(store)))
+    registry.register(cast(Tool, ListRemindersTool(store)))
+    registry.register(cast(Tool, CompleteReminderTool(store)))
+    return registry
+
+
+def _reminder_state(reminder: dict[str, object]) -> GraphState:
+    return GraphState(
+        session_id="auto-reminder",
+        mode=Mode.AUTOMATION,
+        user_input="remind me to call mom tomorrow",
+        scratchpad={"reminder": reminder},
+    )
+
+
+def test_automation_allows_reminder_tools_when_registry_wired(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    store = SQLiteReminderStore(str(tmp_path / "r.db"), clock=lambda: 0.0)
+    agent = AutomationAgent(registry=_reminder_registry(store))
+    # The reminder tool names are now in the allow-list (registry enforces it).
+    assert "create_reminder" in agent.allowed_tools
+    assert "list_reminders" in agent.allowed_tools
+    assert "complete_reminder" in agent.allowed_tools
+
+
+async def test_automation_creates_reminder_through_the_tool(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A scripted FakeLLM stands in for the (offline) model wiring; the agent
+    # reaches the reminder tool through the registry on a reminder-shaped request,
+    # so no scripted response is consumed — the path is pure registry dispatch.
+    _llm = FakeLLM(responses=[])
+    store = SQLiteReminderStore(str(tmp_path / "r.db"), clock=lambda: 0.0)
+    agent = AutomationAgent(registry=_reminder_registry(store))
+
+    result = await agent.run(
+        _reminder_state(
+            {"text": "call mom", "due_at": "2026-06-16T09:00:00+00:00"}
+        )
+    )
+
+    assert isinstance(result, AgentResult)
+    assert result.confidence == 1.0
+    assert "call mom" in result.output
+    # The reminder really landed in the store via the tool.
+    rows = store.list_reminders(status="all")
+    assert [r.text for r in rows] == ["call mom"]
+    # And the tool call was recorded for audit.
+    assert [c.name for c in result.tool_calls_made] == ["create_reminder"]
+
+
+async def test_automation_reminder_path_without_registry_runs_job() -> None:
+    # With no registry wired, a reminder-shaped request is ignored entirely: the
+    # agent runs the staged job executor exactly as before (no reminder action),
+    # so the bare constructor's behaviour is unchanged.
+    agent = AutomationAgent()
+    state = GraphState(
+        session_id="auto-no-reg",
+        mode=Mode.AUTOMATION,
+        user_input="remind me",
+        scratchpad={
+            "reminder": {"text": "ignored"},
+            "job": {"steps": ["s0", "s1"], "max_steps": 5},
+        },
+    )
+    result = await agent.run(state)
+    assert isinstance(result, AgentResult)
+    # The job ran; the reminder request was not actioned (no registry).
+    assert result.memory_writes == ["s0", "s1"]

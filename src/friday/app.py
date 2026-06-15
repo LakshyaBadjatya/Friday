@@ -44,6 +44,7 @@ from friday.api.routes_admin import router as admin_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_rag import router as rag_router
+from friday.api.routes_reminders import router as reminders_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
 from friday.api.routes_voice import router as voice_router
@@ -72,6 +73,7 @@ from friday.providers.llm import (
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.rag.ingest import DocumentIngestor
+from friday.reminders.store import SQLiteReminderStore
 from friday.studio.generator import (
     MeshyText3D,
     ProceduralGenerator,
@@ -82,6 +84,11 @@ from friday.tools.base import Tool
 from friday.tools.home import HomeControlTool
 from friday.tools.notify import NotifyTool
 from friday.tools.registry import ToolRegistry
+from friday.tools.reminders import (
+    CompleteReminderTool,
+    CreateReminderTool,
+    ListRemindersTool,
+)
 from friday.tools.web_search import WebSearchTool
 
 logger = get_logger("friday.app")
@@ -195,16 +202,41 @@ def _build_vector(
     return SQLiteVectorStore(vec_path, embedder=embedder, dim=settings.embedding_dim)
 
 
+def _build_reminder_store(settings: Settings) -> SQLiteReminderStore:
+    """Build the local-first SQLite reminder store alongside the long-term DB.
+
+    Reuses ``memory_db_path``: the reminders live in a sibling file (``*.rem.db``)
+    next to the long-term database so they share the gitignored ``data/``
+    directory; ``":memory:"`` stays ephemeral. The store's clock is left at its
+    wall-clock default (only ``created_at`` uses it); tested paths inject their
+    own clock and ``due()`` is driven by a passed timestamp, never the wall clock.
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        rem_path = ":memory:"
+    else:
+        base = Path(db_path)
+        rem_path = str(base.with_suffix(base.suffix + ".rem"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteReminderStore(rem_path)
+
+
 def _build_registry(
-    audit: AuditLog | None = None, metrics: Metrics | None = None
+    reminder_store: SQLiteReminderStore,
+    audit: AuditLog | None = None,
+    metrics: Metrics | None = None,
 ) -> ToolRegistry:
-    """Build the tool registry with every Phase-2 tool registered.
+    """Build the tool registry with every Phase-2 tool plus the reminder tools.
 
     Registers the keyless web search tool plus the side-effecting notify and home
-    tools (their own flag/allow-list/confirm gates keep them safe). Each tool
-    satisfies the ``Tool`` protocol structurally, but a concrete ``args_model``
-    (``type[SomeArgs]``) trips the protocol's invariant ``type[BaseModel]`` field
-    under nominal checking; cast to the protocol to register.
+    tools (their own flag/allow-list/confirm gates keep them safe), and the three
+    Tier-1 reminder tools (``create_reminder``/``list_reminders``/
+    ``complete_reminder``) backed by ``reminder_store``. The reminder tools write
+    local personal data only, so they are non-side-effecting and skip the
+    confirm-step. Each tool satisfies the ``Tool`` protocol structurally, but a
+    concrete ``args_model`` (``type[SomeArgs]``) trips the protocol's invariant
+    ``type[BaseModel]`` field under nominal checking; cast to the protocol to
+    register.
 
     When an :class:`~friday.observability.audit.AuditLog` / :class:`Metrics` are
     passed (the app wires the process-wide instances), every ``execute`` records a
@@ -215,6 +247,9 @@ def _build_registry(
     registry.register(cast(Tool, WebSearchTool()))
     registry.register(cast(Tool, NotifyTool()))
     registry.register(cast(Tool, HomeControlTool()))
+    registry.register(cast(Tool, CreateReminderTool(reminder_store)))
+    registry.register(cast(Tool, ListRemindersTool(reminder_store)))
+    registry.register(cast(Tool, CompleteReminderTool(reminder_store)))
     return registry
 
 
@@ -230,7 +265,8 @@ def _build_agents(
     * ``analysis`` — evidence-grounded synthesis over the web-search tool + LLM.
     * ``knowledge`` — hybrid grounded retrieval over the persistent SQLite vector
       store + recent long-term facts, citing each chunk's ``source_id``.
-    * ``automation`` — bounded multi-step job executor (no tools).
+    * ``automation`` — bounded multi-step job executor; also reaches the Tier-1
+      reminder tools through the shared registry on reminder-shaped requests.
     * ``device`` — confirm-gated, allow-listed home control via the ``home`` tool.
     * ``alerting`` — deduped/rate-limited notifications via the ``notify`` tool;
       "now" comes from the injected wall clock (the agent windows on it).
@@ -242,7 +278,7 @@ def _build_agents(
             store=vector, memory=ShortTermMemory(), long_term=long_term
         )
     )
-    agents.register(AutomationAgent())
+    agents.register(AutomationAgent(registry=registry))
     agents.register(DeviceAgent(registry))
     agents.register(
         AlertingAgent(registry, clock=time.monotonic, settings=settings)
@@ -279,6 +315,10 @@ class AppRuntime:
     #: The shared persistent vector store — the same one the Knowledge agent
     #: retrieves from, reused by personal RAG so ingested docs are answerable.
     vector: SQLiteVectorStore
+    #: The shared reminder store — the same one the reminder tools and the
+    #: ``/reminders`` routes read/write, so an agent-created and an HTTP-created
+    #: reminder land in the same place.
+    reminder_store: SQLiteReminderStore
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -295,7 +335,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
     metrics = Metrics()
     flag_overrides: dict[str, bool] = {}
 
-    registry = _build_registry(audit=audit, metrics=metrics)
+    reminder_store = _build_reminder_store(settings)
+    registry = _build_registry(reminder_store, audit=audit, metrics=metrics)
     llm = _build_llm(settings)
     embedder = _build_embedder(settings)
     long_term = _build_long_term(settings)
@@ -324,6 +365,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         flag_overrides=flag_overrides,
         llm=llm,
         vector=vector,
+        reminder_store=reminder_store,
     )
 
 
@@ -442,6 +484,20 @@ def _wire_rag(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     )
 
 
+def _wire_reminders(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared reminder store on ``app.state`` when reminders are enabled.
+
+    The ``/reminders`` routes read ``app.state.reminder_store`` — the *same*
+    store the registered reminder tools (and so the Automation agent) write to —
+    so an HTTP-created reminder and an agent-created one share state. Building it
+    only when ``enable_reminders`` is set keeps the offline default untouched (the
+    routes self-guard on the flag and 404 when off).
+    """
+    if not settings.enable_reminders:
+        return
+    app.state.reminder_store = runtime.reminder_store
+
+
 def _install_runtime(app: FastAPI, settings: Settings) -> None:
     """Assemble the runtime graph and stash every shared piece on ``app.state``.
 
@@ -462,6 +518,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.flag_overrides = runtime.flag_overrides
     _wire_studio(app, settings, runtime.llm)
     _wire_rag(app, settings, runtime)
+    _wire_reminders(app, settings, runtime)
 
 
 def create_app() -> FastAPI:
@@ -515,6 +572,11 @@ def create_app() -> FastAPI:
     # FRIDAY_ENABLE_RAG (404 when off), so the offline default exposes no RAG
     # surface. The DocumentIngestor is wired onto app.state only when enabled.
     app.include_router(rag_router)
+    # Reminders & tasks (Tier 1) — always registered but self-guards on
+    # FRIDAY_ENABLE_REMINDERS (404 when off), so the offline default exposes no
+    # reminder surface. The shared reminder store is wired onto app.state only
+    # when enabled.
+    app.include_router(reminders_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

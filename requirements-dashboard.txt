@@ -1,0 +1,12 @@
+# Optional UI deps — install via: make install-dashboard
+#
+# The Streamlit dashboard (dashboard/app.py) is a SEPARATE UI process that talks
+# to the running FRIDAY API over HTTP. These deps are deliberately kept OUT of
+# pyproject.toml / the uv lock so `uv sync` and the test gate stay fast and
+# dependency-light, and so no test ever imports streamlit. Install into the
+# project venv with:
+#     make install-dashboard        # uv pip install -r requirements-dashboard.txt
+# then launch the UI with:
+#     make dashboard                # uv run streamlit run dashboard/app.py
+streamlit
+requests

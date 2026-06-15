@@ -26,6 +26,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -37,6 +38,7 @@ from friday.agents.automation import AutomationAgent
 from friday.agents.base import AgentRegistry
 from friday.agents.device import DeviceAgent
 from friday.agents.knowledge import KnowledgeAgent
+from friday.api.routes_admin import router as admin_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_voice import router as voice_router
@@ -47,6 +49,9 @@ from friday.logging import configure_logging, get_logger
 from friday.memory.long_term import SQLiteLongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import SQLiteVectorStore
+from friday.observability.audit import AuditLog
+from friday.observability.metrics import Metrics
+from friday.observability.tracing import Tracer
 from friday.providers.embeddings import (
     EmbeddingProvider,
     FakeEmbeddings,
@@ -146,7 +151,9 @@ def _build_vector(
     return SQLiteVectorStore(vec_path, embedder=embedder, dim=settings.embedding_dim)
 
 
-def _build_registry() -> ToolRegistry:
+def _build_registry(
+    audit: AuditLog | None = None, metrics: Metrics | None = None
+) -> ToolRegistry:
     """Build the tool registry with every Phase-2 tool registered.
 
     Registers the keyless web search tool plus the side-effecting notify and home
@@ -154,8 +161,13 @@ def _build_registry() -> ToolRegistry:
     satisfies the ``Tool`` protocol structurally, but a concrete ``args_model``
     (``type[SomeArgs]``) trips the protocol's invariant ``type[BaseModel]`` field
     under nominal checking; cast to the protocol to register.
+
+    When an :class:`~friday.observability.audit.AuditLog` / :class:`Metrics` are
+    passed (the app wires the process-wide instances), every ``execute`` records a
+    redacted tool-call audit row and bumps the ``tool_calls`` counter (build-spec
+    §11). They default to ``None`` so a bare registry behaves exactly as before.
     """
-    registry = ToolRegistry()
+    registry = ToolRegistry(audit=audit, metrics=metrics)
     registry.register(cast(Tool, WebSearchTool()))
     registry.register(cast(Tool, NotifyTool()))
     registry.register(cast(Tool, HomeControlTool()))
@@ -194,31 +206,87 @@ def _build_agents(
     return agents
 
 
-def build_orchestrator(settings: Settings) -> Orchestrator:
-    """Assemble a fully-wired :class:`Orchestrator` from ``settings``.
+@dataclass
+class AppRuntime:
+    """The shared runtime graph assembled at startup.
 
-    Builds the shared tool registry, the LLM provider, the local-first SQLite
-    long-term + persistent vector stores (with the configured embedder), and the
-    populated agent registry. The stores are injected into both the Knowledge
-    agent (hybrid grounding) and the orchestrator (write-consent + forget), so
-    AUTOMATION / DEVICE_CONTROL / ALERTING turns dispatch to their specialist
-    agents and SECURITY_LOCKDOWN runs the lockdown subgraph.
+    Bundles the orchestrator with the long-lived pieces the ``/admin`` routes read
+    back (build-spec §11): the process-wide observability stores
+    (:class:`Tracer` / :class:`AuditLog` / :class:`Metrics`), the shared tool
+    :class:`~friday.tools.registry.ToolRegistry`, the shared per-session
+    :class:`~friday.memory.short_term.ShortTermMemory`, the durable
+    :class:`~friday.memory.long_term.SQLiteLongTermStore`, and the mutable
+    runtime feature-flag override holder. ``create_app`` stashes each of these on
+    ``app.state`` so the admin views and the orchestrator emit/observe the *same*
+    instances.
     """
-    registry = _build_registry()
+
+    orchestrator: Orchestrator
+    tracer: Tracer
+    audit: AuditLog
+    metrics: Metrics
+    registry: ToolRegistry
+    short_term: ShortTermMemory
+    long_term: SQLiteLongTermStore
+    flag_overrides: dict[str, bool]
+
+
+def build_runtime(settings: Settings) -> AppRuntime:
+    """Assemble the full runtime graph from ``settings``.
+
+    Constructs the process-wide observability stores first, injects the audit +
+    metrics into the shared tool registry (so every tool call is audited and
+    counted) and the tracer + metrics into the orchestrator (so every turn opens a
+    trace and bumps the request/by-mode counters), and returns everything bundled
+    in an :class:`AppRuntime` so the admin API can read the same instances.
+    """
+    tracer = Tracer()
+    audit = AuditLog()
+    metrics = Metrics()
+    flag_overrides: dict[str, bool] = {}
+
+    registry = _build_registry(audit=audit, metrics=metrics)
     llm = _build_llm(settings)
     embedder = _build_embedder(settings)
     long_term = _build_long_term(settings)
     vector = _build_vector(settings, embedder)
     agents = _build_agents(settings, registry, llm, vector, long_term)
-    return Orchestrator(
+    short_term = ShortTermMemory()
+    orchestrator = Orchestrator(
         llm=llm,
         registry=registry,
-        memory=ShortTermMemory(),
+        memory=short_term,
         persona_path=_PERSONA_PATH,
         agents=agents,
         long_term=long_term,
         vector=vector,
+        tracer=tracer,
+        metrics=metrics,
     )
+    return AppRuntime(
+        orchestrator=orchestrator,
+        tracer=tracer,
+        audit=audit,
+        metrics=metrics,
+        registry=registry,
+        short_term=short_term,
+        long_term=long_term,
+        flag_overrides=flag_overrides,
+    )
+
+
+def build_orchestrator(settings: Settings) -> Orchestrator:
+    """Assemble a fully-wired :class:`Orchestrator` from ``settings``.
+
+    Thin wrapper over :func:`build_runtime` for callers that only need the
+    orchestrator (the observability stores are still constructed and injected, but
+    not surfaced). The shared tool registry, LLM provider, local-first SQLite
+    long-term + persistent vector stores (with the configured embedder), and the
+    populated agent registry are wired so AUTOMATION / DEVICE_CONTROL / ALERTING
+    turns dispatch to their specialist agents and SECURITY_LOCKDOWN runs the
+    lockdown subgraph.
+    """
+    return build_runtime(settings).orchestrator
 
 
 def _build_voice_stt(settings: Settings) -> STTProvider:
@@ -260,11 +328,32 @@ def _wire_voice(app: FastAPI, settings: Settings) -> None:
     app.state.voice_tts = _build_voice_tts(settings)
 
 
+def _install_runtime(app: FastAPI, settings: Settings) -> None:
+    """Assemble the runtime graph and stash every shared piece on ``app.state``.
+
+    The orchestrator, the process-wide observability stores (tracer / audit /
+    metrics), the shared tool registry, the short-term + long-term memory, and the
+    mutable runtime flag-override holder all land on ``app.state`` so the
+    ``/admin`` routes read back the exact instances the turn loop emits into.
+    """
+    runtime = build_runtime(settings)
+    app.state.settings = settings
+    app.state.orchestrator = runtime.orchestrator
+    app.state.tracer = runtime.tracer
+    app.state.audit = runtime.audit
+    app.state.metrics = runtime.metrics
+    app.state.registry = runtime.registry
+    app.state.short_term = runtime.short_term
+    app.state.long_term = runtime.long_term
+    app.state.flag_overrides = runtime.flag_overrides
+
+
 def create_app() -> FastAPI:
     """Construct the FRIDAY FastAPI application.
 
-    The orchestrator is built in the lifespan startup so configuration is read
-    once per process and the dependency graph is shared across requests.
+    The runtime graph (orchestrator + observability stores) is built in the
+    lifespan startup so configuration is read once per process and the dependency
+    graph is shared across requests.
     """
 
     @asynccontextmanager
@@ -272,8 +361,7 @@ def create_app() -> FastAPI:
         settings = get_settings()
         configure_logging(json_logs=settings.log_json, level=settings.log_level)
         logger.info("FRIDAY starting up", extra={"llm_provider": settings.llm_provider})
-        app.state.settings = settings
-        app.state.orchestrator = build_orchestrator(settings)
+        _install_runtime(app, settings)
         _wire_voice(app, settings)
         yield
         logger.info("FRIDAY shutting down")
@@ -285,13 +373,14 @@ def create_app() -> FastAPI:
     # (404 / socket refusal when off), so the offline default exposes no voice UX.
     app.include_router(voice_router)
     app.include_router(ws_router)
+    # The admin/observability control plane (Phase 5, Stage 2A).
+    app.include_router(admin_router)
 
-    # Build the orchestrator eagerly too so a TestClient that does not trigger
-    # the lifespan (or any direct create_app() user) still has a working app.
-    # The lifespan rebuild is harmless and keeps per-process config fresh.
+    # Build the runtime eagerly too so a TestClient that does not trigger the
+    # lifespan (or any direct create_app() user) still has a working app. The
+    # lifespan rebuild is harmless and keeps per-process config fresh.
     settings = get_settings()
-    app.state.settings = settings
-    app.state.orchestrator = build_orchestrator(settings)
+    _install_runtime(app, settings)
     _wire_voice(app, settings)
 
     return app

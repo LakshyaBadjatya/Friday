@@ -1,0 +1,40 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
+
+# uv
+uv.lock.tmp
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Runtime artifacts
+*.log
+data/
+audio_out/
+chroma/

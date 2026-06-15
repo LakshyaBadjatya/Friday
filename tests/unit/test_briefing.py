@@ -51,11 +51,13 @@ def _titles(briefing: Briefing) -> list[str]:
 # --------------------------------------------------------------------------- #
 async def test_reminders_bucketed_overdue_due_today_upcoming() -> None:
     store = _store()
-    # "now" is midday on 2026-06-15.
-    now = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
-    store.add("call dentist", due_at="2026-06-14T09:00:00+00:00")  # overdue
-    store.add("standup", due_at="2026-06-15T08:00:00+00:00")  # due today (<= now)
-    store.add("file taxes", due_at="2026-06-20T09:00:00+00:00")  # upcoming
+    # "now" is early morning (08:00) on 2026-06-15.
+    now = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+    store.add("call dentist", due_at="2026-06-14T09:00:00+00:00")  # overdue (yesterday)
+    store.add("standup", due_at="2026-06-15T08:00:00+00:00")  # due today (== now)
+    store.add("review PRs", due_at="2026-06-15T03:00:00+00:00")  # due today (passed)
+    store.add("daily sync", due_at="2026-06-15T17:00:00+00:00")  # due LATER today
+    store.add("file taxes", due_at="2026-06-20T09:00:00+00:00")  # upcoming (next week)
 
     service = BriefingService(store, owner_address="Boss")
     briefing = await service.build(now)
@@ -64,14 +66,59 @@ async def test_reminders_bucketed_overdue_due_today_upcoming() -> None:
     due_today = _section(briefing, "Due today")
     upcoming = _section(briefing, "Upcoming")
 
+    # Yesterday -> Overdue, and only that.
     assert any("call dentist" in line for line in overdue)
     assert not any("standup" in line for line in overdue)
+    assert not any("daily sync" in line for line in overdue)
 
+    # Every reminder whose calendar date is today lands in Due today —
+    # whether the time has passed (review PRs, standup) or is still ahead
+    # (daily sync at 17:00 while now is 08:00).
     assert any("standup" in line for line in due_today)
+    assert any("review PRs" in line for line in due_today)
+    assert any("daily sync" in line for line in due_today)
     assert not any("call dentist" in line for line in due_today)
+    assert not any("file taxes" in line for line in due_today)
 
+    # A reminder due later today must NOT leak into Upcoming.
     assert any("file taxes" in line for line in upcoming)
+    assert not any("daily sync" in line for line in upcoming)
     assert not any("standup" in line for line in upcoming)
+
+
+async def test_reminder_due_later_today_lands_in_due_today_not_upcoming() -> None:
+    store = _store()
+    # now is 08:00; the reminder is due at 17:00 the same calendar day.
+    now = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+    store.add("evening call", due_at="2026-06-15T17:00:00+00:00")
+
+    service = BriefingService(store, owner_address="Boss")
+    briefing = await service.build(now)
+
+    assert any("evening call" in line for line in _section(briefing, "Due today"))
+    assert not any(
+        "evening call" in line for line in _section(briefing, "Upcoming")
+    )
+    assert not any(
+        "evening call" in line for line in _section(briefing, "Overdue")
+    )
+
+
+async def test_upcoming_section_caps_at_limit() -> None:
+    store = _store()
+    now = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+    # Seven reminders all dated strictly after today; only five should show.
+    for day in range(16, 23):  # 2026-06-16 .. 2026-06-22
+        store.add(f"task {day}", due_at=f"2026-06-{day}T09:00:00+00:00")
+
+    service = BriefingService(store, owner_address="Boss")
+    briefing = await service.build(now)
+
+    upcoming = _section(briefing, "Upcoming")
+    assert len(upcoming) == 5
+    # Soonest-due first: the earliest five dates are listed.
+    assert any("task 16" in line for line in upcoming)
+    assert not any("task 22" in line for line in upcoming)
 
 
 async def test_empty_reminder_buckets_have_placeholder_lines() -> None:

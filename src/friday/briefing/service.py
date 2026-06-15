@@ -121,35 +121,38 @@ class BriefingService:
 
     # -- reminder buckets -------------------------------------------------- #
     def _reminder_sections(self, now: datetime) -> list[BriefingSection]:
-        """Bucket open reminders into overdue / due today / upcoming.
+        """Bucket open reminders into overdue / due today / upcoming by date.
 
-        Driven by ``now``: ``due(now_iso)`` returns every open reminder at or
-        before ``now`` (the overdue/due set); a reminder whose ``due_at`` date
-        equals ``now``'s date is "due today", the rest are "overdue". Open
-        reminders with a future ``due_at`` (not in the due set) are "upcoming";
-        undated reminders never appear in any time bucket.
+        Bucketing is by ``due_at``'s **calendar date** relative to ``now``'s
+        date, independent of the time of day:
+
+        * **Due today** — ``due_at`` falls on ``now``'s date (whether or not the
+          time has already passed; a reminder at 17:00 while ``now`` is 08:00 is
+          still due today, not upcoming).
+        * **Overdue** — ``due_at`` is on a date strictly before today.
+        * **Upcoming** — ``due_at`` is on a date strictly after today (capped at
+          :data:`_UPCOMING_LIMIT`).
+
+        Undated reminders (``due_at is None``) never appear in any time bucket.
+        ``list_reminders(status="open")`` already returns reminders soonest-due
+        first, so each bucket preserves that ordering.
         """
-        now_iso = now.isoformat()
-        due_now = self._reminders.due(now_iso)
-        due_ids = {r.id for r in due_now}
         today = now.date().isoformat()
 
         overdue: list[str] = []
         due_today: list[str] = []
-        for reminder in due_now:
-            line = self._reminder_line(reminder)
-            if reminder.due_at is not None and reminder.due_at[:10] == today:
-                due_today.append(line)
-            else:
-                overdue.append(line)
-
         upcoming: list[str] = []
         for reminder in self._reminders.list_reminders(status="open"):
-            if reminder.id in due_ids or reminder.due_at is None:
+            if reminder.due_at is None:
                 continue
-            upcoming.append(self._reminder_line(reminder))
-            if len(upcoming) >= _UPCOMING_LIMIT:
-                break
+            line = self._reminder_line(reminder)
+            due_date = reminder.due_at[:10]
+            if due_date == today:
+                due_today.append(line)
+            elif due_date < today:
+                overdue.append(line)
+            elif len(upcoming) < _UPCOMING_LIMIT:
+                upcoming.append(line)
 
         return [
             BriefingSection(

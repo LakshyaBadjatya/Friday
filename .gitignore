@@ -43,3 +43,7 @@ chroma/
 # Playwright MCP artifacts + stray screenshots (keep assets/)
 .playwright-mcp/
 /*.png
+
+# Internal planning docs — kept locally, never published
+docs/
+FRIDAY-build-spec.md

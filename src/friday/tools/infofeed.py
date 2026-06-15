@@ -30,8 +30,11 @@ rather than parsed.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from typing import Any
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -67,6 +70,60 @@ _TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 # Atom uses a namespace; tags arrive as ``{http://www.w3.org/2005/Atom}entry``.
 _ATOM_NS = "http://www.w3.org/2005/Atom"
+
+# SSRF guard: only these schemes may be fetched.
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+
+class _BlockedUrlError(Exception):
+    """Raised when a feed URL is unsafe to fetch (SSRF guard)."""
+
+
+def _addr_is_blocked(ip_text: str) -> bool:
+    """True if ``ip_text`` is a non-public address we must never connect to."""
+    try:
+        addr = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return True  # unparseable -> block, fail closed
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _validate_public_url(url: str) -> None:
+    """Raise :class:`_BlockedUrlError` if ``url`` is unsafe to fetch (SSRF guard).
+
+    A feed URL is attacker-influencable (a malicious feed or a prompt-injected
+    instruction could point it inward), so before any request we: reject any
+    scheme other than http/https; resolve the host and reject if ANY resolved
+    address is private / loopback / link-local / reserved / multicast /
+    unspecified — closing off the cloud metadata endpoint (169.254.169.254),
+    localhost services and the internal network. This pairs with
+    ``follow_redirects=False`` in :meth:`InfofeedTool._fetch` so a 3xx cannot
+    bounce past this check to a blocked target.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        raise _BlockedUrlError(f"scheme {parsed.scheme!r} not allowed (http/https only)")
+    host = parsed.hostname
+    if not host:
+        raise _BlockedUrlError("url has no host")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise _BlockedUrlError(f"could not resolve host {host!r}: {exc}") from exc
+    for info in infos:
+        ip_text = str(info[4][0])
+        if _addr_is_blocked(ip_text):
+            raise _BlockedUrlError(
+                f"host {host!r} resolves to a blocked address ({ip_text})"
+            )
 
 
 class FeedArgs(BaseModel):
@@ -245,6 +302,18 @@ class InfofeedTool:
         for attempt in range(2):
             try:
                 response = await self._fetch(args.url)
+            except _BlockedUrlError as exc:
+                # SSRF guard tripped — do not retry, never fabricate.
+                logger.warning("infofeed blocked unsafe url %r: %s", args.url, exc)
+                return ToolResult(
+                    ok=False,
+                    data={},
+                    error=ToolError(
+                        code="url_not_allowed",
+                        message=str(exc),
+                        retriable=False,
+                    ),
+                )
             except _RETRIABLE_EXCEPTIONS as exc:
                 last_exc = exc
                 logger.warning(
@@ -305,6 +374,14 @@ class InfofeedTool:
         )
 
     async def _fetch(self, url: str) -> httpx.Response:
-        """Issue the feed GET and return the raw response (may raise)."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        """Validate (SSRF guard) then issue the feed GET (may raise).
+
+        Raises :class:`_BlockedUrlError` for an unsafe target before any socket
+        is opened. ``follow_redirects=False`` ensures a 3xx response cannot
+        bounce the request to a blocked address after the check.
+        """
+        _validate_public_url(url)
+        async with httpx.AsyncClient(
+            timeout=self._timeout, follow_redirects=False
+        ) as client:
             return await client.get(url, headers={"User-Agent": _USER_AGENT})

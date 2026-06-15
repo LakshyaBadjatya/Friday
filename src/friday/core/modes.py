@@ -1,10 +1,11 @@
-"""Mode node functions over :class:`GraphState` (Task 1.9).
+"""Mode node functions over :class:`GraphState` (Task 1.9; Phase-2 extended).
 
 These are thin wrappers binding an :class:`~friday.core.orchestrator.Orchestrator`
-to the four mode nodes the graph wires together: ROUTING, CONVERSATION, RESEARCH,
-and CLARIFY. Each returns the (mutated) :class:`GraphState` so it composes cleanly
-whether driven by LangGraph or by the fallback state machine — both consume the
-same node contract.
+to the mode nodes the graph wires together: ROUTING, CONVERSATION, RESEARCH,
+CLARIFY, and the Phase-2 specialist nodes AUTOMATION, DEVICE_CONTROL, ALERTING,
+and the defensive SECURITY_LOCKDOWN subgraph node. Each returns the (mutated)
+:class:`GraphState` so it composes cleanly whether driven by LangGraph or by the
+fallback state machine — both consume the same node contract.
 
 The functions delegate *all* behaviour to the orchestrator's ``node_*`` methods;
 they exist as a stable, framework-agnostic seam so ``graph.py`` can register node
@@ -66,5 +67,41 @@ def clarify_node(orchestrator: Orchestrator) -> ModeNode:
 
     async def _node(state: GraphState) -> GraphState:
         return await orchestrator.node_clarify(state)
+
+    return _node
+
+
+def automation_node(orchestrator: Orchestrator) -> ModeNode:
+    """Build the AUTOMATION node bound to ``orchestrator``."""
+
+    async def _node(state: GraphState) -> GraphState:
+        return await orchestrator.node_automation(state)
+
+    return _node
+
+
+def device_node(orchestrator: Orchestrator) -> ModeNode:
+    """Build the DEVICE_CONTROL node bound to ``orchestrator``."""
+
+    async def _node(state: GraphState) -> GraphState:
+        return await orchestrator.node_device(state)
+
+    return _node
+
+
+def alerting_node(orchestrator: Orchestrator) -> ModeNode:
+    """Build the ALERTING node bound to ``orchestrator``."""
+
+    async def _node(state: GraphState) -> GraphState:
+        return await orchestrator.node_alerting(state)
+
+    return _node
+
+
+def security_lockdown_node(orchestrator: Orchestrator) -> ModeNode:
+    """Build the SECURITY_LOCKDOWN subgraph node bound to ``orchestrator``."""
+
+    async def _node(state: GraphState) -> GraphState:
+        return await orchestrator.node_security_lockdown(state)
 
     return _node

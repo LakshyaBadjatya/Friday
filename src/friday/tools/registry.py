@@ -61,10 +61,12 @@ class ToolRegistry:
         name: str,
         raw_args: dict[str, object],
         allowed_tools: frozenset[str] | set[str],
+        *,
+        confirmed: bool = False,
     ) -> ToolResult:
-        """Validate, then dispatch the named tool.
+        """Validate, gate side-effects, then dispatch the named tool.
 
-        Order of checks matters and is part of the contract:
+        Order of checks matters and is part of the contract (build-spec §12):
 
         1. If ``name`` is not in ``allowed_tools`` -> raise
            :class:`friday.errors.PermissionError` (tool never runs).
@@ -73,7 +75,13 @@ class ToolRegistry:
         3. Validate ``raw_args`` against the tool's ``args_model``. On failure
            return ``ToolResult(ok=False, error=ToolError(code="bad_args"))``
            *without* invoking the tool.
-        4. Otherwise invoke the tool with the validated args and return its
+        4. **Confirm-step.** If the tool is ``side_effecting`` *and* not
+           ``idempotent`` *and* ``confirmed`` is ``False``, return
+           ``ToolResult(ok=False, error=ToolError(code="confirmation_required"))``
+           carrying ``data={"needs_confirmation": True, "tool": name}`` *without*
+           invoking the tool. A read-only or idempotent tool, or any tool called
+           with ``confirmed=True``, skips this gate.
+        5. Otherwise invoke the tool with the validated args and return its
            :class:`ToolResult`.
         """
         if name not in allowed_tools:
@@ -92,6 +100,20 @@ class ToolRegistry:
                 error=ToolError(
                     code="bad_args",
                     message=f"invalid arguments for tool {name!r}: {exc.errors()}",
+                    retriable=False,
+                ),
+            )
+
+        if tool.side_effecting and not tool.idempotent and not confirmed:
+            return ToolResult(
+                ok=False,
+                data={"needs_confirmation": True, "tool": name},
+                error=ToolError(
+                    code="confirmation_required",
+                    message=(
+                        f"tool {name!r} is side-effecting and not idempotent; "
+                        "explicit confirmation is required before execution"
+                    ),
                     retriable=False,
                 ),
             )

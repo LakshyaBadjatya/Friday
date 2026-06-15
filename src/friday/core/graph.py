@@ -23,10 +23,14 @@ from __future__ import annotations
 import logging
 
 from friday.core.modes import (
+    alerting_node,
+    automation_node,
     clarify_node,
     conversation_node,
+    device_node,
     research_node,
     routing_node,
+    security_lockdown_node,
 )
 from friday.core.orchestrator import Orchestrator
 from friday.core.state import GraphState, Mode
@@ -34,11 +38,16 @@ from friday.core.state import GraphState, Mode
 logger = logging.getLogger("friday.core.graph")
 
 # Map a routed Mode to the name of the node that handles it. ROUTING normalizes
-# every non-clarify, non-research decision to CONVERSATION, so this map is total.
+# every mode without a dedicated node to CONVERSATION, so this map is total over
+# the modes ``node_routing`` can leave on the state.
 _MODE_TO_NODE: dict[Mode, str] = {
     Mode.RESEARCH: "research",
     Mode.CLARIFY: "clarify",
     Mode.CONVERSATION: "conversation",
+    Mode.AUTOMATION: "automation",
+    Mode.DEVICE_CONTROL: "device",
+    Mode.ALERTING: "alerting",
+    Mode.SECURITY_LOCKDOWN: "security_lockdown",
 }
 
 
@@ -52,6 +61,10 @@ class ModeGraph:
         self._conversation = conversation_node(orchestrator)
         self._research = research_node(orchestrator)
         self._clarify = clarify_node(orchestrator)
+        self._automation = automation_node(orchestrator)
+        self._device = device_node(orchestrator)
+        self._alerting = alerting_node(orchestrator)
+        self._security_lockdown = security_lockdown_node(orchestrator)
 
         builder: StateGraph[GraphState, None, GraphState, GraphState] = StateGraph(
             GraphState
@@ -60,20 +73,31 @@ class ModeGraph:
         builder.add_node("conversation", self._conversation)
         builder.add_node("research", self._research)
         builder.add_node("clarify", self._clarify)
+        builder.add_node("automation", self._automation)
+        builder.add_node("device", self._device)
+        builder.add_node("alerting", self._alerting)
+        builder.add_node("security_lockdown", self._security_lockdown)
+
+        # Every mode node terminates the turn; the conditional edge fans out from
+        # routing to exactly one of them.
+        node_names = [
+            "conversation",
+            "research",
+            "clarify",
+            "automation",
+            "device",
+            "alerting",
+            "security_lockdown",
+        ]
 
         builder.add_edge(START, "routing")
         builder.add_conditional_edges(
             "routing",
             _select_node,
-            {
-                "research": "research",
-                "clarify": "clarify",
-                "conversation": "conversation",
-            },
+            {name: name for name in node_names},
         )
-        builder.add_edge("research", END)
-        builder.add_edge("clarify", END)
-        builder.add_edge("conversation", END)
+        for name in node_names:
+            builder.add_edge(name, END)
 
         self._compiled = builder.compile()
 
@@ -100,6 +124,10 @@ class _StateMachine:
             "conversation": conversation_node(orchestrator),
             "research": research_node(orchestrator),
             "clarify": clarify_node(orchestrator),
+            "automation": automation_node(orchestrator),
+            "device": device_node(orchestrator),
+            "alerting": alerting_node(orchestrator),
+            "security_lockdown": security_lockdown_node(orchestrator),
         }
 
     async def invoke(self, state: GraphState) -> GraphState:

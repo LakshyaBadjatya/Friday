@@ -29,11 +29,32 @@ ROUTER_TABLE: list[tuple[str, Mode]] = [
     ("find sources on the history of the transistor", Mode.RESEARCH),
     ("investigate why our latency regressed", Mode.RESEARCH),
     ("look up the latest benchmarks for llama models", Mode.RESEARCH),
+    # --- Automation: task / schedule / remind phrasing ---
+    ("schedule a backup job for tonight", Mode.AUTOMATION),
+    ("remind me to call the vendor at noon", Mode.AUTOMATION),
+    ("create a recurring task to rotate the logs", Mode.AUTOMATION),
+    ("automate the nightly report", Mode.AUTOMATION),
+    # --- Device control: turn on/off / lights / thermostat / device / lock ---
+    ("turn off the kitchen lights", Mode.DEVICE_CONTROL),
+    ("turn on the living room thermostat", Mode.DEVICE_CONTROL),
+    ("lock the front door", Mode.DEVICE_CONTROL),
+    ("toggle the garage device", Mode.DEVICE_CONTROL),
+    # --- Alerting: alert / notify / escalate / warn phrasing ---
+    ("alert me if the disk fills up", Mode.ALERTING),
+    ("notify the on-call team about the outage", Mode.ALERTING),
+    ("escalate this incident to ops", Mode.ALERTING),
+    ("warn me when cpu spikes", Mode.ALERTING),
+    # --- Security lockdown: lockdown / barn door / revoke / kill sessions ---
+    ("initiate lockdown now", Mode.SECURITY_LOCKDOWN),
+    ("run the barn door procedure", Mode.SECURITY_LOCKDOWN),
+    ("revoke tokens immediately", Mode.SECURITY_LOCKDOWN),
+    ("kill all sessions", Mode.SECURITY_LOCKDOWN),
     # --- Clarify: ambiguous / empty / gibberish ---
     ("", Mode.CLARIFY),
     ("   ", Mode.CLARIFY),
     ("asdfghjkl", Mode.CLARIFY),
     ("xyz qwerty", Mode.CLARIFY),
+    ("the blue one over there", Mode.CLARIFY),
 ]
 
 

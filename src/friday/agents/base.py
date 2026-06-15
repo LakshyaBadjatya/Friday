@@ -52,3 +52,30 @@ class Agent(Protocol):
     async def run(self, state: GraphState) -> AgentResult:
         """Execute the agent for one turn and return its result."""
         ...
+
+
+class AgentRegistry:
+    """An in-process registry mapping an agent's ``name`` to its instance.
+
+    The orchestrator dispatches a routed turn by looking up the agent for the
+    decided :class:`~friday.core.state.Mode` here. It is the agent-level analogue
+    of :class:`~friday.tools.registry.ToolRegistry`: ``app.py`` constructs each
+    agent with its dependencies (the tool registry, the vector store, the LLM
+    provider) and registers it, then injects the populated registry into the
+    orchestrator. Lookups are by the agent's own ``name``.
+    """
+
+    def __init__(self) -> None:
+        self._agents: dict[str, Agent] = {}
+
+    def register(self, agent: Agent) -> None:
+        """Register ``agent`` under its ``name``, replacing any prior entry."""
+        self._agents[agent.name] = agent
+
+    def get(self, name: str) -> Agent:
+        """Return the registered agent named ``name`` or raise :class:`KeyError`."""
+        return self._agents[name]
+
+    def __contains__(self, name: object) -> bool:
+        """Whether an agent is registered under ``name``."""
+        return name in self._agents

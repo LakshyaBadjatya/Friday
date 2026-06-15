@@ -23,6 +23,7 @@ relies on.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,14 +31,23 @@ from typing import cast
 
 from fastapi import FastAPI
 
+from friday.agents.alerting import AlertingAgent
+from friday.agents.analysis import AnalysisAgent
+from friday.agents.automation import AutomationAgent
+from friday.agents.base import AgentRegistry
+from friday.agents.device import DeviceAgent
+from friday.agents.knowledge import KnowledgeAgent
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
 from friday.config import Settings, get_settings
 from friday.core.orchestrator import Orchestrator
 from friday.logging import configure_logging, get_logger
 from friday.memory.short_term import ShortTermMemory
+from friday.memory.vector import InMemoryVectorStore
 from friday.providers.llm import FakeLLM, LLMProvider, NvidiaNIMProvider
 from friday.tools.base import Tool
+from friday.tools.home import HomeControlTool
+from friday.tools.notify import NotifyTool
 from friday.tools.registry import ToolRegistry
 from friday.tools.web_search import WebSearchTool
 
@@ -68,23 +78,62 @@ def _build_llm(settings: Settings) -> LLMProvider:
 
 
 def _build_registry() -> ToolRegistry:
-    """Build the tool registry with the keyless web search tool registered."""
+    """Build the tool registry with every Phase-2 tool registered.
+
+    Registers the keyless web search tool plus the side-effecting notify and home
+    tools (their own flag/allow-list/confirm gates keep them safe). Each tool
+    satisfies the ``Tool`` protocol structurally, but a concrete ``args_model``
+    (``type[SomeArgs]``) trips the protocol's invariant ``type[BaseModel]`` field
+    under nominal checking; cast to the protocol to register.
+    """
     registry = ToolRegistry()
-    # ``WebSearchTool`` satisfies the ``Tool`` protocol structurally, but its
-    # concrete ``args_model`` (``type[WebSearchArgs]``) trips the protocol's
-    # invariant ``type[BaseModel]`` field under nominal checking; cast to the
-    # protocol to register it.
     registry.register(cast(Tool, WebSearchTool()))
+    registry.register(cast(Tool, NotifyTool()))
+    registry.register(cast(Tool, HomeControlTool()))
     return registry
 
 
+def _build_agents(
+    settings: Settings, registry: ToolRegistry, llm: LLMProvider
+) -> AgentRegistry:
+    """Construct each specialist agent with its dependencies and register it.
+
+    * ``analysis`` — evidence-grounded synthesis over the web-search tool + LLM.
+    * ``knowledge`` — grounded retrieval over an in-memory vector store.
+    * ``automation`` — bounded multi-step job executor (no tools).
+    * ``device`` — confirm-gated, allow-listed home control via the ``home`` tool.
+    * ``alerting`` — deduped/rate-limited notifications via the ``notify`` tool;
+      "now" comes from the injected wall clock (the agent windows on it).
+    """
+    store = InMemoryVectorStore()
+
+    agents = AgentRegistry()
+    agents.register(AnalysisAgent(registry, llm=llm))
+    agents.register(KnowledgeAgent(store=store, memory=ShortTermMemory()))
+    agents.register(AutomationAgent())
+    agents.register(DeviceAgent(registry))
+    agents.register(
+        AlertingAgent(registry, clock=time.monotonic, settings=settings)
+    )
+    return agents
+
+
 def build_orchestrator(settings: Settings) -> Orchestrator:
-    """Assemble a fully-wired :class:`Orchestrator` from ``settings``."""
+    """Assemble a fully-wired :class:`Orchestrator` from ``settings``.
+
+    Builds the shared tool registry, the LLM provider, and the populated agent
+    registry (so AUTOMATION / DEVICE_CONTROL / ALERTING turns dispatch to their
+    specialist agents and SECURITY_LOCKDOWN runs the lockdown subgraph).
+    """
+    registry = _build_registry()
+    llm = _build_llm(settings)
+    agents = _build_agents(settings, registry, llm)
     return Orchestrator(
-        llm=_build_llm(settings),
-        registry=_build_registry(),
+        llm=llm,
+        registry=registry,
         memory=ShortTermMemory(),
         persona_path=_PERSONA_PATH,
+        agents=agents,
     )
 
 

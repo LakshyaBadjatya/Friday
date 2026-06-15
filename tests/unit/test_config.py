@@ -43,3 +43,30 @@ def test_nvidia_key_from_unprefixed_env(monkeypatch) -> None:  # type: ignore[no
 
 def test_get_settings_is_cached() -> None:
     assert get_settings() is get_settings()
+
+
+def test_phase2_field_defaults() -> None:
+    s = Settings(_env_file=None)
+    assert s.device_allowlist == []
+    assert s.alert_rate_limit_seconds == 300.0
+    assert s.alert_dedupe is True
+
+
+def test_device_allowlist_comma_split_from_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("FRIDAY_DEVICE_ALLOWLIST", "light.kitchen, switch.fan ,plug.1")
+    s = Settings(_env_file=None)
+    assert s.device_allowlist == ["light.kitchen", "switch.fan", "plug.1"]
+
+
+def test_device_allowlist_empty_env_is_empty_list(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("FRIDAY_DEVICE_ALLOWLIST", "")
+    s = Settings(_env_file=None)
+    assert s.device_allowlist == []
+
+
+def test_alerting_fields_from_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("FRIDAY_ALERT_RATE_LIMIT_SECONDS", "60")
+    monkeypatch.setenv("FRIDAY_ALERT_DEDUPE", "false")
+    s = Settings(_env_file=None)
+    assert s.alert_rate_limit_seconds == 60.0
+    assert s.alert_dedupe is False

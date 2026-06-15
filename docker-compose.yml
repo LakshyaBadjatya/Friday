@@ -1,0 +1,71 @@
+# FRIDAY — local-first container stack.
+#
+# Default stack is a single `api` service: the FastAPI app on a SQLite database
+# living in a named volume. No external database is required to run FRIDAY.
+#
+# The optional `postgres` service below is COMMENTED OUT on purpose: it documents
+# the future long-term / pgvector swap (per build spec §15) without making the
+# local default depend on it. Uncomment it only when you actually move durable
+# memory + vectors onto Postgres.
+#
+# Secrets are NOT in this file or the image: env comes from `.env` at run time.
+# NOTE: `docker compose up` has NOT been executed in the build environment that
+# produced these files (Docker is not installed there) — verify on a Docker host.
+
+services:
+  api:
+    build: .
+    image: friday:latest
+    # All configuration (provider, keys, flags) is supplied from .env at run
+    # time. .env is gitignored and never baked into the image.
+    env_file: .env
+    ports:
+      - "8000:8000"
+    # SQLite database persists across container restarts via this named volume,
+    # mounted where the app writes its data (matches the image's /app/data).
+    volumes:
+      - friday-data:/app/data
+    # Liveness probe hits the auth-and-rate-limit-exempt /health endpoint.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # --- Optional future long-term / pgvector store (DISABLED by default) --------
+  # Local-first default uses the SQLite volume above; this service is the
+  # documented swap target for durable memory + vector retrieval on Postgres
+  # (build spec §15: single managed Postgres when load demands it — no
+  # multi-cloud / Terraform now). To adopt it:
+  #   1. Uncomment this `postgres` block.
+  #   2. Add a DATABASE_URL (e.g. postgresql+psycopg://friday:friday@postgres:5432/friday)
+  #      to your .env and point the long-term/vector stores at it.
+  #   3. Uncomment the `depends_on` under `api`.
+  #
+  # postgres:
+  #   image: pgvector/pgvector:pg16
+  #   environment:
+  #     POSTGRES_USER: friday
+  #     POSTGRES_PASSWORD: friday
+  #     POSTGRES_DB: friday
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - friday-pgdata:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U friday"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   restart: unless-stopped
+
+# Under `api`, when enabling Postgres, also add:
+#     depends_on:
+#       postgres:
+#         condition: service_healthy
+
+volumes:
+  friday-data:
+  # friday-pgdata:   # uncomment together with the postgres service above

@@ -1,0 +1,50 @@
+# Build context hygiene: keep the image small, reproducible, and secret-free.
+# pyproject.toml + uv.lock + src/ are what the Dockerfile actually needs.
+
+# Virtualenvs (rebuilt inside the image from the lock)
+.venv
+venv
+env
+
+# Python caches / build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+build
+dist
+
+# Tooling caches
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+.cache
+
+# VCS + CI metadata
+.git
+.gitignore
+.github
+
+# Runtime artifacts (the data dir is a named volume at run time, not baked in)
+data
+audio_out
+chroma
+*.log
+
+# Secrets — NEVER bake these into an image layer
+.env
+.env.*
+
+# Local-only tooling / editor / OS cruft
+.idea
+.vscode
+.DS_Store
+*.swp
+node_modules
+
+# Optional UI processes and their deps are not part of the API image
+dashboard
+tests
+docs

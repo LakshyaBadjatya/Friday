@@ -44,8 +44,14 @@ from friday.api.ws import router as ws_router
 from friday.config import Settings, get_settings
 from friday.core.orchestrator import Orchestrator
 from friday.logging import configure_logging, get_logger
+from friday.memory.long_term import SQLiteLongTermStore
 from friday.memory.short_term import ShortTermMemory
-from friday.memory.vector import InMemoryVectorStore
+from friday.memory.vector import SQLiteVectorStore
+from friday.providers.embeddings import (
+    EmbeddingProvider,
+    FakeEmbeddings,
+    NvidiaEmbeddings,
+)
 from friday.providers.llm import FakeLLM, LLMProvider, NvidiaNIMProvider
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
@@ -81,6 +87,65 @@ def _build_llm(settings: Settings) -> LLMProvider:
     return FakeLLM(responses=[])
 
 
+def _build_embedder(settings: Settings) -> EmbeddingProvider:
+    """Select the embedding provider from settings.
+
+    Defaults to the deterministic, offline :class:`FakeEmbeddings` (tests / no
+    credentials) so the app always boots without a key or network. The real
+    :class:`NvidiaEmbeddings` adapter is chosen only when ``embedding_provider``
+    is ``nvidia`` *and* a NVIDIA key is configured; it lazy-imports ``openai``
+    inside ``providers/`` and is never required for the gate.
+    """
+    if (
+        settings.embedding_provider == "nvidia"
+        and settings.nvidia_api_key is not None
+        and settings.embedding_model
+    ):
+        logger.info(
+            "using NVIDIA NIM embeddings", extra={"model": settings.embedding_model}
+        )
+        return NvidiaEmbeddings(
+            api_key=settings.nvidia_api_key.get_secret_value(),
+            base_url=settings.nvidia_base_url,
+            model=settings.embedding_model,
+            dim=settings.embedding_dim,
+            timeout=settings.llm_timeout_seconds,
+        )
+    logger.info("using FakeEmbeddings provider (deterministic, no network)")
+    return FakeEmbeddings(dim=settings.embedding_dim)
+
+
+def _build_long_term(settings: Settings) -> SQLiteLongTermStore:
+    """Build the local-first SQLite long-term store, ensuring its dir exists.
+
+    ``data/`` is gitignored; a missing parent directory is created so a fresh
+    checkout boots. ``":memory:"`` paths are left untouched (no directory).
+    """
+    path = settings.memory_db_path
+    if path != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteLongTermStore(path)
+
+
+def _build_vector(
+    settings: Settings, embedder: EmbeddingProvider
+) -> SQLiteVectorStore:
+    """Build the persistent SQLite vector store alongside the long-term DB.
+
+    The vector store lives in a sibling file (``*.vec.db``) next to the
+    long-term database so both share the ``data/`` directory; ``":memory:"``
+    stays ephemeral. Sized to ``settings.embedding_dim`` to match the embedder.
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        vec_path = ":memory:"
+    else:
+        base = Path(db_path)
+        vec_path = str(base.with_suffix(base.suffix + ".vec"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteVectorStore(vec_path, embedder=embedder, dim=settings.embedding_dim)
+
+
 def _build_registry() -> ToolRegistry:
     """Build the tool registry with every Phase-2 tool registered.
 
@@ -98,22 +163,29 @@ def _build_registry() -> ToolRegistry:
 
 
 def _build_agents(
-    settings: Settings, registry: ToolRegistry, llm: LLMProvider
+    settings: Settings,
+    registry: ToolRegistry,
+    llm: LLMProvider,
+    vector: SQLiteVectorStore,
+    long_term: SQLiteLongTermStore,
 ) -> AgentRegistry:
     """Construct each specialist agent with its dependencies and register it.
 
     * ``analysis`` — evidence-grounded synthesis over the web-search tool + LLM.
-    * ``knowledge`` — grounded retrieval over an in-memory vector store.
+    * ``knowledge`` — hybrid grounded retrieval over the persistent SQLite vector
+      store + recent long-term facts, citing each chunk's ``source_id``.
     * ``automation`` — bounded multi-step job executor (no tools).
     * ``device`` — confirm-gated, allow-listed home control via the ``home`` tool.
     * ``alerting`` — deduped/rate-limited notifications via the ``notify`` tool;
       "now" comes from the injected wall clock (the agent windows on it).
     """
-    store = InMemoryVectorStore()
-
     agents = AgentRegistry()
     agents.register(AnalysisAgent(registry, llm=llm))
-    agents.register(KnowledgeAgent(store=store, memory=ShortTermMemory()))
+    agents.register(
+        KnowledgeAgent(
+            store=vector, memory=ShortTermMemory(), long_term=long_term
+        )
+    )
     agents.register(AutomationAgent())
     agents.register(DeviceAgent(registry))
     agents.register(
@@ -125,19 +197,27 @@ def _build_agents(
 def build_orchestrator(settings: Settings) -> Orchestrator:
     """Assemble a fully-wired :class:`Orchestrator` from ``settings``.
 
-    Builds the shared tool registry, the LLM provider, and the populated agent
-    registry (so AUTOMATION / DEVICE_CONTROL / ALERTING turns dispatch to their
-    specialist agents and SECURITY_LOCKDOWN runs the lockdown subgraph).
+    Builds the shared tool registry, the LLM provider, the local-first SQLite
+    long-term + persistent vector stores (with the configured embedder), and the
+    populated agent registry. The stores are injected into both the Knowledge
+    agent (hybrid grounding) and the orchestrator (write-consent + forget), so
+    AUTOMATION / DEVICE_CONTROL / ALERTING turns dispatch to their specialist
+    agents and SECURITY_LOCKDOWN runs the lockdown subgraph.
     """
     registry = _build_registry()
     llm = _build_llm(settings)
-    agents = _build_agents(settings, registry, llm)
+    embedder = _build_embedder(settings)
+    long_term = _build_long_term(settings)
+    vector = _build_vector(settings, embedder)
+    agents = _build_agents(settings, registry, llm, vector, long_term)
     return Orchestrator(
         llm=llm,
         registry=registry,
         memory=ShortTermMemory(),
         persona_path=_PERSONA_PATH,
         agents=agents,
+        long_term=long_term,
+        vector=vector,
     )
 
 

@@ -116,24 +116,33 @@ let selected = null;
 let selectedOriginalEmissive = null;
 
 // ── Geometry factory: Scene-node "type" → THREE geometry ─────────────────────
-// Mirrors the shared contract exactly. Unknown types fall back to a small box so
-// a (theoretically already-validated) odd node never throws.
+// Mirrors the shared contract (abbreviated keys w/h/d/r/tube). The backend
+// normalizes real-model output to those keys, but this factory ALSO reads each
+// dimension with a full-name synonym fallback so a raw/un-normalized scene (e.g.
+// loaded straight from a model that emitted "width"/"radius"/"tubeRadius") still
+// renders the requested geometry instead of silently using defaults.
 function buildGeometry(type, params) {
   const p = params || {};
   const n = (v, d) => (typeof v === "number" && isFinite(v) ? v : d);
+  // Defensive dimension reads: prefer the canonical key, fall back to synonyms.
+  const w = n(p.w ?? p.width ?? p.size, 1);
+  const h = n(p.h ?? p.height ?? p.length, 1);
+  const d = n(p.d ?? p.depth, 1);
+  const r = n(p.r ?? p.radius ?? p.radiusTop ?? p.radiusBottom, 0.5);
+  const tube = n(p.tube ?? p.tubeRadius ?? p.tube_radius, 0.18);
   switch (type) {
     case "box":
-      return new THREE.BoxGeometry(n(p.w, 1), n(p.h, 1), n(p.d, 1));
+      return new THREE.BoxGeometry(w, h, d);
     case "sphere":
-      return new THREE.SphereGeometry(n(p.r, 0.5), 32, 24);
+      return new THREE.SphereGeometry(r, 32, 24);
     case "cylinder":
-      return new THREE.CylinderGeometry(n(p.r, 0.5), n(p.r, 0.5), n(p.h, 1), 32);
+      return new THREE.CylinderGeometry(r, r, h, 32);
     case "cone":
-      return new THREE.ConeGeometry(n(p.r, 0.5), n(p.h, 1), 32);
+      return new THREE.ConeGeometry(r, h, 32);
     case "torus":
-      return new THREE.TorusGeometry(n(p.r, 0.5), n(p.tube, 0.18), 20, 36);
+      return new THREE.TorusGeometry(r, tube, 20, 36);
     case "plane":
-      return new THREE.PlaneGeometry(n(p.w, 1), n(p.h, 1));
+      return new THREE.PlaneGeometry(w, h);
     default:
       // "group" has no geometry; any unexpected type degrades to a marker box.
       return null;

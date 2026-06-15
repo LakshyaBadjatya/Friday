@@ -55,9 +55,15 @@ JSON schema:
 SceneNode = {
   "id": string (unique),
   "type": one of "box" | "sphere" | "cylinder" | "cone" | "torus" | "plane" | "group",
-  "params": object of numbers, per type:
-      box: {"w","h","d"}, sphere: {"r"}, cylinder: {"r","h"}, cone: {"r","h"},
-      torus: {"r","tube"}, plane: {"w","h"}, group: {},
+  "params": object of numbers. Use these EXACT abbreviated keys per type — do NOT
+      use full names like "width"/"height"/"radius"/"tubeRadius" or segment counts:
+        box:      {"w","h","d"}        (width, height, depth)
+        sphere:   {"r"}                (radius)
+        cylinder: {"r","h"}            (radius, height)
+        cone:     {"r","h"}            (radius, height)
+        torus:    {"r","tube"}         (ring radius, tube radius)
+        plane:    {"w","h"}            (width, height)
+        group:    {}                   (no geometry; transform-only container)
   "position": [x,y,z]   (default [0,0,0]),
   "rotation": [x,y,z]   (Euler radians, default [0,0,0]),
   "scale":    [x,y,z]   (default [1,1,1]),
@@ -67,7 +73,9 @@ SceneNode = {
   "children": [ SceneNode, ... ]   (nested under this node's transform)
 }
 Use a "group" to compose sub-parts; place children with positions relative to
-the parent. Keep it to a few dozen nodes at most. Output JSON only.
+the parent. Keep it to a few dozen nodes at most. Return ONLY the JSON object —
+no prose, no explanation, no markdown code fences. Use only the abbreviated
+param keys listed above.
 
 Example 1 — "a red cube":
 {"name":"red-cube","nodes":[{"id":"c","type":"box","params":{"w":1,"h":1,"d":1},"color":"#ff0000"}]}

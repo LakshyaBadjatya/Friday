@@ -113,3 +113,154 @@ def test_every_contract_node_type_validates(node_type: str) -> None:
         {"name": "t", "nodes": [{"id": "n", "type": node_type, "params": {}}]}
     )
     assert scene.nodes[0].type == node_type
+
+
+# --------------------------------------------------------------------------- #
+# Param normalization: real models emit full param names (width/height/radius);
+# the contract + Three.js factory expect abbreviated keys (w/h/d/r/tube). The
+# schema canonicalizes them BEFORE validation so the canvas renders correctly.
+# --------------------------------------------------------------------------- #
+def test_box_full_param_names_normalize_to_abbreviated() -> None:
+    """``box`` with ``{width,height,depth}`` canonicalizes to ``{w,h,d}``."""
+    node = SceneNode(
+        id="b",
+        type="box",
+        params={"width": 2, "height": 4, "depth": 1},  # type: ignore[dict-item]
+    )
+    assert node.params == {"w": 2.0, "h": 4.0, "d": 1.0}
+
+
+def test_sphere_radius_normalizes_to_r() -> None:
+    """``sphere`` with ``{radius}`` canonicalizes to ``{r}``."""
+    node = SceneNode(id="s", type="sphere", params={"radius": 3})  # type: ignore[dict-item]
+    assert node.params == {"r": 3.0}
+
+
+def test_cylinder_radius_height_normalize_to_r_h() -> None:
+    """``cylinder`` with ``{radius,height}`` canonicalizes to ``{r,h}``."""
+    node = SceneNode(
+        id="c",
+        type="cylinder",
+        params={"radius": 0.5, "height": 2},  # type: ignore[dict-item]
+    )
+    assert node.params == {"r": 0.5, "h": 2.0}
+
+
+def test_torus_radius_tuberadius_normalize_to_r_tube() -> None:
+    """``torus`` with ``{radius,tubeRadius}`` canonicalizes to ``{r,tube}``."""
+    node = SceneNode(
+        id="t",
+        type="torus",
+        params={"radius": 1, "tubeRadius": 0.2},  # type: ignore[dict-item]
+    )
+    assert node.params == {"r": 1.0, "tube": 0.2}
+
+
+def test_normalization_is_case_insensitive() -> None:
+    """Synonym matching ignores case (``Width``/``RADIUS`` etc.)."""
+    node = SceneNode(
+        id="b",
+        type="box",
+        params={"Width": 2, "HEIGHT": 4, "Depth": 1},  # type: ignore[dict-item]
+    )
+    assert node.params == {"w": 2.0, "h": 4.0, "d": 1.0}
+
+
+def test_normalization_drops_segment_counts() -> None:
+    """Segment-count keys (widthSegments/radialSegments/...) are dropped."""
+    node = SceneNode(
+        id="s",
+        type="sphere",
+        params={  # type: ignore[arg-type]
+            "radius": 1,
+            "widthSegments": 32,
+            "heightSegments": 16,
+        },
+    )
+    assert node.params == {"r": 1.0}
+
+
+def test_normalization_handles_length_and_radiustop() -> None:
+    """``length`` is an ``h`` synonym; ``radiusTop``/``radiusBottom`` -> ``r``."""
+    cyl = SceneNode(
+        id="c",
+        type="cylinder",
+        params={"radiusTop": 0.5, "radiusBottom": 0.5, "length": 3},  # type: ignore[dict-item]
+    )
+    assert cyl.params == {"r": 0.5, "h": 3.0}
+
+
+def test_normalization_handles_size_synonym() -> None:
+    """``size`` is a ``w`` synonym (some models emit ``{size}`` for a box)."""
+    node = SceneNode(id="b", type="box", params={"size": 2})  # type: ignore[dict-item]
+    assert node.params == {"w": 2.0}
+
+
+def test_normalization_handles_tube_underscore_synonyms() -> None:
+    """``tube_radius`` (snake) canonicalizes to ``tube`` like ``tubeRadius``."""
+    node = SceneNode(
+        id="t",
+        type="torus",
+        params={"radius": 1, "tube_radius": 0.3},  # type: ignore[dict-item]
+    )
+    assert node.params == {"r": 1.0, "tube": 0.3}
+
+
+def test_already_abbreviated_params_unchanged() -> None:
+    """Params already in canonical abbreviated form pass through untouched."""
+    node = SceneNode(
+        id="b", type="box", params={"w": 1.0, "h": 2.0, "d": 3.0}
+    )
+    assert node.params == {"w": 1.0, "h": 2.0, "d": 3.0}
+
+
+def test_normalization_keeps_unknown_numeric_keys() -> None:
+    """An unrecognized numeric key is preserved (not every model param is mapped)."""
+    node = SceneNode(
+        id="b",
+        type="box",
+        params={"width": 1, "twist": 0.5},  # type: ignore[dict-item]
+    )
+    assert node.params == {"w": 1.0, "twist": 0.5}
+
+
+def test_normalization_recurses_into_children() -> None:
+    """Nested children are normalized too (recursive, like the rest of the schema)."""
+    scene = validate_scene(
+        {
+            "name": "nested",
+            "nodes": [
+                {
+                    "id": "parent",
+                    "type": "group",
+                    "params": {},
+                    "children": [
+                        {
+                            "id": "child",
+                            "type": "box",
+                            "params": {"width": 2, "height": 4, "depth": 1},
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    child = scene.nodes[0].children[0]
+    assert child.params == {"w": 2.0, "h": 4.0, "d": 1.0}
+
+
+def test_validate_scene_normalizes_full_param_names() -> None:
+    """The API path (``validate_scene``) also canonicalizes full param names."""
+    scene = validate_scene(
+        {
+            "name": "box",
+            "nodes": [
+                {
+                    "id": "b",
+                    "type": "box",
+                    "params": {"width": 2, "height": 4, "depth": 1},
+                }
+            ],
+        }
+    )
+    assert scene.nodes[0].params == {"w": 2.0, "h": 4.0, "d": 1.0}

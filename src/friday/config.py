@@ -237,6 +237,31 @@ class Settings(BaseSettings):
     sys_disk_threshold: float = 95.0
     sys_temp_threshold: float = 85.0
 
+    # --- System automation (Tier 2; default off) ---
+    # Gates the three system-automation tools (``run_command`` / ``find_files`` /
+    # ``open_app``). Off by default so the offline build registers none of them and
+    # the Automation agent's allow-list is unchanged. When on, the tools are
+    # registered behind the registry's existing permission / confirm-step gates
+    # (``run_command`` and ``open_app`` are side-effecting + non-idempotent, so the
+    # confirm-step gates them; ``find_files`` is read-only). Every execution path is
+    # argv-only (``create_subprocess_exec`` — never a shell), output is capped and a
+    # timeout enforced, and file search is confined to ``system_automation_root``.
+    enable_system_automation: bool = False
+    # Root the file-search tool is confined to: ``find_files`` rejects any pattern
+    # or root that resolves OUTSIDE this directory (path-traversal guard). Defaults
+    # to the process working directory.
+    system_automation_root: str = "."
+    # Optional allow-list of command basenames ``run_command`` may execute. Read
+    # from ``FRIDAY_SYSTEM_EXEC_ALLOWLIST`` as a comma-separated string (same
+    # ``NoDecode`` + before-validator pattern as ``device_allowlist``); empty means
+    # no allow-list is enforced (any command may run, still argv-only / no shell).
+    system_exec_allowlist: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
+    # Per-command wall-clock budget (seconds) for ``run_command`` / ``open_app``;
+    # a command exceeding it is killed and surfaced as a timeout error.
+    system_exec_timeout: float = 30.0
+
     # --- Persona ---
     owner_address: str = "Boss"
 
@@ -311,6 +336,20 @@ class Settings(BaseSettings):
         we accept a plain comma-separated string (whitespace-trimmed, empties
         dropped) so ``"a, b ,c"`` -> ``["a", "b", "c"]`` and ``""`` -> ``[]``.
         A value that is already a list/tuple is passed through unchanged.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("system_exec_allowlist", mode="before")
+    @classmethod
+    def _split_system_exec_allowlist(cls, value: object) -> object:
+        """Comma-split a raw ``FRIDAY_SYSTEM_EXEC_ALLOWLIST`` string into a list.
+
+        Mirrors :meth:`_split_device_allowlist`: a plain comma-separated string
+        (whitespace-trimmed, empties dropped) so ``"ls, echo ,cat"`` ->
+        ``["ls", "echo", "cat"]`` and ``""`` -> ``[]``; a value that is already a
+        list/tuple is passed through unchanged.
         """
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]

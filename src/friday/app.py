@@ -117,7 +117,14 @@ from friday.tools.reminders import (
     CreateReminderTool,
     ListRemindersTool,
 )
+from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
 from friday.tools.web_search import WebSearchTool
+
+# The system-automation tool names added to the Automation agent's allow-list
+# (and registered) only when ``enable_system_automation`` is set.
+_SYSTEM_AUTOMATION_TOOLS: frozenset[str] = frozenset(
+    {"run_command", "find_files", "open_app"}
+)
 
 logger = get_logger("friday.app")
 
@@ -496,6 +503,9 @@ def _registered_tool_names(registry: ToolRegistry) -> frozenset[str]:
         "create_reminder",
         "list_reminders",
         "complete_reminder",
+        "run_command",
+        "find_files",
+        "open_app",
     )
     present: set[str] = set()
     for name in candidates:
@@ -778,6 +788,14 @@ def _build_registry(
                 ),
             )
         )
+    # System-automation tools (Tier 2) — registered ONLY when the flag is on, so
+    # the offline default's tool surface is unchanged. Their own gates keep them
+    # safe: run_command/open_app are side-effecting + non-idempotent (the registry
+    # confirm-step gates them) and find_files is read-only + root-confined.
+    if settings.enable_system_automation:
+        registry.register(cast(Tool, RunCommandTool()))
+        registry.register(cast(Tool, FindFilesTool()))
+        registry.register(cast(Tool, OpenAppTool()))
     return registry
 
 
@@ -815,7 +833,14 @@ def _build_agents(
         knowledge.allowed_tools = knowledge.allowed_tools | {"agent_reach"}
     agents.register(analysis)
     agents.register(knowledge)
-    agents.register(AutomationAgent(registry=registry))
+    automation = AutomationAgent(registry=registry)
+    if settings.enable_system_automation:
+        # The Automation agent may reach the registered system-automation tools;
+        # the registry's permission/confirm gates still apply to every call.
+        automation.allowed_tools = (
+            automation.allowed_tools | _SYSTEM_AUTOMATION_TOOLS
+        )
+    agents.register(automation)
     agents.register(DeviceAgent(registry))
     agents.register(
         AlertingAgent(registry, clock=time.monotonic, settings=settings)

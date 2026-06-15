@@ -33,10 +33,15 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    """Inbound chat turn."""
+    """Inbound chat turn.
 
-    session_id: str = Field(min_length=1)
-    text: str
+    ``text`` and ``session_id`` are length-bounded so empty or pathologically
+    large inputs are rejected by FastAPI with a 422 before any orchestration
+    runs.
+    """
+
+    session_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=8000)
 
 
 class RouteView(BaseModel):

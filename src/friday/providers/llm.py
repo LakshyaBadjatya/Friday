@@ -21,7 +21,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openai import AsyncOpenAI, OpenAIError
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
 from friday.errors import ProviderError
@@ -157,11 +157,28 @@ class NvidiaNIMProvider(LLMProvider):
     Uses the ``openai`` :class:`AsyncOpenAI` client pointed at ``base_url``.
     Maps FRIDAY's typed models to/from the OpenAI wire format and wraps every
     client/transport error in :class:`ProviderError`.
+
+    The client is built with an explicit ``timeout`` (seconds) and
+    ``max_retries=0``: a slow NIM endpoint must surface promptly as a
+    :class:`ProviderError` rather than hang, and the SDK must not silently retry
+    and multiply latency — retry/fallback policy is owned by
+    :class:`FallbackLLM`.
     """
 
-    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout: float = 60.0,
+    ) -> None:
         self._model = model
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=0,
+        )
 
     @staticmethod
     def _to_openai_messages(messages: list[Message]) -> list[dict[str, Any]]:
@@ -226,6 +243,11 @@ class NvidiaNIMProvider(LLMProvider):
 
         try:
             completion = await self._client.chat.completions.create(**kwargs)
+        except (APITimeoutError, APIConnectionError) as exc:
+            raise ProviderError(
+                f"NVIDIA NIM request timed out or could not connect "
+                f"(timeout/connection error): {exc}"
+            ) from exc
         except OpenAIError as exc:
             raise ProviderError(f"NVIDIA NIM request failed: {exc}") from exc
         except Exception as exc:  # pragma: no cover - defensive transport guard

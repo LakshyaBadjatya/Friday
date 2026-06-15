@@ -46,6 +46,7 @@ from friday.api.routes_admin import router as admin_router
 from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
+from friday.api.routes_protocols import router as protocols_router
 from friday.api.routes_rag import router as rag_router
 from friday.api.routes_reminders import router as reminders_router
 from friday.api.routes_schedules import router as schedules_router
@@ -63,6 +64,8 @@ from friday.memory.vector import SQLiteVectorStore
 from friday.observability.audit import AuditLog
 from friday.observability.metrics import Metrics
 from friday.observability.tracing import Tracer
+from friday.protocols.runner import ProtocolRunner
+from friday.protocols.store import SQLiteProtocolStore
 from friday.providers.embeddings import (
     EmbeddingProvider,
     FakeEmbeddings,
@@ -244,6 +247,62 @@ def _build_trigger_store(settings: Settings) -> SQLiteTriggerStore:
         sched_path = str(base.with_suffix(base.suffix + ".sched"))
         base.parent.mkdir(parents=True, exist_ok=True)
     return SQLiteTriggerStore(sched_path)
+
+
+def _build_protocol_store(settings: Settings) -> SQLiteProtocolStore:
+    """Build the local-first SQLite protocol store alongside the long-term DB.
+
+    Reuses ``memory_db_path``: the protocols live in a sibling file (``*.proto.db``)
+    next to the long-term database so they share the gitignored ``data/``
+    directory; ``":memory:"`` stays ephemeral. Steps are persisted as JSON in the
+    store; the store is connection-per-call for file paths (thread-safe).
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        proto_path = ":memory:"
+    else:
+        base = Path(db_path)
+        proto_path = str(base.with_suffix(base.suffix + ".proto"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteProtocolStore(proto_path)
+
+
+def _registered_tool_names(registry: ToolRegistry) -> frozenset[str]:
+    """The names of every tool registered in ``registry``.
+
+    Used to seed the protocol runner's allow-list so a protocol may invoke only
+    tools that already exist in the shared registry. The names are probed through
+    the registry's public ``get`` against the same set ``_build_registry``
+    registers, so this never reaches into registry internals and stays correct as
+    that builder evolves: a name that is not actually registered is dropped.
+    """
+    candidates = (
+        "web_search",
+        "notify",
+        "home",
+        "create_reminder",
+        "list_reminders",
+        "complete_reminder",
+    )
+    present: set[str] = set()
+    for name in candidates:
+        try:
+            registry.get(name)
+        except KeyError:  # pragma: no cover - all candidates are registered
+            continue
+        present.add(name)
+    return frozenset(present)
+
+
+def _build_protocol_runner(registry: ToolRegistry) -> ProtocolRunner:
+    """Assemble the :class:`ProtocolRunner` over the shared tool registry.
+
+    The runner's ``allowed_tools`` is the set of *registered* tool names, so a
+    protocol may invoke only tools that already exist in the shared registry (no
+    arbitrary execution) and every step passes the registry's permission /
+    validation / confirm-step gates.
+    """
+    return ProtocolRunner(registry, _registered_tool_names(registry))
 
 
 def _make_due_reminders_action(
@@ -491,6 +550,12 @@ class AppRuntime:
     #: store + audit log + metrics the rest of the runtime uses; the ``/briefing``
     #: route and the scheduler ``briefing`` action both build through it.
     briefing: BriefingService
+    #: The shared protocol store — the same one the ``/protocols`` routes and the
+    #: orchestrator's trigger-phrase hook read/write.
+    protocol_store: SQLiteProtocolStore
+    #: The protocol runner over the shared registry; its ``allowed_tools`` is the
+    #: set of registered tool names, so a protocol runs only registered tools.
+    protocol_runner: ProtocolRunner
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -521,6 +586,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
     scheduler = _build_scheduler(
         trigger_store, reminder_store, registry, briefing
     )
+    protocol_store = _build_protocol_store(settings)
+    protocol_runner = _build_protocol_runner(registry)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
         llm=llm,
@@ -532,6 +599,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
         vector=vector,
         tracer=tracer,
         metrics=metrics,
+        protocol_store=protocol_store,
+        protocol_runner=protocol_runner,
     )
     return AppRuntime(
         orchestrator=orchestrator,
@@ -548,6 +617,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
         trigger_store=trigger_store,
         scheduler=scheduler,
         briefing=briefing,
+        protocol_store=protocol_store,
+        protocol_runner=protocol_runner,
     )
 
 
@@ -712,6 +783,23 @@ def _wire_briefing(app: FastAPI, settings: Settings, runtime: AppRuntime) -> Non
     app.state.briefing = runtime.briefing
 
 
+def _wire_protocols(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared protocol store + runner on ``app.state`` when enabled.
+
+    The ``/protocols`` routes read ``app.state.protocol_store`` and
+    ``app.state.protocol_runner`` — the *same* store the orchestrator's
+    trigger-phrase hook reads and the *same* runner (over the shared registry)
+    both fire through — so an HTTP-created protocol and a spoken trigger operate on
+    one store with one runner. Building it only when ``enable_protocols`` is set
+    keeps the offline default untouched (the routes self-guard on the flag and 404
+    when off).
+    """
+    if not settings.enable_protocols:
+        return
+    app.state.protocol_store = runtime.protocol_store
+    app.state.protocol_runner = runtime.protocol_runner
+
+
 def _install_runtime(app: FastAPI, settings: Settings) -> None:
     """Assemble the runtime graph and stash every shared piece on ``app.state``.
 
@@ -735,6 +823,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_reminders(app, settings, runtime)
     _wire_scheduler(app, settings, runtime)
     _wire_briefing(app, settings, runtime)
+    _wire_protocols(app, settings, runtime)
 
 
 def _start_scheduler_loop(
@@ -843,6 +932,11 @@ def create_app() -> FastAPI:
     # briefing surface. The shared briefing service is wired onto app.state only
     # when enabled.
     app.include_router(briefing_router)
+    # Voice protocols (Tier 1) — always registered but self-guards on
+    # FRIDAY_ENABLE_PROTOCOLS (404 when off), so the offline default exposes no
+    # protocol surface. The shared protocol store + runner are wired onto
+    # app.state only when enabled.
+    app.include_router(protocols_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

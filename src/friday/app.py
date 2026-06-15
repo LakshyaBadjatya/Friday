@@ -23,10 +23,12 @@ relies on.
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -45,6 +47,7 @@ from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_rag import router as rag_router
 from friday.api.routes_reminders import router as reminders_router
+from friday.api.routes_schedules import router as schedules_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
 from friday.api.routes_voice import router as voice_router
@@ -74,6 +77,8 @@ from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.rag.ingest import DocumentIngestor
 from friday.reminders.store import SQLiteReminderStore
+from friday.scheduler.engine import Scheduler
+from friday.scheduler.store import SQLiteTriggerStore, Trigger
 from friday.studio.generator import (
     MeshyText3D,
     ProceduralGenerator,
@@ -82,7 +87,7 @@ from friday.studio.generator import (
 )
 from friday.tools.base import Tool
 from friday.tools.home import HomeControlTool
-from friday.tools.notify import NotifyTool
+from friday.tools.notify import NotifyTool, SentMessage
 from friday.tools.registry import ToolRegistry
 from friday.tools.reminders import (
     CompleteReminderTool,
@@ -221,6 +226,94 @@ def _build_reminder_store(settings: Settings) -> SQLiteReminderStore:
     return SQLiteReminderStore(rem_path)
 
 
+def _build_trigger_store(settings: Settings) -> SQLiteTriggerStore:
+    """Build the local-first SQLite trigger store alongside the long-term DB.
+
+    Reuses ``memory_db_path``: the triggers live in a sibling file (``*.sched.db``)
+    next to the long-term database so they share the gitignored ``data/``
+    directory; ``":memory:"`` stays ephemeral. ``due()`` is driven by a passed
+    ``now`` datetime, never the wall clock.
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        sched_path = ":memory:"
+    else:
+        base = Path(db_path)
+        sched_path = str(base.with_suffix(base.suffix + ".sched"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteTriggerStore(sched_path)
+
+
+def _make_due_reminders_action(
+    reminder_store: SQLiteReminderStore, notify: NotifyTool
+) -> Callable[[Trigger], Awaitable[None]]:
+    """Build the ``due_reminders`` scheduler action over the shared stores.
+
+    Reads the reminders due as of ``utcnow`` from the *shared*
+    :class:`SQLiteReminderStore` (the same one the reminder tools/routes write to)
+    and emits each via the :class:`NotifyTool` fake sink + a log line, so an
+    enabled trigger surfaces overdue reminders proactively. ``utcnow`` is read
+    here in the background action only — the tested ``tick(now)`` unit stays
+    clock-injected; this action is exercised through the run-now route, not for
+    timing.
+    """
+
+    async def _due_reminders(trigger: Trigger) -> None:
+        now_iso = datetime.now(UTC).isoformat()
+        due = reminder_store.due(now_iso)
+        for reminder in due:
+            notify.sink.append(
+                SentMessage(
+                    channel="webhook",
+                    target="scheduler",
+                    subject="Reminder due",
+                    body=reminder.text,
+                )
+            )
+        logger.info(
+            "scheduler due_reminders fired",
+            extra={"trigger": trigger.name, "count": len(due)},
+        )
+
+    return _due_reminders
+
+
+async def _noop_action(trigger: Trigger) -> None:
+    """A placeholder scheduler action that does nothing but log (e.g. briefing).
+
+    A registered no-op so a trigger can be created/exercised end-to-end before a
+    real briefing action is wired; it is also the default action the API tests
+    use to validate the CRUD + run-now surface without side effects.
+    """
+    logger.info("scheduler noop fired", extra={"trigger": trigger.name})
+
+
+def _build_scheduler(
+    trigger_store: SQLiteTriggerStore,
+    reminder_store: SQLiteReminderStore,
+    registry: ToolRegistry,
+) -> Scheduler:
+    """Assemble the :class:`Scheduler` and register the default actions.
+
+    Registers ``"due_reminders"`` (emit due reminders via the shared notify tool's
+    sink/log) and a ``"noop"`` placeholder. The notify tool is pulled from the
+    shared :class:`ToolRegistry` so the scheduler emits into the *same* sink the
+    alerting agent uses (one auditable place for everything that would have been
+    sent); a fresh :class:`NotifyTool` is used as a fallback if absent.
+    """
+    scheduler = Scheduler(trigger_store)
+    try:
+        notify = registry.get("notify")
+    except KeyError:  # pragma: no cover - notify is always registered
+        notify = None
+    notify_tool = notify if isinstance(notify, NotifyTool) else NotifyTool()
+    scheduler.register_action(
+        "due_reminders", _make_due_reminders_action(reminder_store, notify_tool)
+    )
+    scheduler.register_action("noop", _noop_action)
+    return scheduler
+
+
 def _build_registry(
     reminder_store: SQLiteReminderStore,
     audit: AuditLog | None = None,
@@ -319,6 +412,12 @@ class AppRuntime:
     #: ``/reminders`` routes read/write, so an agent-created and an HTTP-created
     #: reminder land in the same place.
     reminder_store: SQLiteReminderStore
+    #: The shared scheduled-trigger store — the same one the ``/schedules`` routes
+    #: and the background tick loop read/write.
+    trigger_store: SQLiteTriggerStore
+    #: The scheduler (action registry + ``tick``) over ``trigger_store``; its
+    #: registered ``due_reminders`` action reuses the shared reminder store.
+    scheduler: Scheduler
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -336,12 +435,14 @@ def build_runtime(settings: Settings) -> AppRuntime:
     flag_overrides: dict[str, bool] = {}
 
     reminder_store = _build_reminder_store(settings)
+    trigger_store = _build_trigger_store(settings)
     registry = _build_registry(reminder_store, audit=audit, metrics=metrics)
     llm = _build_llm(settings)
     embedder = _build_embedder(settings)
     long_term = _build_long_term(settings)
     vector = _build_vector(settings, embedder)
     agents = _build_agents(settings, registry, llm, vector, long_term)
+    scheduler = _build_scheduler(trigger_store, reminder_store, registry)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
         llm=llm,
@@ -366,6 +467,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
         llm=llm,
         vector=vector,
         reminder_store=reminder_store,
+        trigger_store=trigger_store,
+        scheduler=scheduler,
     )
 
 
@@ -498,6 +601,23 @@ def _wire_reminders(app: FastAPI, settings: Settings, runtime: AppRuntime) -> No
     app.state.reminder_store = runtime.reminder_store
 
 
+def _wire_scheduler(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared trigger store + scheduler on ``app.state`` when enabled.
+
+    The ``/schedules`` routes read ``app.state.trigger_store`` and
+    ``app.state.scheduler`` — the *same* store the background tick loop drives and
+    the *same* scheduler whose ``due_reminders``/``noop`` actions are registered —
+    so an HTTP-created trigger and the loop operate on one store with one action
+    registry. Building it only when ``enable_scheduler`` is set keeps the offline
+    default untouched (the routes self-guard on the flag and 404 when off, and the
+    background loop is started only in the lifespan when enabled).
+    """
+    if not settings.enable_scheduler:
+        return
+    app.state.trigger_store = runtime.trigger_store
+    app.state.scheduler = runtime.scheduler
+
+
 def _install_runtime(app: FastAPI, settings: Settings) -> None:
     """Assemble the runtime graph and stash every shared piece on ``app.state``.
 
@@ -519,6 +639,42 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_studio(app, settings, runtime.llm)
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
+    _wire_scheduler(app, settings, runtime)
+
+
+def _start_scheduler_loop(
+    app: FastAPI, settings: Settings
+) -> asyncio.Task[None] | None:
+    """Start the background scheduler ``run_loop`` as a task when enabled.
+
+    Returns the created :class:`asyncio.Task` (so the lifespan can cancel it on
+    shutdown) or ``None`` when the scheduler is disabled — keeping the offline
+    default free of any background work. The loop is a thin wrapper over the
+    tested ``tick(now)``; its cadence is ``scheduler_tick_seconds``.
+    """
+    if not settings.enable_scheduler:
+        return None
+    scheduler = getattr(app.state, "scheduler", None)
+    if not isinstance(scheduler, Scheduler):  # pragma: no cover - startup guard
+        return None
+    logger.info(
+        "starting scheduler loop",
+        extra={"tick_seconds": settings.scheduler_tick_seconds},
+    )
+    return asyncio.create_task(
+        scheduler.run_loop(settings.scheduler_tick_seconds)
+    )
+
+
+async def _stop_scheduler_loop(task: asyncio.Task[None] | None) -> None:
+    """Cancel the background scheduler task cleanly (no-op when ``None``)."""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 def create_app() -> FastAPI:
@@ -536,8 +692,12 @@ def create_app() -> FastAPI:
         logger.info("FRIDAY starting up", extra={"llm_provider": settings.llm_provider})
         _install_runtime(app, settings)
         _wire_voice(app, settings)
-        yield
-        logger.info("FRIDAY shutting down")
+        scheduler_task = _start_scheduler_loop(app, settings)
+        try:
+            yield
+        finally:
+            await _stop_scheduler_loop(scheduler_task)
+            logger.info("FRIDAY shutting down")
 
     app = FastAPI(title="FRIDAY", version="0.1.0", lifespan=lifespan)
 
@@ -577,6 +737,12 @@ def create_app() -> FastAPI:
     # reminder surface. The shared reminder store is wired onto app.state only
     # when enabled.
     app.include_router(reminders_router)
+    # Scheduled triggers (Tier 1) — always registered but self-guards on
+    # FRIDAY_ENABLE_SCHEDULER (404 when off), so the offline default exposes no
+    # scheduler surface. The shared trigger store + scheduler are wired onto
+    # app.state only when enabled, and the background tick loop starts only in the
+    # lifespan when enabled.
+    app.include_router(schedules_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

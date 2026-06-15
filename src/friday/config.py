@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 120
 
+    # --- Reminders & tasks (Tier 1; default off) ---
+    # Gates the whole ``/reminders`` REST surface; off by default so the offline
+    # build exposes no reminder routes (each -> 404). When on, reminders are
+    # stored in a sibling SQLite file alongside ``memory_db_path`` and are also
+    # creatable/listable/completable by the Automation agent via the tool
+    # registry. Reuses ``memory_db_path`` (no new path setting).
+    enable_reminders: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 

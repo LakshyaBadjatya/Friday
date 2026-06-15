@@ -48,6 +48,14 @@ def test_agent_reach_args_rejects_empty_target() -> None:
         AgentReachArgs(target="")
 
 
+@pytest.mark.parametrize("bad", ["-rf", "--output=/etc/x", "-v"])
+def test_agent_reach_args_rejects_option_like_target(bad: str) -> None:
+    # Argv flag smuggling guard: a target that looks like a CLI flag is rejected
+    # before it can reach the agent-reach subprocess.
+    with pytest.raises(ValueError):
+        AgentReachArgs(action="transcribe", target=bad)
+
+
 # -- read_url (keyless, binary-independent) ------------------------------ #
 
 
@@ -195,8 +203,9 @@ async def test_transcribe_returns_transcript_from_fake_subprocess(
     assert result.error is None
     assert result.data["transcript"] == "the transcribed text"
     assert result.data["source"] == "agent-reach"
-    # The CLI is invoked as `agent-reach transcribe <target>`.
-    assert captured["cmd"] == ("agent-reach", "transcribe", PAGE_URL)
+    # The CLI is invoked as `agent-reach transcribe -- <target>` (the `--`
+    # end-of-options separator prevents a leading-dash target smuggling a flag).
+    assert captured["cmd"] == ("agent-reach", "transcribe", "--", PAGE_URL)
 
 
 async def test_transcribe_nonzero_exit_returns_failure_without_fabricating(

@@ -32,7 +32,7 @@ import shutil
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from friday.tools.base import ToolError, ToolResult
 
@@ -84,6 +84,20 @@ class AgentReachArgs(BaseModel):
 
     action: Literal["read_url", "transcribe"] = "read_url"
     target: str = Field(min_length=1)
+
+    @field_validator("target")
+    @classmethod
+    def _reject_option_like_target(cls, value: str) -> str:
+        """Block argv flag smuggling: a ``target`` must not look like a CLI option.
+
+        ``transcribe`` passes ``target`` to ``agent-reach``; a value such as
+        ``--output=/etc/x`` could otherwise be parsed as a flag rather than a URL.
+        We reject any leading ``-`` here (and also pass ``--`` before the URL in
+        the subprocess call as defence in depth).
+        """
+        if value.startswith("-"):
+            raise ValueError("target must not start with '-' (looks like a CLI flag)")
+        return value
 
 
 class AgentReachTool:
@@ -219,6 +233,7 @@ class AgentReachTool:
             process = await asyncio.create_subprocess_exec(
                 self._cli_path,
                 "transcribe",
+                "--",  # end-of-options: a leading-dash target can't smuggle a flag
                 target,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

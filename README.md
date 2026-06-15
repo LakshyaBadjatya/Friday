@@ -143,6 +143,61 @@ down the dashboard shows a friendly banner and never crashes — start it with `
 and refresh. See [`dashboard/README.md`](dashboard/README.md) for the panel-by-endpoint
 map.
 
+## 3D Studio (optional, off by default)
+
+FRIDAY ships a **3D Studio**: describe a model by **text or voice**, watch it built
+live in an interactive [Three.js](https://threejs.org/) canvas you explore with
+**hand gestures** (webcam, via [MediaPipe Hands](https://developers.google.com/mediapipe))
+and **voice** (the browser's Web Speech API), then **download** it as GLB / STL / OBJ.
+
+It is **off by default** behind a flag and adds **no Node build step** — the page
+loads Three.js + MediaPipe from CDNs via an importmap and is served by FastAPI as a
+plain static file (like the dashboard, it is a UI surface that the gate
+syntax-checks rather than browser-tests).
+
+```bash
+export FRIDAY_ENABLE_STUDIO=true   # the master flag; the route is 404 while it's off
+make run                           # serve the API on http://127.0.0.1:8000
+```
+
+Then open **`http://127.0.0.1:8000/studio`** and **allow camera + microphone** when
+prompted (both are optional — deny either and the Studio still works, it just shows
+a hint and disables that input).
+
+**Safety:** the model never emits JavaScript. The `POST /studio/generate` endpoint
+returns a **validated JSON scene-graph** (a pydantic-checked `Scene`); the browser
+maps that trusted-shape data to Three.js meshes. **No model output is ever
+`eval`'d.**
+
+**Free by default:** the *Fast* quality uses FRIDAY's existing LLM to author the
+scene procedurally — no extra cost or key. *Hi-Fi* is an optional external mesh
+provider that is lazy + flagged and needs a **free-tier key**; if the key is absent
+or over quota it **falls back to the free procedural path** rather than erroring you
+into a paywall.
+
+### Cheat-sheet
+
+| Hand gesture (webcam)        | Action                          |
+|------------------------------|---------------------------------|
+| **Pinch** (thumb + index)    | Zoom                            |
+| **Open hand, move**          | Rotate the model                |
+| **Two-hand spread**          | Scale                           |
+| **Index point**              | Highlight the nearest part      |
+
+| Voice command (mic)                       | Action                       |
+|-------------------------------------------|------------------------------|
+| “**make / create / build** a red sphere”  | Generate a new model         |
+| “**rotate**” · “**reset**”                | Rotate · reset the view      |
+| “**zoom in**” · “**zoom out**”            | Dolly the camera             |
+| “**wireframe**”                           | Toggle wireframe             |
+| “**color it blue**”                       | Recolor model/selection      |
+| “**download glb / stl / obj**”            | Export the current scene     |
+
+The same actions are available as on-screen buttons (prompt box, mic toggle,
+Fast/Hi-Fi quality switch, GLB/STL/OBJ downloads). A status HUD shows the live
+gesture, voice state, last heard phrase, and API connection. If the API, camera, or
+mic is unavailable the Studio shows a friendly note and never hard-crashes.
+
 ## Make targets
 
 | Target              | What it does                                                        |

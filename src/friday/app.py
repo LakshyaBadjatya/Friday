@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import cast
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from friday.agents.alerting import AlertingAgent
 from friday.agents.analysis import AnalysisAgent
@@ -41,6 +42,8 @@ from friday.agents.knowledge import KnowledgeAgent
 from friday.api.routes_admin import router as admin_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
+from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
+from friday.api.routes_studio import router as studio_router
 from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
 from friday.config import Settings, get_settings
@@ -66,6 +69,12 @@ from friday.providers.llm import (
 )
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
+from friday.studio.generator import (
+    MeshyText3D,
+    ProceduralGenerator,
+    StudioService,
+    Text3DProvider,
+)
 from friday.tools.base import Tool
 from friday.tools.home import HomeControlTool
 from friday.tools.notify import NotifyTool
@@ -261,6 +270,9 @@ class AppRuntime:
     short_term: ShortTermMemory
     long_term: SQLiteLongTermStore
     flag_overrides: dict[str, bool]
+    #: The live LLM provider, shared with the studio's procedural generator so
+    #: the (free) 3D scene generation uses the same provider as the chat loop.
+    llm: LLMProvider
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -304,6 +316,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         short_term=short_term,
         long_term=long_term,
         flag_overrides=flag_overrides,
+        llm=llm,
     )
 
 
@@ -360,6 +373,48 @@ def _wire_voice(app: FastAPI, settings: Settings) -> None:
     app.state.voice_tts = _build_voice_tts(settings)
 
 
+def _build_studio_hifi(settings: Settings) -> Text3DProvider | None:
+    """Build the optional high-fidelity text-to-3D provider, or ``None``.
+
+    Returns a lazy, keyless-safe :class:`MeshyText3D` only when
+    ``studio_hifi_provider == "meshy"`` *and* a Meshy key is present; otherwise
+    ``None`` so the studio uses the free procedural-only path. Construction
+    performs no network I/O (the ``httpx`` client is lazy in ``generate_mesh``).
+    """
+    if settings.studio_hifi_provider == "meshy" and settings.meshy_api_key is not None:
+        logger.info("using Meshy hi-fi text-to-3D provider")
+        return MeshyText3D(
+            api_key=settings.meshy_api_key.get_secret_value(),
+            model=settings.studio_hifi_model,
+            timeout=settings.llm_timeout_seconds,
+        )
+    return None
+
+
+def _build_studio_service(settings: Settings, llm: LLMProvider) -> StudioService:
+    """Assemble the :class:`StudioService`: procedural (live LLM) + optional hi-fi.
+
+    The procedural generator drives the *same* live LLM as the chat loop (free by
+    default), so 3D scene generation needs no extra credentials. The hi-fi adapter
+    is wired only when configured + keyed; otherwise the service falls back to
+    procedural at request time (never paywalls the user).
+    """
+    return StudioService(ProceduralGenerator(llm), hifi=_build_studio_hifi(settings))
+
+
+def _wire_studio(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
+    """Stash the :class:`StudioService` on ``app.state`` when studio is enabled.
+
+    The ``/studio`` route reads ``app.state.studio``; building it only when
+    ``enable_studio`` is set keeps the offline default untouched and constructs no
+    hi-fi adapter unless asked for. The StaticFiles mount is added separately in
+    :func:`create_app` (a mount cannot be added per-request).
+    """
+    if not settings.enable_studio:
+        return
+    app.state.studio = _build_studio_service(settings, llm)
+
+
 def _install_runtime(app: FastAPI, settings: Settings) -> None:
     """Assemble the runtime graph and stash every shared piece on ``app.state``.
 
@@ -378,6 +433,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.short_term = runtime.short_term
     app.state.long_term = runtime.long_term
     app.state.flag_overrides = runtime.flag_overrides
+    _wire_studio(app, settings, runtime.llm)
 
 
 def create_app() -> FastAPI:
@@ -407,6 +463,10 @@ def create_app() -> FastAPI:
     app.include_router(ws_router)
     # The admin/observability control plane (Phase 5, Stage 2A).
     app.include_router(admin_router)
+    # The 3D Studio (Phase 7) — always registered but self-guards on
+    # FRIDAY_ENABLE_STUDIO (404 when off), so the offline default exposes no
+    # studio surface. The StaticFiles mount is added below only when enabled.
+    app.include_router(studio_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The
@@ -414,5 +474,30 @@ def create_app() -> FastAPI:
     settings = get_settings()
     _install_runtime(app, settings)
     _wire_voice(app, settings)
+    _mount_studio_static(app, settings)
 
     return app
+
+
+def _mount_studio_static(app: FastAPI, settings: Settings) -> None:
+    """Mount the studio static assets at ``/studio/static`` when enabled + present.
+
+    The frontend assets (``src/friday/studio/static``) are produced by the Stage-2
+    agent in parallel; the mount is added only when the studio flag is on *and* the
+    directory exists, so the backend-only build (no frontend files yet) still boots
+    and its tests pass. The route ``GET /studio`` independently serves
+    ``index.html`` via a FileResponse.
+    """
+    if not settings.enable_studio:
+        return
+    if not STUDIO_STATIC_DIR.is_dir():
+        logger.info(
+            "studio enabled but static dir missing; skipping StaticFiles mount",
+            extra={"static_dir": str(STUDIO_STATIC_DIR)},
+        )
+        return
+    app.mount(
+        "/studio/static",
+        StaticFiles(directory=STUDIO_STATIC_DIR),
+        name="studio-static",
+    )

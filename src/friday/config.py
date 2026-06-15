@@ -44,7 +44,9 @@ class Settings(BaseSettings):
     # Per-request LLM timeout in seconds. The provider client retries 0 times,
     # so this is the hard wall-clock budget for a single completion before it
     # surfaces as a ``ProviderError`` (env: ``FRIDAY_LLM_TIMEOUT_SECONDS``).
-    llm_timeout_seconds: float = 60.0
+    # Defaults to 120s to absorb NVIDIA cold-start latency on heavier JSON
+    # generation (e.g. the 3D studio) without spuriously timing out.
+    llm_timeout_seconds: float = 120.0
 
     # --- LLM fallback provider ---
     # Which secondary provider :class:`FallbackLLM` uses when the primary fails.

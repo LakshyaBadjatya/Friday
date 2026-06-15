@@ -13,9 +13,9 @@ rather than failing silently in the renderer.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: A 3D vector (x, y, z) used for position, rotation (Euler radians), and scale.
 Vec3 = tuple[float, float, float]
@@ -23,6 +23,69 @@ Vec3 = tuple[float, float, float]
 #: The closed set of geometry primitives the frontend knows how to build. Each
 #: maps to a Three.js geometry; ``group`` is a transform-only container.
 NodeType = Literal["box", "sphere", "cylinder", "cone", "torus", "plane", "group"]
+
+#: Case-insensitive map from a real-model param *synonym* to the canonical
+#: abbreviated key the contract + Three.js factory expect. Real LLMs emit full
+#: Three.js names (``width``/``height``/``radius``/``tubeRadius``...) while the
+#: contract uses ``w``/``h``/``d``/``r``/``tube``; this canonicalizes them so the
+#: canvas renders the geometry it was asked for. Keys are pre-lowercased.
+_PARAM_SYNONYMS: dict[str, str] = {
+    "width": "w",
+    "height": "h",
+    "depth": "d",
+    "radius": "r",
+    "radiustop": "r",  # cylinder/cone: use whichever radius the model provided
+    "radiusbottom": "r",
+    "length": "h",  # cylinder/cone height synonym
+    "size": "w",  # some models emit {size} for a box edge
+    "tube": "tube",
+    "tuberadius": "tube",
+    "tube_radius": "tube",
+    # Already-canonical keys map to themselves so a mixed payload stays stable.
+    "w": "w",
+    "h": "h",
+    "d": "d",
+    "r": "r",
+}
+
+#: Segment-count / tessellation keys the renderer does not take from the LLM;
+#: dropped during normalization so they never pollute ``params``. Pre-lowercased.
+_DROPPED_PARAM_KEYS: frozenset[str] = frozenset(
+    {
+        "widthsegments",
+        "heightsegments",
+        "depthsegments",
+        "radialsegments",
+        "tubularsegments",
+        "thetasegments",
+        "phisegments",
+        "segments",
+    }
+)
+
+
+def _normalize_params(params: dict[str, Any]) -> dict[str, float]:
+    """Canonicalize a raw ``params`` mapping to the abbreviated contract keys.
+
+    Maps known synonyms (case-insensitive) onto ``w``/``h``/``d``/``r``/``tube``,
+    drops segment-count keys, and keeps unknown *numeric* keys as-is. When several
+    synonyms map to the same canonical key (e.g. ``radiusTop``/``radiusBottom`` ->
+    ``r``), the first one encountered wins so an already-set canonical value is
+    never clobbered. Non-numeric values are dropped (the contract is numbers).
+    """
+    out: dict[str, float] = {}
+    for raw_key, value in params.items():
+        key = raw_key.lower()
+        if key in _DROPPED_PARAM_KEYS:
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        canonical = _PARAM_SYNONYMS.get(key, raw_key)
+        # First writer of a canonical key wins (don't clobber an existing value).
+        out.setdefault(canonical, num)
+    return out
 
 
 class SceneNode(BaseModel):
@@ -47,6 +110,23 @@ class SceneNode(BaseModel):
     metalness: float = 0.0
     roughness: float = 0.8
     children: list[SceneNode] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonicalize_params(cls, data: Any) -> Any:
+        """Canonicalize ``params`` to abbreviated keys *before* field validation.
+
+        Real models emit full Three.js param names; this rewrites them to the
+        contract's abbreviated keys (``w``/``h``/``d``/``r``/``tube``) so both the
+        API path and :func:`validate_scene` produce canonical params, and the
+        no-build frontend renders the requested geometry. Recursion into
+        ``children`` is handled by pydantic re-running this validator per child.
+        """
+        if isinstance(data, dict):
+            params = data.get("params")
+            if isinstance(params, dict):
+                data = {**data, "params": _normalize_params(params)}
+        return data
 
 
 class Scene(BaseModel):

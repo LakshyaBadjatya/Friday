@@ -59,6 +59,8 @@ from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import Chunk
 from friday.observability.metrics import Metrics
 from friday.observability.tracing import Tracer
+from friday.protocols.runner import ProtocolResult, ProtocolRunner
+from friday.protocols.store import Protocol as ProtocolModel
 from friday.providers.llm import LLMProvider, Message
 from friday.tools.registry import ToolRegistry
 from friday.tools.security import AuditRecord
@@ -88,6 +90,26 @@ class ForgettableVectorStore(Protocol):
 
     def forget(self, query_or_source_id: str) -> int:
         """Drop documents matching ``query_or_source_id``; return the count."""
+        ...
+
+
+@runtime_checkable
+class ProtocolStore(Protocol):
+    """The slice of the protocol-store contract the orchestrator depends on.
+
+    Only the read surface the trigger-phrase hook needs: list every protocol (to
+    scan their trigger phrases) and look one up by name (for "run the <name>
+    protocol"). :class:`~friday.protocols.store.SQLiteProtocolStore` satisfies this
+    structurally, so the orchestrator depends on the contract, not the concrete
+    store, and stays constructible un-wired in narrow unit tests.
+    """
+
+    def list_protocols(self) -> list[ProtocolModel]:
+        """Return every stored protocol (insertion order)."""
+        ...
+
+    def get_by_name(self, name: str) -> ProtocolModel | None:
+        """Return the protocol named ``name`` (case-insensitive) or ``None``."""
         ...
 
 
@@ -151,6 +173,41 @@ _FORGET_RULES: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
 )
+
+
+# "run the <name> protocol" intent (Tier 1 voice protocols): an explicit, named
+# way to fire a stored protocol regardless of its trigger phrase. The name is the
+# only capture group; "the"/"my" lead-ins and the trailing "protocol"/"routine"
+# keyword are optional so "run goodnight", "run the goodnight protocol", and
+# "start my bedtime routine" all match. Detected up front (the router has no
+# PROTOCOL mode).
+_RUN_PROTOCOL_RULES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:run|start|execute|activate|begin)\s+(?:the\s+|my\s+)?"
+        r"(.+?)\s+(?:protocol|routine)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:run|start|execute|activate|begin)\s+(?:the\s+|my\s+)?protocol\s+(.+)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _extract_protocol_name(text: str) -> str | None:
+    """Return the protocol name from a "run the <name> protocol" command, or None.
+
+    Matches the ordered :data:`_RUN_PROTOCOL_RULES` and returns the captured name
+    with surrounding whitespace and a trailing period/quote stripped, so
+    ``"run the Goodnight protocol."`` yields ``"Goodnight"``.
+    """
+    for pattern in _RUN_PROTOCOL_RULES:
+        match = pattern.search(text)
+        if match is not None:
+            name = match.group(1).strip().strip("\"'").rstrip(".!?").strip()
+            if name:
+                return name
+    return None
 
 
 def _extract_forget_target(text: str) -> str | None:
@@ -238,6 +295,16 @@ class Orchestrator:
         metrics: Optional :class:`~friday.observability.metrics.Metrics` counters.
             When present, each turn increments ``requests`` and the per-mode
             counter (and ``errors`` on a domain failure). No-op when absent.
+        protocol_store: Optional durable
+            :class:`~friday.protocols.store.SQLiteProtocolStore`. When wired *and*
+            ``FRIDAY_ENABLE_PROTOCOLS`` is set, a turn whose text matches a stored
+            ``trigger_phrase`` (or "run the <name> protocol") fires that protocol
+            via ``protocol_runner`` before normal routing. When absent (the default)
+            the hook is inert, so existing orchestrator tests behave unchanged.
+        protocol_runner: Optional :class:`~friday.protocols.runner.ProtocolRunner`
+            over the shared registry; runs a matched protocol's steps in order,
+            honoring the confirm-step. Inert unless both it and ``protocol_store``
+            are wired and the flag is on.
     """
 
     def __init__(
@@ -251,6 +318,8 @@ class Orchestrator:
         vector: ForgettableVectorStore | None = None,
         tracer: Tracer | None = None,
         metrics: Metrics | None = None,
+        protocol_store: ProtocolStore | None = None,
+        protocol_runner: ProtocolRunner | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -261,6 +330,8 @@ class Orchestrator:
         self._vector = vector
         self._tracer = tracer
         self._metrics = metrics
+        self._protocol_store = protocol_store
+        self._protocol_runner = protocol_runner
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
@@ -646,6 +717,95 @@ class Orchestrator:
             f"({removed} record(s) removed)."
         )
 
+    # -- voice protocols (Tier 1) ------------------------------------------ #
+    def _match_protocol(self, text: str) -> ProtocolModel | None:
+        """Return the enabled protocol ``text`` fires, or ``None``.
+
+        Matching is inert unless protocols are enabled *and* both the store and
+        runner are wired. Two ways to fire a protocol, most-specific first:
+
+        1. An explicit "run the <name> protocol" command -> looked up by name.
+        2. A stored ``trigger_phrase`` contained (case-insensitively, on a word
+           boundary) in the user message -> the longest matching phrase wins, so a
+           more specific trigger beats a shorter one.
+
+        Only ``enabled`` protocols match; a disabled one is skipped.
+        """
+        if not get_settings().enable_protocols:
+            return None
+        store = self._protocol_store
+        if store is None or self._protocol_runner is None:
+            return None
+
+        named = _extract_protocol_name(text)
+        if named is not None:
+            candidate = store.get_by_name(named)
+            if candidate is not None and candidate.enabled:
+                return candidate
+
+        lowered = text.lower()
+        best: ProtocolModel | None = None
+        for protocol in store.list_protocols():
+            if not protocol.enabled:
+                continue
+            phrase = protocol.trigger_phrase.strip().lower()
+            if not phrase:
+                continue
+            if re.search(rf"\b{re.escape(phrase)}\b", lowered):
+                if best is None or len(phrase) > len(best.trigger_phrase):
+                    best = protocol
+        return best
+
+    async def _run_protocol(
+        self, protocol: ProtocolModel, state: GraphState
+    ) -> str:
+        """Run ``protocol`` via the runner, threading ``state.confirmed``.
+
+        When a side-effecting step pauses on the confirm-step (and the turn is
+        unconfirmed), a persona confirm question is surfaced and NO side-effecting
+        step runs — a confirming follow-up re-fires the protocol and proceeds.
+        Otherwise the completed run is reported honestly (including a step error).
+        """
+        assert self._protocol_runner is not None  # guarded by the caller
+        state.mode = Mode.AUTOMATION
+        result = await self._protocol_runner.run(
+            protocol, confirmed=state.confirmed
+        )
+        state.scratchpad["protocol"] = protocol.name
+        state.scratchpad["protocol_result"] = result.model_dump()
+        return self._protocol_reply(protocol, result)
+
+    def _protocol_reply(
+        self, protocol: ProtocolModel, result: ProtocolResult
+    ) -> str:
+        """A deterministic persona reply describing a protocol run's outcome.
+
+        Reported without an LLM call so a protocol run is always truthful and never
+        blocked on a model: a confirm question on a paused side-effecting step, an
+        honest failure on a stepped error, or a tidy "done" on a full run.
+        """
+        owner = get_settings().owner_address
+        if result.needs_confirmation:
+            paused = result.steps[-1].tool if result.steps else "a step"
+            done = max(len(result.steps) - 1, 0)
+            return (
+                f"The {protocol.name} protocol has a real-world step "
+                f"({paused!r}) I won't run without a nod, {owner}. "
+                f"{done} step(s) done so far — reply to confirm and I'll finish it."
+            )
+        if not result.ran:
+            failed = next((s for s in result.steps if not s.ok), None)
+            where = failed.tool if failed is not None else "a step"
+            detail = failed.error if failed is not None and failed.error else "unknown"
+            return (
+                f"The {protocol.name} protocol stopped at {where!r}, {owner} — "
+                f"{detail}. I ran the steps before it and held the rest."
+            )
+        return (
+            f"Done, {owner} — ran the {protocol.name} protocol "
+            f"({len(result.steps)} step(s))."
+        )
+
     # -- knowledge turn (grounded retrieval entrypoint) -------------------- #
     async def knowledge_turn(self, state: GraphState) -> GraphState:
         """Run a grounded Knowledge-agent turn and synthesize a persona reply.
@@ -755,7 +915,16 @@ class Orchestrator:
             self._record(state)
             return state
 
-        # 2b. A "forget X" command removes everything stored about X (§10).
+        # 2b. A voice-protocol trigger (a stored ``trigger_phrase`` or "run the
+        # <name> protocol") fires that protocol through the runner, threading the
+        # turn's confirm flag. Inert unless protocols are enabled + wired.
+        protocol = self._match_protocol(state.user_input)
+        if protocol is not None:
+            state.response = await self._run_protocol(protocol, state)
+            self._record(state)
+            return state
+
+        # 2c. A "forget X" command removes everything stored about X (§10).
         forget_target = _extract_forget_target(state.user_input)
         if forget_target is not None:
             state.mode = Mode.CONVERSATION

@@ -131,6 +131,15 @@ class Settings(BaseSettings):
     # summarizes (one line each).
     briefing_recent_activity: int = 5
 
+    # --- Voice protocols (Tier 1; default off) ---
+    # Gates the whole ``/protocols`` REST surface *and* the orchestrator's
+    # trigger-phrase hook; off by default so the offline build exposes no protocol
+    # routes (each -> 404) and the orchestrator never matches a protocol. When on,
+    # named routines (an ordered list of registered tool calls) are persisted in a
+    # sibling SQLite file alongside ``memory_db_path`` and fired by one trigger,
+    # honoring the existing confirm-step on any side-effecting step.
+    enable_protocols: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 

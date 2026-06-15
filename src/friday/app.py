@@ -56,6 +56,7 @@ from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
 from friday.config import Settings, get_settings
+from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
 from friday.core.orchestrator import Orchestrator
 from friday.logging import configure_logging, get_logger
 from friday.memory.long_term import SQLiteLongTermStore
@@ -303,6 +304,19 @@ def _build_protocol_runner(registry: ToolRegistry) -> ProtocolRunner:
     validation / confirm-step gates.
     """
     return ProtocolRunner(registry, _registered_tool_names(registry))
+
+
+def _build_critic(llm: LLMProvider) -> SelfCritic:
+    """Build the :class:`SelfCritic` over the live LLM + persona banned markers.
+
+    The critic reviews the final persona reply once before it is returned. It is
+    always constructed and injected (so the wiring is uniform), but the
+    orchestrator only *invokes* it when ``FRIDAY_ENABLE_SELF_CRITIQUE`` is on — so
+    the off-by-default build pays no extra LLM call. The banned-tone markers come
+    from the persona spec (:data:`DEFAULT_PERSONA_MARKERS`), the same list the
+    deterministic scan flags. Construction performs no I/O.
+    """
+    return SelfCritic(llm, persona_markers=list(DEFAULT_PERSONA_MARKERS))
 
 
 def _make_due_reminders_action(
@@ -588,6 +602,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
     )
     protocol_store = _build_protocol_store(settings)
     protocol_runner = _build_protocol_runner(registry)
+    critic = _build_critic(llm)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
         llm=llm,
@@ -601,6 +616,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         metrics=metrics,
         protocol_store=protocol_store,
         protocol_runner=protocol_runner,
+        critic=critic,
     )
     return AppRuntime(
         orchestrator=orchestrator,

@@ -50,6 +50,7 @@ from pydantic import BaseModel
 
 from friday.agents.base import AgentRegistry, AgentResult
 from friday.config import get_settings
+from friday.core.critic import SelfCritic
 from friday.core.router import route
 from friday.core.security import run_lockdown
 from friday.core.state import GraphState, Mode
@@ -305,6 +306,13 @@ class Orchestrator:
             over the shared registry; runs a matched protocol's steps in order,
             honoring the confirm-step. Inert unless both it and ``protocol_store``
             are wired and the flag is on.
+        critic: Optional :class:`~friday.core.critic.SelfCritic`. When wired *and*
+            ``FRIDAY_ENABLE_SELF_CRITIQUE`` is set, the final synthesized reply is
+            reviewed once before it is returned; if the review fails and offers a
+            concrete revision, that revision replaces the reply (one bounded pass,
+            never re-critiqued, and non-fatal — any critic error keeps the
+            original). When absent or the flag is off, the critic is never called
+            (no extra LLM cost), so existing orchestrator behavior is unchanged.
     """
 
     def __init__(
@@ -320,6 +328,7 @@ class Orchestrator:
         metrics: Metrics | None = None,
         protocol_store: ProtocolStore | None = None,
         protocol_runner: ProtocolRunner | None = None,
+        critic: SelfCritic | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -332,6 +341,7 @@ class Orchestrator:
         self._metrics = metrics
         self._protocol_store = protocol_store
         self._protocol_runner = protocol_runner
+        self._critic = critic
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
@@ -412,6 +422,40 @@ class Orchestrator:
             owner = get_settings().owner_address
             return f"I came back empty on that one, {owner}. Mind rephrasing?"
         return text.strip()
+
+    # -- self-critique (Tier 2; build-spec post-spec) ---------------------- #
+    async def _maybe_critique(self, state: GraphState) -> None:
+        """Optionally review the final synthesized reply once; revise if it fails.
+
+        Inert unless ``FRIDAY_ENABLE_SELF_CRITIQUE`` is set *and* a
+        :class:`~friday.core.critic.SelfCritic` is wired — so the flag-off /
+        un-wired path never touches the critic's LLM (no extra model call). When
+        active it runs exactly ONE review of ``state.response``; if the critique
+        is ``not ok`` and offers a concrete ``revised`` draft, that draft replaces
+        the response (the revision is NOT itself re-critiqued — one bounded pass).
+
+        Non-fatal by construction: the critic swallows its own LLM/parse errors
+        (returning a passing critique), so a failure here can only ever keep the
+        original response. The outcome is recorded on the scratchpad for the trace.
+        """
+        if self._critic is None or not get_settings().enable_self_critique:
+            return
+        draft = state.response
+        if draft is None:
+            return
+        # Open the "critique" span ONLY here — past the flag/wiring guard — so the
+        # off/un-wired turn emits the exact same span set as before (no observable
+        # change when the feature is inert).
+        with self._span("critique"):
+            critique = await self._critic.review(draft, user_text=state.user_input)
+        revised = critique.revised if (not critique.ok and critique.revised) else None
+        state.scratchpad["self_critique"] = {
+            "ok": critique.ok,
+            "issues": critique.issues,
+            "revised": revised is not None,
+        }
+        if revised is not None:
+            state.response = revised
 
     # -- conversation ------------------------------------------------------ #
     async def _converse(self, state: GraphState, history: list[Message]) -> str:
@@ -957,6 +1001,13 @@ class Orchestrator:
                 state.mode = Mode.CONVERSATION
                 state.response = await self._converse(state, history)
 
+        # 4a. Optionally self-critique the final synthesized reply (Tier 2). Only
+        # the LLM-synthesized modes are reviewed — CLARIFY is a deterministic
+        # question, so it needs no model review. Inert unless the flag is on AND a
+        # critic is wired; bounded to one pass; non-fatal (errors keep the reply).
+        if state.mode is not Mode.CLARIFY:
+            await self._maybe_critique(state)
+
         # 5. Persist the turn (timed as the "synth" span — the final assembly +
         # short-term-memory write that completes the synthesized reply).
         with self._span("synth"):
@@ -1011,6 +1062,7 @@ class Orchestrator:
         if state.response is None:
             history = self._memory.history(state.session_id)
             state.response = await self._converse(state, history)
+            await self._maybe_critique(state)
         self._record(state)
         return state
 
@@ -1019,6 +1071,7 @@ class Orchestrator:
         if state.response is None:
             history = self._memory.history(state.session_id)
             state.response = await self._research(state, history)
+            await self._maybe_critique(state)
         self._record(state)
         return state
 
@@ -1047,6 +1100,7 @@ class Orchestrator:
             history = self._memory.history(state.session_id)
             state.mode = mode
             state.response = await self._handle_agent_mode(mode, state, history)
+            await self._maybe_critique(state)
         self._record(state)
         return state
 

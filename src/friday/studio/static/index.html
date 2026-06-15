@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>FRIDAY · 3D Studio</title>
+  <link rel="stylesheet" href="/studio/static/studio.css" />
+
+  <!--
+    No-build, no-bundler frontend. Everything loads from CDNs via an importmap so
+    `studio.js` can `import` Three.js + its addon modules by bare specifier with no
+    Node/webpack step. MediaPipe Hands (webcam gestures) and the Web Speech API
+    (voice) are loaded as classic globals / browser-native. Nothing here is
+    bundled or transpiled; the file is plain ES2022 the browser runs directly.
+
+    SAFETY: this page never eval()s anything from the server. The /studio/generate
+    endpoint returns a *validated JSON Scene* (the shared schema); studio.js maps
+    that data to Three.js meshes. No server-sourced JavaScript is ever executed.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <!--
+    MediaPipe Hands (classic UMD globals: window.Hands, window.Camera). Loaded
+    lazily-tolerant: if these fail to load, studio.js degrades to "gestures
+    unavailable" rather than crashing.
+
+    SRI note: the MediaPipe UMD bundles are pinned to exact, immutable @version
+    paths and `crossorigin="anonymous"` is set. We deliberately omit
+    integrity="sha384-…" here because (a) these scripts handle no secrets and run
+    only webcam landmark math, (b) the feature degrades gracefully if a script
+    is blocked/altered (a tampered hash would simply disable gestures, not the
+    app), and (c) MediaPipe's CDN artifacts are large and have historically shipped
+    minor minified variants that break a static hash. The security-sensitive path
+    — model output — is validated JSON, never executed code.
+  -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"
+    crossorigin="anonymous"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"
+    crossorigin="anonymous"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js"
+    crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">FRIDAY</span>
+        <span class="brand-sub">3D Studio</span>
+      </div>
+      <div id="conn-status" class="pill pill-muted" title="Backend connection">
+        <span class="dot"></span><span class="conn-label">checking API…</span>
+      </div>
+    </header>
+
+    <main id="stage">
+      <!-- The Three.js renderer attaches its canvas here. -->
+      <div id="viewport"></div>
+
+      <!-- MediaPipe landmark overlay + the hidden webcam feed. -->
+      <video id="webcam" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+
+      <!-- Heads-up display: gesture, voice, and last-action feedback. -->
+      <div id="hud" aria-live="polite">
+        <div class="hud-row"><span class="hud-key">gesture</span><span id="hud-gesture">idle</span></div>
+        <div class="hud-row"><span class="hud-key">voice</span><span id="hud-voice">off</span></div>
+        <div class="hud-row"><span class="hud-key">heard</span><span id="hud-heard">—</span></div>
+        <div class="hud-row"><span class="hud-key">status</span><span id="hud-status">ready</span></div>
+      </div>
+
+      <!-- Non-blocking, auto-dismissing toast for friendly errors/notices. -->
+      <div id="toast" role="status" hidden></div>
+    </main>
+
+    <footer id="controls">
+      <form id="prompt-form" autocomplete="off">
+        <input
+          id="prompt"
+          name="prompt"
+          type="text"
+          placeholder="Describe a model — e.g. &quot;a red robot with a cylindrical body&quot;"
+          aria-label="Model description" />
+        <button id="generate" type="submit" class="btn btn-primary">Generate</button>
+        <button id="mic" type="button" class="btn btn-ghost" aria-pressed="false" title="Toggle voice">
+          <span class="mic-glyph">🎤</span><span class="mic-label">Voice</span>
+        </button>
+      </form>
+
+      <div class="control-row">
+        <div class="seg" role="group" aria-label="Quality">
+          <button type="button" class="seg-btn is-active" data-quality="fast">Fast (free)</button>
+          <button type="button" class="seg-btn" data-quality="hifi">Hi-Fi</button>
+        </div>
+
+        <div class="control-spacer"></div>
+
+        <div class="dl-group" role="group" aria-label="Download">
+          <span class="dl-label">Download</span>
+          <button type="button" class="btn btn-ghost" data-export="glb">GLB</button>
+          <button type="button" class="btn btn-ghost" data-export="stl">STL</button>
+          <button type="button" class="btn btn-ghost" data-export="obj">OBJ</button>
+        </div>
+
+        <div class="control-spacer"></div>
+
+        <button type="button" id="cam-toggle" class="btn btn-ghost" aria-pressed="false">
+          Hand control
+        </button>
+        <button type="button" id="reset-view" class="btn btn-ghost">Reset view</button>
+        <button type="button" id="wire-toggle" class="btn btn-ghost" aria-pressed="false">Wireframe</button>
+      </div>
+
+      <details id="cheatsheet">
+        <summary>Gesture &amp; voice cheat-sheet</summary>
+        <div class="cheat-cols">
+          <div>
+            <h4>Hand gestures</h4>
+            <ul>
+              <li><b>Pinch</b> (thumb + index) — zoom</li>
+              <li><b>Open hand, move</b> — rotate the model</li>
+              <li><b>Two-hand spread</b> — scale</li>
+              <li><b>Index point</b> — highlight nearest part</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Voice</h4>
+            <ul>
+              <li>“<b>make a red sphere</b>” — generate</li>
+              <li>“<b>rotate</b>” / “<b>reset</b>”</li>
+              <li>“<b>zoom in</b>” / “<b>zoom out</b>”</li>
+              <li>“<b>wireframe</b>”</li>
+              <li>“<b>color it blue</b>”</li>
+              <li>“<b>download glb</b> / stl / obj”</li>
+            </ul>
+          </div>
+        </div>
+      </details>
+    </footer>
+  </div>
+
+  <script type="module" src="/studio/static/studio.js"></script>
+</body>
+</html>

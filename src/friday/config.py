@@ -95,6 +95,24 @@ class Settings(BaseSettings):
     tts_provider: str = "piper"
     wake_word_engine: str = "openwakeword"
 
+    # --- 3D Studio (Phase 7; default off) ---
+    # The whole studio feature (router + static UI) is gated behind this flag; off
+    # by default so the offline build exposes no studio surface (route -> 404).
+    enable_studio: bool = False
+    # Optional high-fidelity external text-to-3D backend. ``none`` (default) keeps
+    # the free procedural-only path; ``meshy`` enables the lazy Meshy adapter, but
+    # only when ``meshy_api_key`` is present — otherwise generation falls back to
+    # the free procedural Scene path (never paywalls the user).
+    studio_hifi_provider: Literal["none", "meshy"] = "none"
+    # Meshy credentials, read from the provider-native ``MESHY_API_KEY`` env var
+    # unprefixed via an alias (matching the NVIDIA/Gemini convention).
+    meshy_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MESHY_API_KEY", "meshy_api_key"),
+    )
+    # Optional Meshy model id; empty lets the provider use its default.
+    studio_hifi_model: str = ""
+
     # --- Device control ---
     # Allow-list of device ids the home/device tools may actuate. Read from
     # ``FRIDAY_DEVICE_ALLOWLIST`` as a comma-separated string (e.g.

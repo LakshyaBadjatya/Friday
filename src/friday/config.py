@@ -140,6 +140,15 @@ class Settings(BaseSettings):
     # honoring the existing confirm-step on any side-effecting step.
     enable_protocols: bool = False
 
+    # --- Self-critique loop (Tier 2; default off) ---
+    # Gates the orchestrator's post-synthesis self-review. Off by default so the
+    # turn loop makes no extra LLM call. When on, the final persona reply is
+    # reviewed once (a deterministic banned-tone scan plus one LLM verdict pass);
+    # if it fails and a concrete correction is offered, that revision replaces the
+    # reply — one bounded pass (the revision is never re-critiqued) and non-fatal
+    # (any critic error keeps the original response).
+    enable_self_critique: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 

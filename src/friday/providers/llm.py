@@ -1,4 +1,4 @@
-"""LLM provider abstraction, fakes, fallback wrapper, and the NVIDIA NIM adapter.
+"""LLM provider abstraction, fakes, fallback wrapper, and OpenAI-compatible adapters.
 
 This module owns the typed LLM boundary for FRIDAY:
 
@@ -7,8 +7,12 @@ This module owns the typed LLM boundary for FRIDAY:
 * :class:`LLMProvider` — the abstract async ``complete`` contract.
 * :class:`FakeLLM` — pops scripted responses (zero network, for tests).
 * :class:`FallbackLLM` — primary then secondary exactly once on failure.
+* :class:`_OpenAICompatProvider` — the shared OpenAI-compatible adapter logic
+  (message/tool mapping, response parsing, error wrapping).
 * :class:`NvidiaNIMProvider` — real adapter over the OpenAI-compatible NVIDIA
   NIM endpoint.
+* :class:`GeminiProvider` — real adapter over Gemini's OpenAI-compatible
+  endpoint, used as the LLM fallback.
 
 IMPORTANT: this is the **only** module in the codebase permitted to import an
 LLM SDK (``openai``). All business logic depends on :class:`LLMProvider`.
@@ -149,21 +153,26 @@ class FallbackLLM(LLMProvider):
 
 
 # --------------------------------------------------------------------------- #
-# NVIDIA NIM adapter (OpenAI-compatible)
+# Shared OpenAI-compatible adapter
 # --------------------------------------------------------------------------- #
-class NvidiaNIMProvider(LLMProvider):
-    """Real :class:`LLMProvider` over the OpenAI-compatible NVIDIA NIM API.
+class _OpenAICompatProvider(LLMProvider):
+    """Shared :class:`LLMProvider` logic for OpenAI-compatible chat endpoints.
 
-    Uses the ``openai`` :class:`AsyncOpenAI` client pointed at ``base_url``.
-    Maps FRIDAY's typed models to/from the OpenAI wire format and wraps every
-    client/transport error in :class:`ProviderError`.
+    Both NVIDIA NIM and Gemini expose an OpenAI-compatible
+    ``/chat/completions`` surface, so the message/tool mapping, response
+    parsing, and error wrapping are identical. Concrete adapters set
+    :attr:`_provider_name` (used only in :class:`ProviderError` messages) and
+    inherit everything else.
 
     The client is built with an explicit ``timeout`` (seconds) and
-    ``max_retries=0``: a slow NIM endpoint must surface promptly as a
+    ``max_retries=0``: a slow endpoint must surface promptly as a
     :class:`ProviderError` rather than hang, and the SDK must not silently retry
     and multiply latency — retry/fallback policy is owned by
     :class:`FallbackLLM`.
     """
+
+    #: Human-readable provider label woven into :class:`ProviderError` messages.
+    _provider_name: str = "LLM"
 
     def __init__(
         self,
@@ -233,6 +242,7 @@ class NvidiaNIMProvider(LLMProvider):
         messages: list[Message],
         tools: list[ToolSpec] | None = None,
     ) -> LLMResponse:
+        name = self._provider_name
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": self._to_openai_messages(messages),
@@ -245,13 +255,13 @@ class NvidiaNIMProvider(LLMProvider):
             completion = await self._client.chat.completions.create(**kwargs)
         except (APITimeoutError, APIConnectionError) as exc:
             raise ProviderError(
-                f"NVIDIA NIM request timed out or could not connect "
+                f"{name} request timed out or could not connect "
                 f"(timeout/connection error): {exc}"
             ) from exc
         except OpenAIError as exc:
-            raise ProviderError(f"NVIDIA NIM request failed: {exc}") from exc
+            raise ProviderError(f"{name} request failed: {exc}") from exc
         except Exception as exc:  # pragma: no cover - defensive transport guard
-            raise ProviderError(f"NVIDIA NIM request failed: {exc}") from exc
+            raise ProviderError(f"{name} request failed: {exc}") from exc
 
         try:
             choice = completion.choices[0]
@@ -264,6 +274,37 @@ class NvidiaNIMProvider(LLMProvider):
                 completion_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
             )
         except (IndexError, AttributeError) as exc:
-            raise ProviderError(f"NVIDIA NIM returned an unexpected payload: {exc}") from exc
+            raise ProviderError(f"{name} returned an unexpected payload: {exc}") from exc
 
         return LLMResponse(text=text, tool_calls=tool_calls, usage=usage)
+
+
+# --------------------------------------------------------------------------- #
+# NVIDIA NIM adapter (OpenAI-compatible)
+# --------------------------------------------------------------------------- #
+class NvidiaNIMProvider(_OpenAICompatProvider):
+    """Real :class:`LLMProvider` over the OpenAI-compatible NVIDIA NIM API.
+
+    A thin specialization of :class:`_OpenAICompatProvider`: it inherits the
+    message/tool mapping, response parsing, and error wrapping unchanged and only
+    labels its errors. The public constructor signature and behaviour are
+    identical to the pre-refactor adapter.
+    """
+
+    _provider_name = "NVIDIA NIM"
+
+
+# --------------------------------------------------------------------------- #
+# Gemini adapter (OpenAI-compatible)
+# --------------------------------------------------------------------------- #
+class GeminiProvider(_OpenAICompatProvider):
+    """Real :class:`LLMProvider` over Gemini's OpenAI-compatible endpoint.
+
+    Structurally identical to :class:`NvidiaNIMProvider`: it points the
+    ``openai`` :class:`AsyncOpenAI` client at Gemini's
+    ``/v1beta/openai/`` base URL and inherits all mapping/parsing/error-wrapping
+    from :class:`_OpenAICompatProvider`. Used as the secondary in
+    :class:`FallbackLLM` when ``llm_fallback_provider == "gemini"``.
+    """
+
+    _provider_name = "Gemini"

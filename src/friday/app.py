@@ -57,7 +57,13 @@ from friday.providers.embeddings import (
     FakeEmbeddings,
     NvidiaEmbeddings,
 )
-from friday.providers.llm import FakeLLM, LLMProvider, NvidiaNIMProvider
+from friday.providers.llm import (
+    FakeLLM,
+    FallbackLLM,
+    GeminiProvider,
+    LLMProvider,
+    NvidiaNIMProvider,
+)
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.tools.base import Tool
@@ -73,21 +79,47 @@ logger = get_logger("friday.app")
 _PERSONA_PATH = Path(__file__).resolve().parent / "persona" / "friday.md"
 
 
+def _build_gemini_fallback(settings: Settings) -> GeminiProvider | None:
+    """Build the Gemini secondary provider, or ``None`` if not configured.
+
+    Returns a :class:`GeminiProvider` only when ``llm_fallback_provider`` is
+    ``"gemini"`` *and* a Gemini key is present; otherwise ``None`` so the caller
+    keeps the single-provider behaviour. Lazy client construction means this
+    performs no network I/O.
+    """
+    if settings.llm_fallback_provider == "gemini" and settings.gemini_api_key is not None:
+        logger.info("using Gemini LLM fallback", extra={"model": settings.gemini_model})
+        return GeminiProvider(
+            api_key=settings.gemini_api_key.get_secret_value(),
+            base_url=settings.gemini_base_url,
+            model=settings.gemini_model,
+            timeout=settings.llm_timeout_seconds,
+        )
+    return None
+
+
 def _build_llm(settings: Settings) -> LLMProvider:
     """Select the LLM provider from settings.
 
     NVIDIA NIM when explicitly configured *and* a key is present; otherwise the
     scripted :class:`FakeLLM` (empty script) so the app always boots without
-    credentials or network.
+    credentials or network. When the live primary is selected *and* a Gemini
+    fallback is configured (``llm_fallback_provider == "gemini"`` with a key),
+    the primary is wrapped in a :class:`FallbackLLM` whose secondary is the
+    :class:`GeminiProvider`. The ``fake`` path is untouched by fallback config.
     """
     if settings.llm_provider == "nvidia" and settings.nvidia_api_key is not None:
         logger.info("using NVIDIA NIM LLM provider", extra={"model": settings.nvidia_model})
-        return NvidiaNIMProvider(
+        primary: LLMProvider = NvidiaNIMProvider(
             api_key=settings.nvidia_api_key.get_secret_value(),
             base_url=settings.nvidia_base_url,
             model=settings.nvidia_model,
             timeout=settings.llm_timeout_seconds,
         )
+        secondary = _build_gemini_fallback(settings)
+        if secondary is not None:
+            return FallbackLLM(primary=primary, secondary=secondary)
+        return primary
     logger.info("using FakeLLM provider (no network)")
     return FakeLLM(responses=[])
 

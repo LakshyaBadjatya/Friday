@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         default="meta/llama-3.3-70b-instruct",
         validation_alias=AliasChoices("NVIDIA_MODEL", "nvidia_model"),
     )
+    # Per-request LLM timeout in seconds. The provider client retries 0 times,
+    # so this is the hard wall-clock budget for a single completion before it
+    # surfaces as a ``ProviderError`` (env: ``FRIDAY_LLM_TIMEOUT_SECONDS``).
+    llm_timeout_seconds: float = 60.0
 
     # --- Routing ---
     route_min_confidence: float = 0.55

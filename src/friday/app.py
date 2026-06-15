@@ -31,6 +31,7 @@ from typing import cast
 from fastapi import FastAPI
 
 from friday.api.routes_chat import router as chat_router
+from friday.api.routes_health import router as health_router
 from friday.config import Settings, get_settings
 from friday.core.orchestrator import Orchestrator
 from friday.logging import configure_logging, get_logger
@@ -60,6 +61,7 @@ def _build_llm(settings: Settings) -> LLMProvider:
             api_key=settings.nvidia_api_key.get_secret_value(),
             base_url=settings.nvidia_base_url,
             model=settings.nvidia_model,
+            timeout=settings.llm_timeout_seconds,
         )
     logger.info("using FakeLLM provider (no network)")
     return FakeLLM(responses=[])
@@ -105,6 +107,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="FRIDAY", version="0.1.0", lifespan=lifespan)
     app.include_router(chat_router)
+    app.include_router(health_router)
 
     # Build the orchestrator eagerly too so a TestClient that does not trigger
     # the lifespan (or any direct create_app() user) still has a working app.

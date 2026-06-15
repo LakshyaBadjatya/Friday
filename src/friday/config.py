@@ -295,6 +295,101 @@ class Settings(BaseSettings):
     # the fakes by default, so the offline build needs no heavy library.
     enable_perception: bool = False
 
+    # --- Maps / geolocation (Tier 3; default off) ---
+    # Gates the Google Maps surface (directions / places / geocoding). Off by
+    # default so the offline build wires no Maps client. When on, the adapter talks
+    # to the Google Maps web APIs with ``google_maps_api_key`` (a :class:`SecretStr`,
+    # never logged; sent only as the documented ``key`` query parameter) over httpx.
+    enable_maps: bool = False
+    # Google Maps API key, read from ``FRIDAY_GOOGLE_MAPS_API_KEY``. A
+    # :class:`SecretStr` so it never leaks into repr/str/logs.
+    google_maps_api_key: SecretStr | None = None
+
+    # --- Presence detection (Tier 3; default off) ---
+    # Gates the presence surface (which known devices are currently on the LAN).
+    # Off by default so the offline build runs no scan. When on, presence maps the
+    # MAC addresses seen on the network to friendly names from
+    # ``presence_known_devices``.
+    enable_presence: bool = False
+    # Known devices as comma-separated ``MAC=Name`` entries (e.g.
+    # ``AA:BB:CC:DD:EE:FF=Phone,11:22:33:44:55:66=Laptop``). Read from
+    # ``FRIDAY_PRESENCE_KNOWN_DEVICES``; ``NoDecode`` + the before-validator below
+    # comma-split it (mirroring ``device_allowlist``), keeping each ``MAC=Name``
+    # entry whole; empty means no devices are tracked.
+    presence_known_devices: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
+
+    # --- Market data (Tier 3; default off) ---
+    # Gates the market-data surface (quotes / holdings via the Dhan broker API).
+    # Off by default so the offline build wires no broker client. When on, the
+    # adapter talks to Dhan over httpx using the two credentials below.
+    enable_market_data: bool = False
+    # Dhan client id and access token, read from ``FRIDAY_DHAN_CLIENT_ID`` /
+    # ``FRIDAY_DHAN_ACCESS_TOKEN``. Both :class:`SecretStr` so they never leak into
+    # repr/str/logs; sent only as the documented Dhan auth headers.
+    dhan_client_id: SecretStr | None = None
+    dhan_access_token: SecretStr | None = None
+
+    # --- Calendar (Tier 3; default off) ---
+    # Gates the Google Calendar surface. Off by default so the offline build wires
+    # no calendar client. When on, the adapter talks to the Google Calendar API
+    # over httpx using ``google_oauth_token``.
+    enable_calendar: bool = False
+    # Google OAuth bearer token, read from ``FRIDAY_GOOGLE_OAUTH_TOKEN``. A
+    # :class:`SecretStr` so it never leaks into repr/str/logs; sent only as the
+    # ``Authorization: Bearer`` header.
+    google_oauth_token: SecretStr | None = None
+
+    # --- Email (Tier 3; default off) ---
+    # Gates the Gmail surface (read / send). Off by default so the offline build
+    # wires no mail client. When on, the adapter talks to the Gmail API over httpx
+    # using ``gmail_oauth_token``.
+    enable_email: bool = False
+    # Gmail OAuth bearer token, read from ``FRIDAY_GMAIL_OAUTH_TOKEN``. A
+    # :class:`SecretStr` so it never leaks into repr/str/logs; sent only as the
+    # ``Authorization: Bearer`` header.
+    gmail_oauth_token: SecretStr | None = None
+
+    # --- Comms / messaging (Tier 3; default off) ---
+    # Gates the Twilio messaging surface (SMS / voice). Off by default so the
+    # offline build wires no Twilio client. When on, the adapter talks to the
+    # Twilio REST API over httpx using the SID/token below (HTTP basic auth) and
+    # sends from ``twilio_from_number``.
+    enable_comms: bool = False
+    # Twilio account SID and auth token, read from ``FRIDAY_TWILIO_ACCOUNT_SID`` /
+    # ``FRIDAY_TWILIO_AUTH_TOKEN``. Both :class:`SecretStr` so they never leak into
+    # repr/str/logs; used only as the Twilio HTTP basic-auth credentials.
+    twilio_account_sid: SecretStr | None = None
+    twilio_auth_token: SecretStr | None = None
+    # The Twilio sender phone number (``From``), read from
+    # ``FRIDAY_TWILIO_FROM_NUMBER``; empty means no sender is configured.
+    twilio_from_number: str = ""
+
+    # --- Postgres (Tier 3; default off) ---
+    # Gates the optional Postgres backend. Off by default so the local-first build
+    # uses the SQLite stores only. When on, ``postgres_dsn`` selects the Postgres
+    # connection.
+    enable_postgres: bool = False
+    # Postgres DSN, read from ``FRIDAY_POSTGRES_DSN``. A :class:`SecretStr` (it may
+    # embed a password) so it never leaks into repr/str/logs.
+    postgres_dsn: SecretStr | None = None
+
+    # --- Offline mode (default off) ---
+    # When on, FRIDAY runs in a strict offline mode (no outbound network). Off by
+    # default keeps the normal behaviour.
+    enable_offline_mode: bool = False
+
+    # --- HUD (default off) ---
+    # Gates the heads-up-display surface. Off by default so the offline build
+    # exposes no HUD.
+    enable_hud: bool = False
+
+    # --- Family sharing (default off) ---
+    # Gates the family-sharing surface (shared reminders / lists across members).
+    # Off by default so the build keeps a single-owner scope.
+    enable_family_sharing: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 
@@ -369,6 +464,21 @@ class Settings(BaseSettings):
         we accept a plain comma-separated string (whitespace-trimmed, empties
         dropped) so ``"a, b ,c"`` -> ``["a", "b", "c"]`` and ``""`` -> ``[]``.
         A value that is already a list/tuple is passed through unchanged.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("presence_known_devices", mode="before")
+    @classmethod
+    def _split_presence_known_devices(cls, value: object) -> object:
+        """Comma-split a raw ``FRIDAY_PRESENCE_KNOWN_DEVICES`` string into a list.
+
+        Mirrors :meth:`_split_device_allowlist`: a plain comma-separated string of
+        ``MAC=Name`` entries (whitespace-trimmed, empties dropped) so
+        ``"AA:BB=Phone, 11:22=Laptop"`` -> ``["AA:BB=Phone", "11:22=Laptop"]`` and
+        ``""`` -> ``[]``. Each entry is kept whole (the ``=`` is not split here); a
+        value that is already a list/tuple is passed through unchanged.
         """
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]

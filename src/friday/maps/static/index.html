@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>FRIDAY · Maps</title>
+
+  <!--
+    No-build, no-bundler frontend. The Google Maps Platform JS API is loaded with
+    the official inline bootstrap loader, but the API KEY IS NEVER BAKED IN: this
+    page fetches it at runtime from `/maps/config` and only then calls
+    `google.maps.importLibrary(...)`. If maps is disabled or no key is set, the
+    page degrades to a friendly notice instead of crashing.
+
+    Reference URLs (kept as plain strings so they are inspectable / testable):
+    the dynamic loader injects `https://maps.googleapis.com/maps/api/js?...`.
+
+    The map is a Photorealistic 3D globe (`gmp-map-3d` / Map3DElement). It idle-
+    rotates (flyCameraAround), supports "fly to <place>" (geocode -> flyCameraTo,
+    Google-Earth style) and "distance to <place>" (geocode + polyline + readout),
+    via the in-page Web Speech mic and the `?fly=` / `?to=` query params.
+  -->
+
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #0b0e14;
+      color: #e6e9ef;
+      overflow: hidden;
+    }
+    #app { position: fixed; inset: 0; display: flex; flex-direction: column; }
+    #topbar {
+      display: flex; align-items: center; gap: 0.75rem;
+      padding: 0.6rem 1rem;
+      background: rgba(12, 16, 24, 0.85);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      z-index: 5;
+    }
+    .brand-mark { font-weight: 700; letter-spacing: 0.12em; }
+    .brand-sub { opacity: 0.6; font-size: 0.85rem; margin-left: 0.4rem; }
+    .pill {
+      margin-left: auto; display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: 0.8rem; padding: 0.25rem 0.6rem; border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .dot {
+      width: 0.55rem; height: 0.55rem; border-radius: 50%;
+      background: #f0b429;
+    }
+    .pill.ok .dot { background: #36d399; }
+    .pill.err .dot { background: #f87272; }
+    #stage { position: relative; flex: 1; }
+    #map3d, gmp-map-3d { position: absolute; inset: 0; width: 100%; height: 100%; }
+    #fallback {
+      position: absolute; inset: 0; display: none;
+      align-items: center; justify-content: center; text-align: center;
+      padding: 2rem; color: #9aa4b2;
+    }
+    #hud {
+      position: absolute; top: 0.75rem; left: 0.75rem;
+      background: rgba(8, 11, 17, 0.78);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 0.6rem; padding: 0.55rem 0.7rem;
+      font-size: 0.8rem; line-height: 1.5; pointer-events: none;
+      max-width: 18rem;
+    }
+    .hud-row { display: flex; gap: 0.5rem; }
+    .hud-key { opacity: 0.55; width: 4.5rem; }
+    #controls {
+      display: flex; gap: 0.5rem; align-items: center;
+      padding: 0.6rem 1rem;
+      background: rgba(12, 16, 24, 0.85);
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      z-index: 5;
+    }
+    #controls input {
+      flex: 1; padding: 0.55rem 0.7rem; border-radius: 0.5rem;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: #11151d; color: inherit; font-size: 0.95rem;
+    }
+    .btn {
+      padding: 0.55rem 0.9rem; border-radius: 0.5rem; cursor: pointer;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: #1a2030; color: inherit; font-size: 0.9rem;
+    }
+    .btn-primary { background: #2b6cff; border-color: #2b6cff; }
+    .btn[aria-pressed="true"] { background: #36d399; border-color: #36d399; color: #06210f; }
+    #toast {
+      position: absolute; bottom: 1rem; left: 50%; transform: translateX(-50%);
+      background: rgba(8, 11, 17, 0.92); border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 0.6rem; padding: 0.6rem 0.9rem; font-size: 0.85rem;
+      max-width: 80%; z-index: 6;
+    }
+    #toast[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <span class="brand-mark">FRIDAY</span><span class="brand-sub">Maps</span>
+      <span id="conn-status" class="pill" title="Maps connection">
+        <span class="dot"></span><span class="conn-label">connecting…</span>
+      </span>
+    </header>
+
+    <main id="stage">
+      <!-- The Photorealistic 3D map element is created at runtime by maps.js
+           (after the key is fetched), so no key/element is hardcoded here. -->
+      <div id="map3d"></div>
+
+      <div id="fallback">
+        <div>
+          <p id="fallback-msg">Maps is unavailable.</p>
+          <p style="opacity:0.6">Set <code>FRIDAY_GOOGLE_MAPS_API_KEY</code> and enable maps.</p>
+        </div>
+      </div>
+
+      <div id="hud" aria-live="polite">
+        <div class="hud-row"><span class="hud-key">mode</span><span id="hud-mode">idle rotate</span></div>
+        <div class="hud-row"><span class="hud-key">voice</span><span id="hud-voice">off</span></div>
+        <div class="hud-row"><span class="hud-key">heard</span><span id="hud-heard">—</span></div>
+        <div class="hud-row"><span class="hud-key">status</span><span id="hud-status">ready</span></div>
+      </div>
+
+      <div id="toast" role="status" hidden></div>
+    </main>
+
+    <footer id="controls">
+      <form id="cmd-form" autocomplete="off" style="display:flex; flex:1; gap:0.5rem;">
+        <input
+          id="cmd"
+          name="cmd"
+          type="text"
+          placeholder='Try "fly to Tokyo" or "distance to Paris"'
+          aria-label="Map command" />
+        <button id="run" type="submit" class="btn btn-primary">Go</button>
+        <button id="mic" type="button" class="btn" aria-pressed="false" title="Toggle voice">🎤 Voice</button>
+        <button id="rotate" type="button" class="btn" aria-pressed="true" title="Idle rotation">Rotate</button>
+      </form>
+    </footer>
+  </div>
+
+  <script type="module" src="/maps/static/maps.js"></script>
+</body>
+</html>

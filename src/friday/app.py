@@ -45,6 +45,8 @@ from friday.api.middleware import AuthMiddleware, RateLimitMiddleware
 from friday.api.routes_admin import router as admin_router
 from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
+from friday.api.routes_comms import router as comms_router
+from friday.api.routes_email import router as email_router
 from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
@@ -65,16 +67,22 @@ from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
 from friday.config import Settings, get_settings
 from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
-from friday.core.orchestrator import Orchestrator
+from friday.core.orchestrator import ForgettableVectorStore, Orchestrator
 from friday.errors import ProviderError
+from friday.family import router as family_router
 from friday.graph.extractor import EntityExtractor
 from friday.graph.store import SQLiteGraphStore
+from friday.hud import router as hud_router
+from friday.integrations import calendar_router
 from friday.journal.service import JournalService
 from friday.journal.store import SQLiteJournalStore
 from friday.logging import configure_logging, get_logger
+from friday.maps import router as maps_router
+from friday.market import router as market_router
 from friday.meetings.capture import MeetingCapture
 from friday.meetings.store import SQLiteMeetingStore
-from friday.memory.long_term import SQLiteLongTermStore
+from friday.memory.long_term import LongTermStore, SQLiteLongTermStore
+from friday.memory.pg import PgVectorStore, PostgresLongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import SQLiteVectorStore
 from friday.n8n.client import N8nClient
@@ -91,6 +99,7 @@ from friday.perception.screen import (
 )
 from friday.perception.vision import FakeVision
 from friday.plugins.loader import PluginInfo, load_into
+from friday.presence import router as presence_router
 from friday.protocols.runner import ProtocolRunner
 from friday.protocols.store import SQLiteProtocolStore
 from friday.providers.embeddings import (
@@ -105,6 +114,7 @@ from friday.providers.llm import (
     LLMProvider,
     NvidiaNIMProvider,
 )
+from friday.providers.offline import select_llm
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.rag.ingest import DocumentIngestor
@@ -247,6 +257,58 @@ def _build_vector(
         vec_path = str(base.with_suffix(base.suffix + ".vec"))
         base.parent.mkdir(parents=True, exist_ok=True)
     return SQLiteVectorStore(vec_path, embedder=embedder, dim=settings.embedding_dim)
+
+
+def _select_long_term(settings: Settings) -> LongTermStore:
+    """Select the durable long-term store: Postgres when enabled, else SQLite.
+
+    When ``enable_postgres`` is set, the server-backed
+    :class:`~friday.memory.pg.PostgresLongTermStore` (over ``postgres_dsn``)
+    replaces the local-first :class:`SQLiteLongTermStore`; both satisfy the same
+    :class:`~friday.memory.long_term.LongTermStore` contract, so every downstream
+    consumer (the orchestrator's write-consent / forget, the briefing/journal
+    services, the agents) is unchanged. The Postgres adapter is LAZY: it imports
+    ``psycopg`` and validates the DSN only in its constructor, raising a clear
+    :class:`~friday.errors.FridayError` (install ``psycopg`` + set
+    ``FRIDAY_POSTGRES_DSN``) when either is absent — so the off-by-default path
+    never touches the driver and a misconfigured opt-in fails fast and loud.
+    """
+    if settings.enable_postgres:
+        dsn = (
+            settings.postgres_dsn.get_secret_value()
+            if settings.postgres_dsn is not None
+            else None
+        )
+        logger.info("using Postgres long-term store")
+        return PostgresLongTermStore(dsn)
+    return _build_long_term(settings)
+
+
+def _select_vector(
+    settings: Settings, embedder: EmbeddingProvider
+) -> ForgettableVectorStore:
+    """Select the persistent vector store: pgvector when Postgres is on, else SQLite.
+
+    Mirrors :func:`_select_long_term`: when ``enable_postgres`` is set the
+    server-backed :class:`~friday.memory.pg.PgVectorStore` (over ``postgres_dsn``,
+    sized to ``embedding_dim``) replaces the local-first
+    :class:`SQLiteVectorStore`; both satisfy the same
+    :class:`~friday.memory.vector.VectorStore` contract (and the orchestrator's
+    ``forget`` surface), so the Knowledge agent's retrieval and personal-RAG
+    indexing are unchanged. The pgvector adapter is LAZY (imports ``psycopg`` +
+    validates the DSN only in its constructor), so the off-by-default path never
+    touches the driver and a misconfigured opt-in raises a clear
+    :class:`~friday.errors.FridayError`.
+    """
+    if settings.enable_postgres:
+        dsn = (
+            settings.postgres_dsn.get_secret_value()
+            if settings.postgres_dsn is not None
+            else None
+        )
+        logger.info("using pgvector vector store")
+        return PgVectorStore(dsn, embedder, settings.embedding_dim)
+    return _build_vector(settings, embedder)
 
 
 def _build_reminder_store(settings: Settings) -> SQLiteReminderStore:
@@ -438,7 +500,7 @@ def _make_journal_action(
 
 
 def _build_rag_ingestor(
-    settings: Settings, vector: SQLiteVectorStore, long_term: SQLiteLongTermStore
+    settings: Settings, vector: ForgettableVectorStore, long_term: LongTermStore
 ) -> DocumentIngestor | None:
     """Build the shared :class:`DocumentIngestor`, or ``None`` when RAG is off.
 
@@ -851,8 +913,8 @@ def _build_agents(
     settings: Settings,
     registry: ToolRegistry,
     llm: LLMProvider,
-    vector: SQLiteVectorStore,
-    long_term: SQLiteLongTermStore,
+    vector: ForgettableVectorStore,
+    long_term: LongTermStore,
 ) -> AgentRegistry:
     """Construct each specialist agent with its dependencies and register it.
 
@@ -917,14 +979,19 @@ class AppRuntime:
     metrics: Metrics
     registry: ToolRegistry
     short_term: ShortTermMemory
-    long_term: SQLiteLongTermStore
+    #: The shared durable long-term store — :class:`SQLiteLongTermStore` by
+    #: default, or :class:`~friday.memory.pg.PostgresLongTermStore` when
+    #: ``enable_postgres`` is on (the contract is identical either way).
+    long_term: LongTermStore
     flag_overrides: dict[str, bool]
     #: The live LLM provider, shared with the studio's procedural generator so
     #: the (free) 3D scene generation uses the same provider as the chat loop.
     llm: LLMProvider
     #: The shared persistent vector store — the same one the Knowledge agent
     #: retrieves from, reused by personal RAG so ingested docs are answerable.
-    vector: SQLiteVectorStore
+    #: :class:`SQLiteVectorStore` by default, or
+    #: :class:`~friday.memory.pg.PgVectorStore` when ``enable_postgres`` is on.
+    vector: ForgettableVectorStore
     #: The shared reminder store — the same one the reminder tools and the
     #: ``/reminders`` routes read/write, so an agent-created and an HTTP-created
     #: reminder land in the same place.
@@ -1000,10 +1067,17 @@ def build_runtime(settings: Settings) -> AppRuntime:
     registry = _build_registry(
         settings, reminder_store, audit=audit, metrics=metrics
     )
-    llm = _build_llm(settings)
+    # Select the live LLM, then engage strict offline mode when configured:
+    # ``select_llm`` swaps in the network-free OfflineLLM when
+    # ``enable_offline_mode`` is on, so every consumer (orchestrator, agents,
+    # briefing/journal/studio/meeting/n8n) shares one provider and no outbound
+    # LLM call is ever attempted. Off by default, ``primary`` passes through.
+    llm = select_llm(settings, _build_llm(settings))
     embedder = _build_embedder(settings)
-    long_term = _build_long_term(settings)
-    vector = _build_vector(settings, embedder)
+    # Postgres-or-SQLite store selection (lazy; the PG adapters only import the
+    # driver / validate the DSN when ``enable_postgres`` is on).
+    long_term = _select_long_term(settings)
+    vector = _select_vector(settings, embedder)
     agents = _build_agents(settings, registry, llm, vector, long_term)
     briefing = _build_briefing_service(
         settings, reminder_store, audit, metrics, llm
@@ -1594,6 +1668,29 @@ def create_app() -> FastAPI:
     # surface. The shared N8nService (REST client + LLM drafter + docker
     # auto-start) is wired onto app.state only when enabled.
     app.include_router(n8n_router)
+    # Tier-3 feature fan-out. Each router self-guards on its own ``FRIDAY_ENABLE_*``
+    # flag (404 when off, carrying the feature's own "disabled" detail), so they
+    # are all included UNCONDITIONALLY here — the offline default exposes none of
+    # them as live surfaces, yet every route is registered. No app.state wiring is
+    # required: each route reads its config lazily from get_settings() and (where a
+    # backend is needed) builds a per-request httpx client from a SecretStr token.
+    #
+    # Maps (Photorealistic 3D globe) — FRIDAY_ENABLE_MAPS.
+    app.include_router(maps_router)
+    # Presence (which known devices are nearby) — FRIDAY_ENABLE_PRESENCE.
+    app.include_router(presence_router)
+    # Market data (Dhan quotes) — FRIDAY_ENABLE_MARKET_DATA.
+    app.include_router(market_router)
+    # Calendar (Google Calendar v3) — FRIDAY_ENABLE_CALENDAR.
+    app.include_router(calendar_router)
+    # Email (Gmail inbox/draft) — FRIDAY_ENABLE_EMAIL.
+    app.include_router(email_router)
+    # Comms (Twilio SMS/WhatsApp) — FRIDAY_ENABLE_COMMS.
+    app.include_router(comms_router)
+    # HUD (arc-reactor cockpit page) — FRIDAY_ENABLE_HUD.
+    app.include_router(hud_router)
+    # Family sharing (consent-enforced) — FRIDAY_ENABLE_FAMILY_SHARING.
+    app.include_router(family_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

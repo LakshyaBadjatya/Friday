@@ -1,0 +1,464 @@
+/*
+  FRIDAY HUD — cockpit styles.
+
+  No build step, no framework: a single hand-written stylesheet. The aesthetic is
+  an "arc-reactor" boot sequence (concentric rotating rings + a pulsing core) over
+  a dark cockpit, a drifting particle field, glow accents, and a centered command
+  palette (Cmd/Ctrl-K). All animation is pure CSS @keyframes + a tiny canvas
+  particle field driven by hud.js. No images, no fonts loaded from the network.
+*/
+
+:root {
+  --bg: #05070d;
+  --bg-2: #0a0f1c;
+  --ink: #cfe9ff;
+  --ink-dim: #6f86a6;
+  --cyan: #41e6ff;
+  --cyan-soft: #41e6ff66;
+  --gold: #ffcf6b;
+  --danger: #ff5d6c;
+  --ok: #5dffa6;
+  --ring: #41e6ff;
+  --panel: #0c1525e6;
+  --panel-line: #1d3350;
+  --glow: 0 0 18px var(--cyan-soft), 0 0 42px #41e6ff22;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 800px at 50% 40%, #0c1830 0%, var(--bg) 70%),
+    var(--bg);
+  color: var(--ink);
+  font-family:
+    "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas,
+    monospace;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Drifting particle field — a full-viewport canvas behind everything. */
+#particles {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+#app {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------------- topbar -- */
+#topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--panel-line);
+  background: linear-gradient(180deg, #0a1120cc, #0a112000);
+  backdrop-filter: blur(4px);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  letter-spacing: 0.28em;
+}
+
+.brand-mark {
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--cyan);
+  text-shadow: var(--glow);
+}
+
+.brand-sub {
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 0.4em;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-line);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: #0a1426aa;
+}
+
+.pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-dim);
+  box-shadow: 0 0 8px currentColor;
+}
+
+.pill.is-online {
+  color: var(--ok);
+  border-color: #1c5a3e;
+}
+.pill.is-online .dot {
+  background: var(--ok);
+}
+.pill.is-offline {
+  color: var(--danger);
+  border-color: #5a1c24;
+}
+.pill.is-offline .dot {
+  background: var(--danger);
+}
+
+.kbd-hint {
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 0.12em;
+}
+.kbd-hint kbd {
+  display: inline-block;
+  padding: 1px 7px;
+  margin: 0 1px;
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  background: #0c1830;
+  color: var(--cyan);
+  font: inherit;
+  font-size: 11px;
+}
+
+/* ----------------------------------------------------------------- stage -- */
+#stage {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr minmax(280px, 360px);
+  gap: 18px;
+  padding: 22px;
+  min-height: 0;
+}
+
+/* Arc reactor: concentric rings + pulsing core. */
+#reactor-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+#reactor {
+  position: relative;
+  width: min(46vh, 360px);
+  height: min(46vh, 360px);
+}
+
+.ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--cyan-soft);
+  box-shadow:
+    inset 0 0 22px #41e6ff22,
+    0 0 22px #41e6ff22;
+}
+
+.ring.r1 {
+  inset: 0;
+  border-top-color: var(--cyan);
+  border-right-color: transparent;
+  animation: spin 6s linear infinite;
+}
+.ring.r2 {
+  inset: 9%;
+  border-style: dashed;
+  border-color: #41e6ff44;
+  animation: spin 9s linear infinite reverse;
+}
+.ring.r3 {
+  inset: 18%;
+  border-bottom-color: var(--gold);
+  border-left-color: transparent;
+  animation: spin 4s linear infinite;
+}
+.ring.r4 {
+  inset: 27%;
+  border-color: #41e6ff33;
+  animation: spin 14s linear infinite reverse;
+}
+
+.core {
+  position: absolute;
+  inset: 36%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 45%, #eafcff, var(--cyan) 45%, #0a3a52 100%);
+  box-shadow:
+    0 0 28px var(--cyan),
+    0 0 70px #41e6ff88,
+    inset 0 0 24px #ffffffaa;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+.reactor-caption {
+  margin-top: 26px;
+  text-align: center;
+  letter-spacing: 0.34em;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.reactor-caption strong {
+  color: var(--cyan);
+  text-shadow: var(--glow);
+}
+
+/* Telemetry side panel. */
+#telemetry {
+  border: 1px solid var(--panel-line);
+  border-radius: 14px;
+  background: var(--panel);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+}
+
+#telemetry h2 {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 7px 0;
+  border-bottom: 1px dashed #18293f;
+}
+.metric .label {
+  font-size: 12px;
+  color: var(--ink-dim);
+  letter-spacing: 0.08em;
+}
+.metric .value {
+  font-size: 16px;
+  color: var(--cyan);
+  text-shadow: 0 0 10px #41e6ff44;
+}
+
+#log {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+  max-height: 30vh;
+  overflow: auto;
+}
+#log .line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#log .line .t {
+  color: #3f5d80;
+}
+#log .line.ok {
+  color: var(--ok);
+}
+#log .line.err {
+  color: var(--danger);
+}
+
+/* ----------------------------------------------------- boot-sequence over -- */
+#boot {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(900px 600px at 50% 50%, #06121f, #02040a 75%);
+  transition: opacity 700ms ease;
+}
+#boot.is-done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#boot .boot-reactor {
+  width: 220px;
+  height: 220px;
+  position: relative;
+}
+
+#boot .boot-text {
+  margin-top: 30px;
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  color: var(--cyan);
+  text-shadow: var(--glow);
+  min-height: 1.4em;
+}
+
+#boot .boot-bar {
+  margin-top: 18px;
+  width: min(60vw, 360px);
+  height: 3px;
+  border-radius: 3px;
+  background: #0c2238;
+  overflow: hidden;
+}
+#boot .boot-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #41e6ff, #ffcf6b);
+  box-shadow: 0 0 14px var(--cyan);
+  transition: width 180ms linear;
+}
+
+/* --------------------------------------------------------- command palette -- */
+#palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  background: #02040ab0;
+  backdrop-filter: blur(3px);
+}
+#palette-overlay.is-open {
+  display: flex;
+}
+
+#palette {
+  width: min(92vw, 640px);
+  border: 1px solid var(--cyan-soft);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow:
+    var(--glow),
+    0 24px 80px #000a;
+  overflow: hidden;
+}
+
+#palette-input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--panel-line);
+  letter-spacing: 0.02em;
+}
+#palette-input::placeholder {
+  color: var(--ink-dim);
+}
+
+#palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  max-height: 44vh;
+  overflow: auto;
+}
+#palette-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border-radius: 9px;
+  cursor: pointer;
+  color: var(--ink);
+}
+#palette-list li .cmd-title {
+  flex: 1;
+}
+#palette-list li .cmd-hint {
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 0.08em;
+}
+#palette-list li.is-active,
+#palette-list li:hover {
+  background: #123251;
+  box-shadow: inset 0 0 0 1px var(--cyan-soft);
+}
+#palette-list li .cmd-glyph {
+  color: var(--cyan);
+}
+
+#palette-result {
+  border-top: 1px solid var(--panel-line);
+  padding: 14px 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  max-height: 30vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#palette-result:empty {
+  display: none;
+}
+#palette-result.is-err {
+  color: var(--danger);
+}
+
+/* --------------------------------------------------------------- keyframes -- */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    transform: scale(1.06);
+    filter: brightness(1.25);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring,
+  .core,
+  #boot .boot-bar i {
+    animation: none !important;
+    transition: none !important;
+  }
+}

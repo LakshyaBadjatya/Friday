@@ -390,6 +390,57 @@ class Settings(BaseSettings):
     # Off by default so the build keeps a single-owner scope.
     enable_family_sharing: bool = False
 
+    # --- Roster personas (Stage 2; always available) ---
+    # The persona roster (FRIDAY + eight least-privilege specialists) is exposed
+    # via ``GET /roster`` and drives the orchestrator's address-by-name hook. It
+    # is always available (no flag) — it adds no side-effecting surface, only a
+    # read-only listing and a least-privilege scope when a turn is addressed to a
+    # named persona ("GECKO, ..." / "ask VISION to ...").
+
+    # --- Idea-batch read-only tools (Stage 2; default ON) ---
+    # Registers the read-only idea-batch tools (capabilities / ask_user /
+    # entity_dossier / infofeed / browser) into the shared registry and adds them
+    # to the fitting agents' allow-lists. Default ON because they are all
+    # read-only (``side_effecting=False``) and add no real-world action — they only
+    # reflect, ask, read feeds, or fetch readable page text. The side-effecting
+    # idea-batch tools (downloads_butler / media) are NOT gated by this flag; they
+    # ride their own readiness flags below and still pass the registry confirm-step.
+    enable_extra_tools: bool = True
+    # When set, the side-effecting downloads-butler (organize a folder) and media
+    # (play/pause/volume) tools are also registered. Off by default so the offline
+    # build registers no filesystem/media-mutating tool. Both go through the
+    # registry's confirm-step (downloads_butler is side-effecting + non-idempotent,
+    # so a real move is confirm-gated; media is idempotent transport).
+    enable_downloads_butler: bool = False
+    enable_media_control: bool = False
+
+    # --- Desktop control (Stage 2; default off) ---
+    # Gates desktop control (mouse/keyboard/screenshots via the
+    # :class:`~friday.desktop.AuditedDesktop` over a :class:`FakeDesktop` by
+    # default). Off by default so the offline build constructs no desktop seam.
+    # When on, the wrapper is FRICTIONLESS (no per-action prompt) but FULLY AUDITED
+    # — every action is recorded to the hash-chained ledger before it executes. The
+    # real ``pyautogui`` backend stays OPTIONAL/LAZY (excluded from the uv lock).
+    enable_desktop: bool = False
+
+    # --- Voiceprint / owner recognition (Stage 2; default off) ---
+    # Gates speaker verification (owner recognition). Off by default so no
+    # voiceprint identity is constructed. When on, an
+    # :class:`~friday.voice.voiceprint.OwnerIdentity` over a deterministic
+    # :class:`FakeVoiceprint` is built and surfaced (ADVISORY by default — it never
+    # blocks). The real ``resemblyzer`` backend stays OPTIONAL/LAZY (excluded from
+    # the uv lock).
+    enable_voiceprint: bool = False
+
+    # --- Proactive intelligence (Stage 2; default off) ---
+    # Gates proactive intelligence (anomaly detection + rule-based foresight). Off
+    # by default so no proactive seam is constructed. When on, an
+    # :class:`~friday.proactive.AnomalyDetector` is wired into the scheduler's
+    # ``system_check`` action so a metric spike in the sampled history is flagged,
+    # and a :class:`~friday.proactive.Foresight` is surfaced for suggestions. Both
+    # are pure/deterministic and import no LLM SDK.
+    enable_proactive: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 
@@ -425,6 +476,32 @@ class Settings(BaseSettings):
     # ``NoDecode`` keeps pydantic-settings from JSON-decoding the raw env value so
     # the comma-splitting ``field_validator`` below receives the plain string.
     device_allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    # --- Security spine (Stage 1) ---
+    # Path to the tamper-evident, hash-chained audit ledger (an append-only JSONL
+    # file). Every tool the shared registry executes appends ONE hash-chained
+    # record here in addition to the in-memory observability ``AuditLog`` the
+    # ``/admin/audit`` view reads — the ledger is the tamper-evident
+    # system-of-record, verifiable via ``GET /admin/audit/verify``. ``data/`` is
+    # gitignored; tests pin a tmp path and never touch this real file.
+    audit_ledger_path: str = "data/audit.jsonl"
+    # Which secret backend the runtime constructs (``friday.secrets``):
+    # ``env`` (default) reads ``FRIDAY_<NAME>`` from the process environment;
+    # ``keyring`` uses the OS keychain via the OPTIONAL ``keyring`` package
+    # (lazy-imported only when selected — kept out of the core lock); ``file`` is a
+    # ``0600`` JSON dev fallback alongside ``data/``; ``memory`` is in-process only.
+    # The vault is the broker's secret provider for ``{{secret:NAME}}`` injection.
+    secret_vault: Literal["env", "keyring", "file", "memory"] = "env"
+    # When true, startup scans the repo for plaintext secret-looking literals
+    # (``friday.secrets.scan_for_plaintext_secrets``) and LOGS a WARNING per
+    # finding. It is warn-only and NEVER refuses to boot — a default-safe nudge to
+    # move a committed credential into the vault, not a hard gate.
+    enable_secret_self_check: bool = True
+    # When true, side-effecting tool calls are routed THROUGH the broker
+    # (validate → classify → deny-by-default gate → secret-inject → execute →
+    # hash-chained audit). Default OFF keeps dispatch on the plain registry path,
+    # so the existing default-on behaviour is unchanged until explicitly enabled.
+    enable_broker: bool = False
 
     # --- Gateway hardening (Phase 6) ---
     # When true, every route except ``/health`` requires an ``Authorization:

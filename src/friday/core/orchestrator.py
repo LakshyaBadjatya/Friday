@@ -64,6 +64,7 @@ from friday.observability.tracing import Tracer
 from friday.protocols.runner import ProtocolResult, ProtocolRunner
 from friday.protocols.store import Protocol as ProtocolModel
 from friday.providers.llm import LLMProvider, Message
+from friday.roster import Persona, RosterRegistry
 from friday.tools.registry import ToolRegistry
 from friday.tools.security import AuditRecord
 
@@ -324,6 +325,26 @@ def _extract_forget_target(text: str) -> str | None:
     return None
 
 
+# Address-by-name (Stage 2 roster): a turn that opens with a persona code-name —
+# "GECKO, ..." (direct address) or "ask/tell/have VISION ..." (delegation form) —
+# routes under that named persona's least-privilege tool scope + memory namespace.
+# Addressing is by the EXPLICIT code-name (a leading all-caps token, or a delegation
+# verb followed by the name), so an ordinary word that merely happens to match a
+# name ("forge a plan", "track the build") never trips it. The name is the only
+# capture group; the registry's case-insensitive lookup resolves it to a persona.
+_ADDRESS_RULES: tuple[re.Pattern[str], ...] = (
+    # Delegation: "ask/tell/have/get GECKO to ..." (name may be any case here, but
+    # it must be a single bare token immediately after the verb).
+    re.compile(
+        r"^\s*(?:ask|tell|have|get)\s+([A-Za-z]+)\b(?:\s+(?:to|about|for|whether|if)\b)?",
+        re.IGNORECASE,
+    ),
+    # Direct address: a leading ALL-CAPS code-name followed by a comma/colon (so
+    # "GECKO, ..." addresses GECKO but "Gecko geckos are lizards" does not).
+    re.compile(r"^\s*([A-Z]{2,})\s*[,:]"),
+)
+
+
 # Out-of-scope / cut capabilities that earn an in-character refusal (build-spec
 # sections 2.1-2.2). Each entry is (regex, human-readable reason). The regexes
 # are intentionally specific so ordinary words ("track the build", "face the
@@ -416,6 +437,13 @@ class Orchestrator:
             best-effort imports) a workflow, threading the turn's confirm flag (a
             docker auto-start is confirm-gated). When absent or the flag is off the
             hook is inert, so existing orchestrator tests behave unchanged.
+        roster: Optional :class:`~friday.roster.RosterRegistry`. When wired, a turn
+            that opens by addressing a persona code-name ("GECKO, ..." /
+            "ask VISION to ...") is routed under that named persona's
+            least-privilege tool scope + memory namespace (recorded on the
+            scratchpad as ``persona`` / ``persona_scope`` / ``persona_namespace``)
+            before normal routing. An un-addressed turn (or an unknown name) leaves
+            the hook inert, so existing orchestrator behaviour is unchanged.
     """
 
     def __init__(
@@ -433,6 +461,7 @@ class Orchestrator:
         protocol_runner: ProtocolRunner | None = None,
         critic: SelfCritic | None = None,
         n8n_service: N8nServiceProtocol | None = None,
+        roster: RosterRegistry | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -447,6 +476,7 @@ class Orchestrator:
         self._protocol_runner = protocol_runner
         self._critic = critic
         self._n8n_service = n8n_service
+        self._roster = roster
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
@@ -866,6 +896,46 @@ class Orchestrator:
             f"({removed} record(s) removed)."
         )
 
+    # -- address-by-name (Stage 2 roster) ---------------------------------- #
+    def _match_persona(self, text: str) -> Persona | None:
+        """Return the roster persona ``text`` addresses by code-name, or ``None``.
+
+        Inert unless a :class:`~friday.roster.RosterRegistry` is wired. Matches the
+        ordered :data:`_ADDRESS_RULES` (delegation form first, then the leading
+        all-caps direct address) and resolves the captured token to a persona
+        (case-insensitively). A token that is not a registered persona name yields
+        ``None`` so the turn proceeds unchanged.
+        """
+        roster = self._roster
+        if roster is None:
+            return None
+        for pattern in _ADDRESS_RULES:
+            match = pattern.match(text)
+            if match is None:
+                continue
+            name = match.group(1).strip()
+            if not name:
+                continue
+            try:
+                return roster.get(name)
+            except KeyError:
+                # The leading token is not a persona — not an address; stop trying
+                # later (less-specific) patterns so a plain word never matches.
+                return None
+        return None
+
+    def _apply_persona_scope(self, persona: Persona, state: GraphState) -> None:
+        """Record the addressed persona's least-privilege scope onto ``state``.
+
+        Stamps the scratchpad with the persona's ``name``, its sorted tool
+        ``persona_scope`` (the least-privilege allow-list the turn runs under), and
+        its ``persona_namespace`` (the memory namespace it reads/writes under), so
+        the turn is routed under the named operator rather than the prime.
+        """
+        state.scratchpad["persona"] = persona.name
+        state.scratchpad["persona_scope"] = sorted(persona.allowed_tools)
+        state.scratchpad["persona_namespace"] = persona.memory_namespace
+
     # -- maps deep links (Tier 3) ------------------------------------------ #
     def _open_maps_reply(self) -> str:
         """A persona reply deep-linking to the local ``/maps`` globe."""
@@ -1124,6 +1194,15 @@ class Orchestrator:
     async def _handle_inner(self, state: GraphState) -> GraphState:
         # 1. Load short-term history for the session.
         history = self._memory.history(state.session_id)
+
+        # 1a. Address-by-name (Stage 2 roster): a turn that opens with a persona
+        # code-name ("GECKO, ..." / "ask VISION to ...") routes under that named
+        # persona's least-privilege tool scope + memory namespace. Recorded on the
+        # scratchpad up front; inert (no scratchpad keys) when no roster is wired
+        # or the turn is un-addressed, so existing behaviour is unchanged.
+        persona = self._match_persona(state.user_input)
+        if persona is not None:
+            self._apply_persona_scope(persona, state)
 
         # 2. Refuse out-of-scope asks before spending a model call.
         reason = self._refusal_reason(state.user_input)

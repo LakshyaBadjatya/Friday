@@ -116,6 +116,22 @@ class Settings(BaseSettings):
     # and persisted in a sibling SQLite file alongside ``memory_db_path``.
     enable_meetings: bool = False
 
+    # --- Agent reach (Tier 1; default off) ---
+    # Gates the read-only ``agent_reach`` tool (full-page reader + media
+    # transcription); off by default so the tool is unregistered and the
+    # Research/Knowledge agents' allow-lists are unchanged. When on, ``read_url``
+    # fetches a FULL page as clean markdown via the keyless Jina Reader
+    # (``agent_reach_jina_base``, no binary needed) and ``transcribe`` shells out
+    # to the isolated ``agent-reach`` CLI (installed via ``uv tool``, NOT a FRIDAY
+    # dependency); a missing CLI degrades cleanly with an install hint. Read-only:
+    # never fabricates on error.
+    enable_agent_reach: bool = False
+    # Base of the keyless Jina Reader endpoint; ``read_url`` issues
+    # ``GET {base}{url}`` and expects clean markdown back.
+    agent_reach_jina_base: str = "https://r.jina.ai/"
+    # Per-request wall-clock budget (seconds) shared by the Jina GET and the CLI run.
+    agent_reach_timeout: float = 60.0
+
     # --- Scheduled triggers (Tier 1; default off) ---
     # Gates the whole ``/schedules`` REST surface *and* the background tick loop;
     # off by default so the offline build exposes no scheduler routes (each ->

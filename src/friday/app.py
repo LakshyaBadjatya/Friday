@@ -97,6 +97,7 @@ from friday.studio.generator import (
     StudioService,
     Text3DProvider,
 )
+from friday.tools.agent_reach import AgentReachTool
 from friday.tools.base import Tool
 from friday.tools.home import HomeControlTool
 from friday.tools.notify import NotifyTool, SentMessage
@@ -544,6 +545,7 @@ def _build_scheduler(
 
 
 def _build_registry(
+    settings: Settings,
     reminder_store: SQLiteReminderStore,
     audit: AuditLog | None = None,
     metrics: Metrics | None = None,
@@ -560,6 +562,11 @@ def _build_registry(
     ``type[BaseModel]`` field under nominal checking; cast to the protocol to
     register.
 
+    The read-only :class:`~friday.tools.agent_reach.AgentReachTool` is registered
+    ONLY when ``enable_agent_reach`` is set (it is configured with the Jina base +
+    timeout from settings); off by default it is absent from the registry, so the
+    offline build's tool surface is unchanged.
+
     When an :class:`~friday.observability.audit.AuditLog` / :class:`Metrics` are
     passed (the app wires the process-wide instances), every ``execute`` records a
     redacted tool-call audit row and bumps the ``tool_calls`` counter (build-spec
@@ -572,6 +579,16 @@ def _build_registry(
     registry.register(cast(Tool, CreateReminderTool(reminder_store)))
     registry.register(cast(Tool, ListRemindersTool(reminder_store)))
     registry.register(cast(Tool, CompleteReminderTool(reminder_store)))
+    if settings.enable_agent_reach:
+        registry.register(
+            cast(
+                Tool,
+                AgentReachTool(
+                    jina_base=settings.agent_reach_jina_base,
+                    timeout=settings.agent_reach_timeout,
+                ),
+            )
+        )
     return registry
 
 
@@ -592,14 +609,23 @@ def _build_agents(
     * ``device`` — confirm-gated, allow-listed home control via the ``home`` tool.
     * ``alerting`` — deduped/rate-limited notifications via the ``notify`` tool;
       "now" comes from the injected wall clock (the agent windows on it).
+
+    When ``enable_agent_reach`` is set, ``"agent_reach"`` is added to the Research
+    (analysis) and Knowledge agents' instance-level ``allowed_tools`` so they may
+    reach the registered read-only tool (full-page read + transcribe). Off by
+    default the allow-lists are the class defaults, so the offline build is
+    unchanged.
     """
     agents = AgentRegistry()
-    agents.register(AnalysisAgent(registry, llm=llm))
-    agents.register(
-        KnowledgeAgent(
-            store=vector, memory=ShortTermMemory(), long_term=long_term
-        )
+    analysis = AnalysisAgent(registry, llm=llm)
+    knowledge = KnowledgeAgent(
+        store=vector, memory=ShortTermMemory(), long_term=long_term
     )
+    if settings.enable_agent_reach:
+        analysis.allowed_tools = analysis.allowed_tools | {"agent_reach"}
+        knowledge.allowed_tools = knowledge.allowed_tools | {"agent_reach"}
+    agents.register(analysis)
+    agents.register(knowledge)
     agents.register(AutomationAgent(registry=registry))
     agents.register(DeviceAgent(registry))
     agents.register(
@@ -685,7 +711,9 @@ def build_runtime(settings: Settings) -> AppRuntime:
 
     reminder_store = _build_reminder_store(settings)
     trigger_store = _build_trigger_store(settings)
-    registry = _build_registry(reminder_store, audit=audit, metrics=metrics)
+    registry = _build_registry(
+        settings, reminder_store, audit=audit, metrics=metrics
+    )
     llm = _build_llm(settings)
     embedder = _build_embedder(settings)
     long_term = _build_long_term(settings)

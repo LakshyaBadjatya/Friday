@@ -119,6 +119,18 @@ class Settings(BaseSettings):
     # ``tick(now)`` unit takes ``now`` injected, so this never affects test timing.
     scheduler_tick_seconds: float = 30.0
 
+    # --- Proactive briefing (Tier 1; default off) ---
+    # Gates the whole ``/briefing`` surface *and* the scheduler ``briefing``
+    # action; off by default so the offline build exposes no briefing route
+    # (-> 404) and the registered action is inert unless a trigger fires it. When
+    # on, the briefing is a deterministic digest assembled from the shared local
+    # stores (reminders + audit + metrics) with an optional, non-fatal LLM
+    # summary; no new store or path is introduced.
+    enable_briefing: bool = False
+    # How many recent tool-call audit rows the briefing's recent-activity section
+    # summarizes (one line each).
+    briefing_recent_activity: int = 5
+
     # --- Persona ---
     owner_address: str = "Boss"
 

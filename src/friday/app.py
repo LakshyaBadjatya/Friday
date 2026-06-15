@@ -43,6 +43,7 @@ from friday.agents.device import DeviceAgent
 from friday.agents.knowledge import KnowledgeAgent
 from friday.api.middleware import AuthMiddleware, RateLimitMiddleware
 from friday.api.routes_admin import router as admin_router
+from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_rag import router as rag_router
@@ -52,6 +53,7 @@ from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
 from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
+from friday.briefing.service import BriefingService
 from friday.config import Settings, get_settings
 from friday.core.orchestrator import Orchestrator
 from friday.logging import configure_logging, get_logger
@@ -288,18 +290,82 @@ async def _noop_action(trigger: Trigger) -> None:
     logger.info("scheduler noop fired", extra={"trigger": trigger.name})
 
 
+def _build_briefing_service(
+    settings: Settings,
+    reminder_store: SQLiteReminderStore,
+    audit: AuditLog,
+    metrics: Metrics,
+    llm: LLMProvider,
+) -> BriefingService:
+    """Assemble the :class:`BriefingService` over the shared local stores.
+
+    Pure assembly from the *shared* runtime pieces — the same reminder store the
+    reminder tools/routes use, the process-wide audit log + metrics — plus the
+    live LLM for an optional, non-fatal natural-language summary. The greeting
+    addresses ``owner_address`` and the recent-activity section is sized to
+    ``briefing_recent_activity``. Constructing the service performs no I/O.
+    """
+    return BriefingService(
+        reminder_store,
+        audit_log=audit,
+        metrics=metrics,
+        llm=llm,
+        owner_address=settings.owner_address,
+        recent_activity_limit=settings.briefing_recent_activity,
+    )
+
+
+def _make_briefing_action(
+    briefing_service: BriefingService, notify: NotifyTool
+) -> Callable[[Trigger], Awaitable[None]]:
+    """Build the ``briefing`` scheduler action over the shared briefing service.
+
+    Builds the briefing for ``utcnow`` from the *shared* :class:`BriefingService`
+    and emits it via the :class:`NotifyTool` fake sink (greeting + each section
+    line) + a log line, so an enabled trigger surfaces a morning/EOD briefing
+    proactively. ``utcnow`` is read here in the background action only — the
+    tested ``BriefingService.build(now)`` unit stays clock-injected; this action
+    is exercised through the run-now route, not for timing. Any LLM error is
+    already swallowed inside ``build`` (structured-only fallback), so this never
+    raises.
+    """
+
+    async def _briefing(trigger: Trigger) -> None:
+        briefing = await briefing_service.build(datetime.now(UTC))
+        body_lines = [briefing.greeting]
+        for section in briefing.sections:
+            body_lines.append(f"{section.title}:")
+            body_lines.extend(f"- {item}" for item in section.items)
+        notify.sink.append(
+            SentMessage(
+                channel="webhook",
+                target="scheduler",
+                subject="Briefing",
+                body="\n".join(body_lines),
+            )
+        )
+        logger.info(
+            "scheduler briefing fired",
+            extra={"trigger": trigger.name, "sections": len(briefing.sections)},
+        )
+
+    return _briefing
+
+
 def _build_scheduler(
     trigger_store: SQLiteTriggerStore,
     reminder_store: SQLiteReminderStore,
     registry: ToolRegistry,
+    briefing_service: BriefingService,
 ) -> Scheduler:
     """Assemble the :class:`Scheduler` and register the default actions.
 
     Registers ``"due_reminders"`` (emit due reminders via the shared notify tool's
-    sink/log) and a ``"noop"`` placeholder. The notify tool is pulled from the
-    shared :class:`ToolRegistry` so the scheduler emits into the *same* sink the
-    alerting agent uses (one auditable place for everything that would have been
-    sent); a fresh :class:`NotifyTool` is used as a fallback if absent.
+    sink/log), ``"briefing"`` (build + emit the proactive briefing via the same
+    sink), and a ``"noop"`` placeholder. The notify tool is pulled from the shared
+    :class:`ToolRegistry` so the scheduler emits into the *same* sink the alerting
+    agent uses (one auditable place for everything that would have been sent); a
+    fresh :class:`NotifyTool` is used as a fallback if absent.
     """
     scheduler = Scheduler(trigger_store)
     try:
@@ -309,6 +375,9 @@ def _build_scheduler(
     notify_tool = notify if isinstance(notify, NotifyTool) else NotifyTool()
     scheduler.register_action(
         "due_reminders", _make_due_reminders_action(reminder_store, notify_tool)
+    )
+    scheduler.register_action(
+        "briefing", _make_briefing_action(briefing_service, notify_tool)
     )
     scheduler.register_action("noop", _noop_action)
     return scheduler
@@ -416,8 +485,12 @@ class AppRuntime:
     #: and the background tick loop read/write.
     trigger_store: SQLiteTriggerStore
     #: The scheduler (action registry + ``tick``) over ``trigger_store``; its
-    #: registered ``due_reminders`` action reuses the shared reminder store.
+    #: registered ``due_reminders``/``briefing`` actions reuse the shared stores.
     scheduler: Scheduler
+    #: The shared briefing service — assembles the digest from the same reminder
+    #: store + audit log + metrics the rest of the runtime uses; the ``/briefing``
+    #: route and the scheduler ``briefing`` action both build through it.
+    briefing: BriefingService
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -442,7 +515,12 @@ def build_runtime(settings: Settings) -> AppRuntime:
     long_term = _build_long_term(settings)
     vector = _build_vector(settings, embedder)
     agents = _build_agents(settings, registry, llm, vector, long_term)
-    scheduler = _build_scheduler(trigger_store, reminder_store, registry)
+    briefing = _build_briefing_service(
+        settings, reminder_store, audit, metrics, llm
+    )
+    scheduler = _build_scheduler(
+        trigger_store, reminder_store, registry, briefing
+    )
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
         llm=llm,
@@ -469,6 +547,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         reminder_store=reminder_store,
         trigger_store=trigger_store,
         scheduler=scheduler,
+        briefing=briefing,
     )
 
 
@@ -618,6 +697,21 @@ def _wire_scheduler(app: FastAPI, settings: Settings, runtime: AppRuntime) -> No
     app.state.scheduler = runtime.scheduler
 
 
+def _wire_briefing(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared briefing service on ``app.state`` when briefing is enabled.
+
+    The ``/briefing`` route reads ``app.state.briefing`` — the *same*
+    :class:`BriefingService` the scheduler ``briefing`` action builds through —
+    so the on-demand HTTP briefing and the proactive scheduled one assemble from
+    one set of local stores. Building it only when ``enable_briefing`` is set
+    keeps the offline default untouched (the route self-guards on the flag and
+    404s when off).
+    """
+    if not settings.enable_briefing:
+        return
+    app.state.briefing = runtime.briefing
+
+
 def _install_runtime(app: FastAPI, settings: Settings) -> None:
     """Assemble the runtime graph and stash every shared piece on ``app.state``.
 
@@ -640,6 +734,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
     _wire_scheduler(app, settings, runtime)
+    _wire_briefing(app, settings, runtime)
 
 
 def _start_scheduler_loop(
@@ -743,6 +838,11 @@ def create_app() -> FastAPI:
     # app.state only when enabled, and the background tick loop starts only in the
     # lifespan when enabled.
     app.include_router(schedules_router)
+    # Proactive briefing (Tier 1) — always registered but self-guards on
+    # FRIDAY_ENABLE_BRIEFING (404 when off), so the offline default exposes no
+    # briefing surface. The shared briefing service is wired onto app.state only
+    # when enabled.
+    app.include_router(briefing_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

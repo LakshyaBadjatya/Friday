@@ -326,3 +326,79 @@ def test_scan_recurses_into_subdirs(tmp_path: Path) -> None:
 def test_finding_is_clean_value_object() -> None:
     f = Finding(file="/x.py", line=3, kind="nvapi")
     assert f.model_dump() == {"file": "/x.py", "line": 3, "kind": "nvapi"}
+
+
+# -- scanner false-positive tightening ---------------------------------- #
+
+
+def test_scan_skips_tests_directory_entirely(tmp_path: Path) -> None:
+    """A planted secret under a ``tests/`` directory is NOT flagged.
+
+    Test trees legitimately carry fixture/oauth-shaped strings; scanning them
+    produces only false positives at boot.
+    """
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "fixtures.py").write_text(f'TOKEN = "{_FAKE_NVAPI}"\n')
+
+    assert scan_for_plaintext_secrets(str(tmp_path)) == []
+
+
+def test_scan_skips_nested_tests_directory(tmp_path: Path) -> None:
+    """``tests/`` is skipped at any depth, not only at the scan root."""
+    nested = tmp_path / "pkg" / "tests" / "data"
+    nested.mkdir(parents=True)
+    (nested / "leaky.py").write_text(f'K = "{_FAKE_NVAPI}"\n')
+
+    assert scan_for_plaintext_secrets(str(tmp_path)) == []
+
+
+def test_scan_flags_planted_secret_in_src(tmp_path: Path) -> None:
+    """The mirror of the tests/ case: a secret under ``src/`` IS flagged."""
+    src_dir = tmp_path / "src" / "friday"
+    src_dir.mkdir(parents=True)
+    leaky = src_dir / "leaky.py"
+    leaky.write_text(f'API_KEY = "{_FAKE_NVAPI}"\n')
+
+    findings = scan_for_plaintext_secrets(str(tmp_path))
+
+    assert len(findings) == 1
+    assert findings[0].file == str(leaky)
+    assert findings[0].kind == "nvapi"
+
+
+def test_scan_skips_test_prefixed_files(tmp_path: Path) -> None:
+    """A file named ``test_*`` is skipped even outside a ``tests/`` directory."""
+    (tmp_path / "test_helpers.py").write_text(f'K = "{_FAKE_NVAPI}"\n')
+
+    assert scan_for_plaintext_secrets(str(tmp_path)) == []
+
+
+def test_scan_still_flags_non_test_prefixed_file(tmp_path: Path) -> None:
+    """A ``test_``-containing-but-not-prefixed name is NOT exempted."""
+    (tmp_path / "latest_keys.py").write_text(f'K = "{_FAKE_NVAPI}"\n')
+
+    findings = scan_for_plaintext_secrets(str(tmp_path))
+    assert [f.kind for f in findings] == ["nvapi"]
+
+
+def test_scan_skips_url_non_secret_context(tmp_path: Path) -> None:
+    """A URL whose path trips the broad base64 catch-all is NOT flagged.
+
+    e.g. ``https://www.googleapis.com/calendar/v3/calendars/primary/events``
+    contains a 40+ ``[A-Za-z0-9/]`` run only because ``/`` is base64-valid.
+    """
+    (tmp_path / "client.py").write_text(
+        '_EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"\n'
+    )
+
+    assert scan_for_plaintext_secrets(str(tmp_path)) == []
+
+
+def test_scan_still_flags_real_base64_blob(tmp_path: Path) -> None:
+    """A genuine long base64 token (no URL scheme) is still flagged."""
+    blob = "QUJD" * 12  # 48 contiguous base64 chars, no URL context
+    (tmp_path / "blob.py").write_text(f'SECRET = "{blob}"\n')
+
+    findings = scan_for_plaintext_secrets(str(tmp_path))
+    assert [f.kind for f in findings] == ["base64"]

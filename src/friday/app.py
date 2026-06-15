@@ -121,6 +121,7 @@ from friday.providers.llm import (
 from friday.providers.offline import select_llm
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
+from friday.pwa import router as pwa_router
 from friday.rag.ingest import DocumentIngestor
 from friday.reminders.store import SQLiteReminderStore
 from friday.roster import ROSTER, RosterRegistry
@@ -1108,6 +1109,38 @@ def _run_secret_self_check(settings: Settings, repo_root: str) -> None:
         )
 
 
+# Bind hosts that mean "this machine only" — reaching FRIDAY over one of these
+# requires already being on the host, so an open gateway behind them is not
+# network-exposed and the exposure nudge stays silent.
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _warn_if_exposed_without_auth(settings: Settings) -> None:
+    """LOG a prominent WARNING when FRIDAY is bound to the network with no auth.
+
+    The "everywhere" safety nudge: when the configured uvicorn bind host
+    (``bind_host`` / ``FRIDAY_BIND_HOST``) is NON-loopback (so the gateway is
+    reachable from other machines) AND ``require_auth`` is off (so any caller is
+    accepted), one prominent WARNING is logged that FRIDAY is exposed without auth,
+    pointing the operator at ``FRIDAY_REQUIRE_AUTH`` + ``FRIDAY_API_KEYS``.
+
+    ADVISORY by design — like the plaintext-secret self-check, this NEVER raises
+    and NEVER refuses to boot: binding ``0.0.0.0`` for local dev (or a LAN demo)
+    must keep working. On the loopback default (or with auth on) it is SILENT.
+    """
+    host = settings.bind_host.strip().lower()
+    if host in _LOOPBACK_HOSTS or settings.require_auth:
+        return
+    logger.warning(
+        "FRIDAY is bound to %s WITHOUT auth — the gateway is exposed to the "
+        "network and will accept ANY caller. Set FRIDAY_REQUIRE_AUTH=true (with "
+        "FRIDAY_API_KEYS) to require a bearer key, or bind 127.0.0.1 for "
+        "local-only access (boot continues).",
+        settings.bind_host,
+        extra={"bind_host": settings.bind_host, "require_auth": settings.require_auth},
+    )
+
+
 def _build_registry(
     settings: Settings,
     reminder_store: SQLiteReminderStore,
@@ -2025,6 +2058,7 @@ def create_app() -> FastAPI:
         settings = get_settings()
         configure_logging(json_logs=settings.log_json, level=settings.log_level)
         logger.info("FRIDAY starting up", extra={"llm_provider": settings.llm_provider})
+        _warn_if_exposed_without_auth(settings)
         _install_runtime(app, settings)
         _wire_voice(app, settings)
         scheduler_task = _start_scheduler_loop(app, settings)
@@ -2156,11 +2190,18 @@ def create_app() -> FastAPI:
     app.include_router(hud_router)
     # Family sharing (consent-enforced) — FRIDAY_ENABLE_FAMILY_SHARING.
     app.include_router(family_router)
+    # The PWA shell (manifest + service worker + offline page) — ALWAYS included,
+    # no feature flag: installing a Progressive Web App is harmless and the static
+    # shell carries no secrets, so a fresh install is reachable + installable even
+    # on the offline default. Served at ROOT scope so the service worker controls
+    # the whole origin (the dashboard/HUD).
+    app.include_router(pwa_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The
     # lifespan rebuild is harmless and keeps per-process config fresh.
     settings = get_settings()
+    _warn_if_exposed_without_auth(settings)
     _install_runtime(app, settings)
     _wire_voice(app, settings)
     _mount_studio_static(app, settings)

@@ -4,18 +4,24 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
-  <title>FRIDAY · HUD</title>
+  <title>FRIDAY · Command Centre</title>
   <link rel="stylesheet" href="/hud/static/hud.css" />
 
   <!--
     No-build, no-bundler cockpit. Everything here is plain ES2022 the browser runs
     directly: no Node step, no webpack, no CDN modules. hud.js draws the particle
-    field, runs the arc-reactor boot sequence, and wires the Cmd/Ctrl-K command
-    palette to the existing same-origin endpoints (/chat, /admin/*).
+    field, runs the arc-reactor boot sequence, and wires every live panel to the
+    EXISTING same-origin endpoints (/roster, /chat, /rag/ingest, /admin/*, /maps).
 
-    SAFETY: this page NEVER eval()s anything from the server. The palette calls
-    JSON endpoints and renders their data as text — no server-sourced code is ever
-    executed. No secret is baked into the page; auth (if any) is the gateway's job.
+    SAFETY: this page NEVER eval()s anything from the server. Panels call JSON
+    endpoints and render their data as TEXT nodes — no server-sourced string is
+    ever executed or injected as HTML. No secret is baked into the page; auth (if
+    any) is the gateway's job. Every endpoint degrades gracefully: a panel whose
+    endpoint is off (404/disabled) shows a quiet "offline" state, never crashes.
+
+    The API base is configurable: append ?api=https://host:port to the URL (or set
+    window.FRIDAY_API_BASE before this script) to point the cockpit at a remote
+    backend; it defaults to same-origin.
   -->
 </head>
 <body>
@@ -39,30 +45,84 @@
     <header id="topbar">
       <div class="brand">
         <span class="brand-mark">FRIDAY</span>
-        <span class="brand-sub">HUD</span>
+        <span class="brand-sub">COMMAND CENTRE</span>
       </div>
-      <span class="kbd-hint">
-        <kbd>⌘</kbd><kbd>K</kbd> / <kbd>Ctrl</kbd><kbd>K</kbd> — command palette
-      </span>
-      <div id="conn-status" class="pill" title="Backend connection">
-        <span class="dot"></span><span class="conn-label">linking…</span>
+      <div class="topbar-actions">
+        <button type="button" id="btn-globe" class="ctl" title="Open the 3D globe (/maps)">
+          <span class="ctl-glyph">◍</span> GLOBE
+        </button>
+        <button type="button" id="btn-mic" class="ctl" title="Voice — speak to FRIDAY (Web Speech)">
+          <span class="ctl-glyph">🎙</span> VOICE
+        </button>
+        <span class="kbd-hint">
+          <kbd>⌘</kbd><kbd>K</kbd> / <kbd>Ctrl</kbd><kbd>K</kbd> — palette
+        </span>
+        <div id="conn-status" class="pill" title="Backend connection">
+          <span class="dot"></span><span class="conn-label">linking…</span>
+        </div>
       </div>
     </header>
 
     <main id="stage">
-      <section id="reactor-wrap" aria-label="Arc reactor">
-        <div id="reactor">
-          <div class="ring r1"></div>
-          <div class="ring r2"></div>
-          <div class="ring r3"></div>
-          <div class="ring r4"></div>
-          <div class="core"></div>
+      <!-- LEFT RAIL: reactor + roster ------------------------------------- -->
+      <section id="left-rail" aria-label="Reactor and roster">
+        <div id="reactor-wrap" aria-label="Arc reactor">
+          <div id="reactor">
+            <div class="ring r1"></div>
+            <div class="ring r2"></div>
+            <div class="ring r3"></div>
+            <div class="ring r4"></div>
+            <div class="core"></div>
+          </div>
+          <div class="reactor-caption">
+            REACTOR <strong id="reactor-state">ONLINE</strong>
+          </div>
         </div>
-        <div class="reactor-caption">
-          REACTOR <strong id="reactor-state">ONLINE</strong>
-        </div>
+
+        <section id="roster-panel" class="panel" aria-label="Persona roster">
+          <h2>Roster <span class="panel-tag" id="roster-count"></span></h2>
+          <div id="roster-grid" class="roster-grid" aria-live="polite"></div>
+        </section>
       </section>
 
+      <!-- CENTRE: chat / dossier / approvals / trace flow ----------------- -->
+      <section id="centre" aria-label="Command surface">
+        <div id="address-bar" class="address-bar" hidden>
+          addressing <strong id="address-target">FRIDAY</strong>
+          <button type="button" id="address-clear" class="link-btn">clear</button>
+        </div>
+
+        <section id="dossier-panel" class="panel" aria-label="Dossier search">
+          <h2>Dossier</h2>
+          <form id="dossier-form" class="searchbox">
+            <input id="dossier-input" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Ask about a person or project…" aria-label="Dossier query" />
+            <button type="button" id="dossier-go" class="ctl">QUERY</button>
+          </form>
+          <div id="dossier-cards" class="card-stack" aria-live="polite"></div>
+        </section>
+
+        <section id="approvals-panel" class="panel" aria-label="Approvals" hidden>
+          <h2>Approvals</h2>
+          <div id="approval-cards" class="card-stack" aria-live="polite"></div>
+        </section>
+
+        <section id="flow-panel" class="panel" aria-label="Trace flow">
+          <h2>Trace Flow <span class="panel-tag" id="flow-tag">live</span></h2>
+          <div id="flow-list" class="flow-list" aria-live="polite"></div>
+          <div id="replay" class="replay" hidden>
+            <div class="replay-head">
+              <span>Replay <strong id="replay-id"></strong></span>
+              <button type="button" id="replay-close" class="link-btn">close</button>
+            </div>
+            <div id="replay-spans" class="replay-spans"></div>
+            <h3 class="replay-sub">matching audit rows</h3>
+            <div id="replay-audit" class="replay-audit"></div>
+          </div>
+        </section>
+      </section>
+
+      <!-- RIGHT RAIL: telemetry / metrics / audit ------------------------- -->
       <aside id="telemetry" aria-label="Telemetry">
         <h2>Telemetry</h2>
         <div class="metric">
@@ -81,10 +141,31 @@
           <span class="label">sessions</span>
           <span class="value" id="m-sessions">—</span>
         </div>
+
+        <h2>By Mode</h2>
+        <div id="by-mode" class="by-mode"></div>
+
+        <h2>
+          Audit
+          <span id="audit-verify" class="badge" title="Hash-chain integrity">
+            verify…
+          </span>
+        </h2>
+        <div id="audit-list" class="audit-list" aria-live="polite"></div>
+
         <h2>Activity</h2>
         <div id="log" aria-live="polite"></div>
       </aside>
     </main>
+  </div>
+
+  <!-- Drop overlay for drag-drop RAG ingest (shown only while dragging). -->
+  <div id="drop-overlay" aria-hidden="true">
+    <div class="drop-card">
+      <div class="drop-glyph">⬇</div>
+      <div class="drop-text">Drop a file to ingest into RAG</div>
+      <div class="drop-sub">POST /rag/ingest — then it's askable</div>
+    </div>
   </div>
 
   <!-- Command palette (Cmd/Ctrl-K): talks to /chat + /admin. -->
@@ -101,6 +182,9 @@
       <div id="palette-result" aria-live="polite"></div>
     </div>
   </div>
+
+  <!-- Toast for transient status (voice, ingest, errors). -->
+  <div id="toast" hidden></div>
 
   <script src="/hud/static/hud.js"></script>
 </body>

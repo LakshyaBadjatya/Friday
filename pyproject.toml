@@ -14,6 +14,9 @@ dependencies = [
   "psutil>=7.2.2",
 ]
 
+[project.scripts]
+friday = "friday.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
@@ -39,6 +42,16 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# fastapi.testclient re-exports starlette's TestClient, which warns at import
+# time that using httpx with starlette.testclient is deprecated. It is a
+# known upstream deprecation we do not control (no httpx2 yet); silence just
+# that one message so the suite stays warning-clean. The warning category is
+# starlette's StarletteDeprecationWarning, a UserWarning subclass (NOT a
+# DeprecationWarning), so the filter matches by message only (default category
+# Warning) rather than pinning a class.
+filterwarnings = [
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [build-system]
 requires = ["hatchling"]

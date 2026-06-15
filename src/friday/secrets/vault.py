@@ -26,10 +26,17 @@ Scanner
 :func:`scan_for_plaintext_secrets` walks a directory tree and flags
 secret-looking string literals (NVIDIA ``nvapi-…`` keys, Google ``AIza…`` keys,
 OpenAI ``sk-…`` keys, AWS ``AKIA…`` access keys, and long base64 blobs) in
-tracked source files. A startup self-check uses it to refuse to boot a repo
-that has a credential committed in source. It deliberately ignores ``.env``
+tracked source files. A startup self-check uses it to nudge against booting a
+repo that has a credential committed in source. It deliberately ignores ``.env``
 (git-ignored and a legitimate local secret store) while still scanning
 ``.env.example`` and other committed ``.env``-family files.
+
+To avoid boot-time false positives it scans only *production* sources: the
+entire ``tests/`` tree is skipped (its fixtures legitimately carry
+oauth/secret-shaped strings), as is any file whose name starts with ``test_``.
+It also skips obvious non-secret contexts — the broad base64 catch-all does not
+fire on URL paths (a ``…/v3/calendars/primary/events`` run is base64-valid only
+because ``/`` is in the alphabet, not because it is a credential).
 
 No heavy/optional dependency is imported at module top level.
 """
@@ -213,22 +220,45 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("base64", re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")),
 )
 
+#: The catch-all kind whose matches are URL-path noise far more often than real
+#: credentials; it gets the extra non-secret-context guard below.
+_BASE64_KIND = "base64"
+
 #: File suffixes treated as scannable source.
 _SCANNED_SUFFIXES: frozenset[str] = frozenset({".py", ".env"})
 
 #: Filenames that legitimately hold local secrets and are git-ignored; skipped.
 _IGNORED_FILENAMES: frozenset[str] = frozenset({".env"})
 
+#: Filename prefix marking a test module; its body carries fixture/oauth-shaped
+#: strings that are false positives, so such files are skipped wholesale.
+_TEST_FILE_PREFIX = "test_"
+
 #: Directory names never worth scanning (vendored/build/VCS noise).
 _SKIP_DIRS: frozenset[str] = frozenset(
     {".git", "__pycache__", ".venv", "venv", "node_modules", ".mypy_cache", ".pytest_cache"}
 )
 
+#: Source trees deliberately excluded from the scan: test fixtures legitimately
+#: carry secret-shaped literals, so scanning them only yields false positives.
+_SKIP_SOURCE_DIRS: frozenset[str] = frozenset({"tests"})
+
+#: A base64 match that overlaps a URL (``scheme://…``) is a path fragment, not a
+#: secret — ``/`` is base64-valid, so REST paths trip the broad catch-all.
+_URL_RE: re.Pattern[str] = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://\S+")
+
 
 def _is_scannable(path: Path) -> bool:
-    """Return True if ``path`` is a committed source file worth scanning."""
+    """Return True if ``path`` is a committed *production* source file to scan.
+
+    Excludes the git-ignored ``.env`` and any ``test_*`` module (whose fixture
+    bodies legitimately hold secret-shaped strings). Test *directories* are
+    pruned earlier, during the walk, via :data:`_SKIP_SOURCE_DIRS`.
+    """
     name = path.name
     if name in _IGNORED_FILENAMES:
+        return False
+    if name.startswith(_TEST_FILE_PREFIX):
         return False
     if path.suffix in _SCANNED_SUFFIXES:
         return True
@@ -236,11 +266,26 @@ def _is_scannable(path: Path) -> bool:
     return name.startswith(".env.")
 
 
+def _is_url_match(line: str, start: int, end: int) -> bool:
+    """Return True if the ``[start, end)`` span overlaps a URL in ``line``."""
+    return any(m.start() < end and start < m.end() for m in _URL_RE.finditer(line))
+
+
 def _scan_line(line: str) -> str | None:
-    """Return the matched secret ``kind`` for ``line``, or ``None``."""
+    """Return the matched secret ``kind`` for ``line``, or ``None``.
+
+    The broad ``base64`` catch-all is suppressed when its match is part of a URL
+    (an obvious non-secret context), but the specific provider patterns
+    (``nvapi-``/``AIza``/``sk-``/``AKIA``) always fire — a real key embedded in a
+    URL is still a leak.
+    """
     for kind, pattern in _SECRET_PATTERNS:
-        if pattern.search(line):
-            return kind
+        match = pattern.search(line)
+        if match is None:
+            continue
+        if kind == _BASE64_KIND and _is_url_match(line, match.start(), match.end()):
+            continue
+        return kind
     return None
 
 
@@ -249,14 +294,17 @@ def scan_for_plaintext_secrets(root: str) -> list[Finding]:
 
     Returns a list of :class:`Finding` (one per offending line) for committed
     ``.py`` and ``.env``-family files (excluding the git-ignored ``.env``
-    itself). Binary/undecodable files are skipped silently. The result is
-    deterministic: files are visited in sorted path order and lines in order.
+    itself). The whole ``tests/`` tree and any ``test_*`` file are skipped to
+    avoid fixture-shaped false positives, as are base64-looking URL paths.
+    Binary/undecodable files are skipped silently. The result is deterministic:
+    files are visited in sorted path order and lines in order.
     """
     base = Path(root)
     findings: list[Finding] = []
+    pruned_dirs = _SKIP_DIRS | _SKIP_SOURCE_DIRS
 
     for path in sorted(base.rglob("*")):
-        if any(part in _SKIP_DIRS for part in path.parts):
+        if any(part in pruned_dirs for part in path.parts):
             continue
         if not path.is_file() or not _is_scannable(path):
             continue

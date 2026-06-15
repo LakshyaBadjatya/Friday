@@ -39,3 +39,7 @@ uv.lock.tmp
 data/
 audio_out/
 chroma/
+
+# Playwright MCP artifacts + stray screenshots (keep assets/)
+.playwright-mcp/
+/*.png

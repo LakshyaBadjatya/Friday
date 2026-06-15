@@ -149,6 +149,20 @@ class Settings(BaseSettings):
     # (any critic error keeps the original response).
     enable_self_critique: bool = False
 
+    # --- Plugins / extensions (Tier 2; default off) ---
+    # Gates the whole plugin surface (the loader *and* the ``/plugins`` route).
+    # Off by default so the offline build loads no third-party code and exposes no
+    # plugin route (-> 404). When on, every ``*.py`` in ``plugins_dir`` is loaded
+    # at startup and its ``get_tools()`` tools are registered into the shared tool
+    # registry (after the built-ins, which win any name collision). Plugins are
+    # TRUSTED local code the owner drops in (arbitrary Python by design); a broken
+    # plugin is captured and skipped, never crashing startup.
+    enable_plugins: bool = False
+    # Directory scanned for plugin ``*.py`` files, relative to the process working
+    # directory (so a local ``plugins/`` works out of the box). Only used when
+    # ``enable_plugins`` is on.
+    plugins_dir: str = "plugins"
+
     # --- Persona ---
     owner_address: str = "Boss"
 

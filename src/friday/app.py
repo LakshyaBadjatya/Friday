@@ -46,6 +46,7 @@ from friday.api.routes_admin import router as admin_router
 from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
+from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
 from friday.api.routes_rag import router as rag_router
 from friday.api.routes_reminders import router as reminders_router
@@ -65,6 +66,7 @@ from friday.memory.vector import SQLiteVectorStore
 from friday.observability.audit import AuditLog
 from friday.observability.metrics import Metrics
 from friday.observability.tracing import Tracer
+from friday.plugins.loader import PluginInfo, load_into
 from friday.protocols.runner import ProtocolRunner
 from friday.protocols.store import SQLiteProtocolStore
 from friday.providers.embeddings import (
@@ -816,6 +818,34 @@ def _wire_protocols(app: FastAPI, settings: Settings, runtime: AppRuntime) -> No
     app.state.protocol_runner = runtime.protocol_runner
 
 
+def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Load owner-supplied plugins into the shared registry when enabled.
+
+    The built-in tools are already registered (``build_runtime`` -> ``_build_registry``
+    runs *before* this), so :func:`~friday.plugins.loader.load_into` registers each
+    plugin's tools into the *same* shared :class:`ToolRegistry` while rejecting any
+    name that collides with a built-in — guaranteeing a plugin can never shadow a
+    built-in. The resulting :class:`PluginInfo` list is stashed on
+    ``app.state.plugins`` so the ``/plugins`` route can report what loaded (and what
+    failed). Loading is per-plugin isolated, so a broken plugin is captured and
+    skipped, never crashing startup. Skipped entirely when ``enable_plugins`` is
+    off (the route self-guards on the flag and 404s when off).
+    """
+    if not settings.enable_plugins:
+        app.state.plugins = []
+        return
+    plugins: list[PluginInfo] = load_into(runtime.registry, settings.plugins_dir)
+    app.state.plugins = plugins
+    logger.info(
+        "plugins loaded",
+        extra={
+            "count": len(plugins),
+            "errors": sum(1 for info in plugins if info.error is not None),
+            "plugins_dir": settings.plugins_dir,
+        },
+    )
+
+
 def _install_runtime(app: FastAPI, settings: Settings) -> None:
     """Assemble the runtime graph and stash every shared piece on ``app.state``.
 
@@ -840,6 +870,9 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_scheduler(app, settings, runtime)
     _wire_briefing(app, settings, runtime)
     _wire_protocols(app, settings, runtime)
+    # Plugins load LAST so every built-in tool is already registered (built-ins
+    # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
+    _wire_plugins(app, settings, runtime)
 
 
 def _start_scheduler_loop(
@@ -953,6 +986,11 @@ def create_app() -> FastAPI:
     # protocol surface. The shared protocol store + runner are wired onto
     # app.state only when enabled.
     app.include_router(protocols_router)
+    # Plugins / extensions (Tier 2) — always registered but self-guards on
+    # FRIDAY_ENABLE_PLUGINS (404 when off), so the offline default exposes no
+    # plugin surface. The plugins are loaded into the shared registry and the
+    # resulting PluginInfo list is stashed on app.state only when enabled.
+    app.include_router(plugins_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

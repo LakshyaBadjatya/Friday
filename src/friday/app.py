@@ -57,6 +57,7 @@ from friday.api.routes_schedules import router as schedules_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
 from friday.api.routes_study import router as study_router
+from friday.api.routes_system import router as system_router
 from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
@@ -105,6 +106,7 @@ from friday.studio.generator import (
     Text3DProvider,
 )
 from friday.study.store import SQLiteStudyStore
+from friday.system.monitor import PsutilSampler, SystemMonitor
 from friday.tools.agent_reach import AgentReachTool
 from friday.tools.base import Tool
 from friday.tools.home import HomeControlTool
@@ -635,6 +637,59 @@ def _make_briefing_action(
     return _briefing
 
 
+def _build_system_monitor(settings: Settings) -> SystemMonitor:
+    """Assemble the :class:`SystemMonitor` over the real :class:`PsutilSampler`.
+
+    The sampler lazy-imports ``psutil`` (only when a live sample is taken), so this
+    construction performs no reads and the module imports even where ``psutil`` is
+    absent. The four breach thresholds come from settings
+    (``sys_cpu_threshold``/``sys_mem_threshold``/``sys_disk_threshold``/
+    ``sys_temp_threshold``); the ``/system`` route and the scheduler
+    ``"system_check"`` action both read through this one monitor. Built eagerly
+    (cheap) and surfaced on the runtime; the route + action self-guard on the flag.
+    """
+    return SystemMonitor(
+        PsutilSampler(),
+        cpu_threshold=settings.sys_cpu_threshold,
+        mem_threshold=settings.sys_mem_threshold,
+        disk_threshold=settings.sys_disk_threshold,
+        temp_threshold=settings.sys_temp_threshold,
+    )
+
+
+def _make_system_check_action(
+    monitor: SystemMonitor, notify: NotifyTool
+) -> Callable[[Trigger], Awaitable[None]]:
+    """Build the ``system_check`` scheduler action over the shared monitor.
+
+    Samples the *shared* :class:`SystemMonitor` once and emits each breached
+    threshold (:class:`~friday.system.monitor.Alert`) via the :class:`NotifyTool`
+    fake sink (one message per alert, carrying the alert's human-readable line) +
+    a summary log line, so an enabled trigger surfaces a resource breach
+    proactively. When the host is healthy (no alerts) nothing is sent. The
+    sampling is the action's only side seam; ``check()`` itself is the
+    deterministic, fake-sampler-tested unit.
+    """
+
+    async def _system_check(trigger: Trigger) -> None:
+        alerts = monitor.check()
+        for alert in alerts:
+            notify.sink.append(
+                SentMessage(
+                    channel="webhook",
+                    target="scheduler",
+                    subject="System alert",
+                    body=alert.message,
+                )
+            )
+        logger.info(
+            "scheduler system_check fired",
+            extra={"trigger": trigger.name, "alerts": len(alerts)},
+        )
+
+    return _system_check
+
+
 def _build_scheduler(
     trigger_store: SQLiteTriggerStore,
     reminder_store: SQLiteReminderStore,
@@ -642,16 +697,19 @@ def _build_scheduler(
     briefing_service: BriefingService,
     journal_service: JournalService,
     journal_store: SQLiteJournalStore,
+    system_monitor: SystemMonitor,
 ) -> Scheduler:
     """Assemble the :class:`Scheduler` and register the default actions.
 
     Registers ``"due_reminders"`` (emit due reminders via the shared notify tool's
     sink/log), ``"briefing"`` (build + emit the proactive briefing via the same
     sink), ``"journal"`` (build + save the day's journal entry into the shared
-    journal store), and a ``"noop"`` placeholder. The notify tool is pulled from
-    the shared :class:`ToolRegistry` so the scheduler emits into the *same* sink the
-    alerting agent uses (one auditable place for everything that would have been
-    sent); a fresh :class:`NotifyTool` is used as a fallback if absent.
+    journal store), ``"system_check"`` (sample the shared system monitor and emit
+    any breached thresholds via the same sink), and a ``"noop"`` placeholder. The
+    notify tool is pulled from the shared :class:`ToolRegistry` so the scheduler
+    emits into the *same* sink the alerting agent uses (one auditable place for
+    everything that would have been sent); a fresh :class:`NotifyTool` is used as a
+    fallback if absent.
     """
     scheduler = Scheduler(trigger_store)
     try:
@@ -667,6 +725,9 @@ def _build_scheduler(
     )
     scheduler.register_action(
         "journal", _make_journal_action(journal_service, journal_store)
+    )
+    scheduler.register_action(
+        "system_check", _make_system_check_action(system_monitor, notify_tool)
     )
     scheduler.register_action("noop", _noop_action)
     return scheduler
@@ -837,6 +898,10 @@ class AppRuntime:
     #: The shared study store — the same one the ``/study`` routes read/write
     #: (spaced-repetition flashcards + logged study sessions).
     study_store: SQLiteStudyStore
+    #: The shared hardware/system monitor over the real ``PsutilSampler`` — the
+    #: same one the ``/system`` routes read and the scheduler ``system_check``
+    #: action samples; its thresholds come from settings.
+    system_monitor: SystemMonitor
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -870,6 +935,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
     journal_service = _build_journal_service(
         reminder_store, audit, metrics, llm, settings.owner_address
     )
+    system_monitor = _build_system_monitor(settings)
     scheduler = _build_scheduler(
         trigger_store,
         reminder_store,
@@ -877,6 +943,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         briefing,
         journal_service,
         journal_store,
+        system_monitor,
     )
     protocol_store = _build_protocol_store(settings)
     protocol_runner = _build_protocol_runner(registry)
@@ -927,6 +994,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         graph_store=graph_store,
         graph_extractor=graph_extractor,
         study_store=study_store,
+        system_monitor=system_monitor,
     )
 
 
@@ -1164,6 +1232,21 @@ def _wire_study(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     app.state.study_store = runtime.study_store
 
 
+def _wire_system(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared system monitor on ``app.state`` when monitoring is enabled.
+
+    The ``/system`` routes read ``app.state.system_monitor`` — the *same*
+    :class:`~friday.system.monitor.SystemMonitor` (over the real ``PsutilSampler``)
+    the scheduler ``system_check`` action samples — so the on-demand HTTP stats /
+    check and the proactive scheduled breach alert read one monitor with one set of
+    thresholds. Building it only when ``enable_system_monitor`` is set keeps the
+    offline default untouched (the routes self-guard on the flag and 404 when off).
+    """
+    if not settings.enable_system_monitor:
+        return
+    app.state.system_monitor = runtime.system_monitor
+
+
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Load owner-supplied plugins into the shared registry when enabled.
 
@@ -1220,6 +1303,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_meetings(app, settings, runtime)
     _wire_graph(app, settings, runtime)
     _wire_study(app, settings, runtime)
+    _wire_system(app, settings, runtime)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
     _wire_plugins(app, settings, runtime)
@@ -1356,6 +1440,12 @@ def create_app() -> FastAPI:
     # FRIDAY_ENABLE_STUDY (404 when off), so the offline default exposes no study
     # surface. The shared study store is wired onto app.state only when enabled.
     app.include_router(study_router)
+    # Hardware / system monitoring (Tier 2) — always registered but self-guards on
+    # FRIDAY_ENABLE_SYSTEM_MONITOR (404 when off), so the offline default exposes no
+    # system surface. The shared SystemMonitor (over the real PsutilSampler) is
+    # wired onto app.state only when enabled, and the scheduler "system_check"
+    # action samples the same monitor.
+    app.include_router(system_router)
     # Plugins / extensions (Tier 2) — always registered but self-guards on
     # FRIDAY_ENABLE_PLUGINS (404 when off), so the offline default exposes no
     # plugin surface. The plugins are loaded into the shared registry and the

@@ -219,6 +219,24 @@ class Settings(BaseSettings):
     # reschedules the card. Reuses ``memory_db_path`` (no new path setting).
     enable_study: bool = False
 
+    # --- Hardware / system monitoring (Tier 2; default off) ---
+    # Gates the whole ``/system`` REST surface (stats + check) *and* the scheduler
+    # ``system_check`` action; off by default so the offline build exposes no
+    # system routes (each -> 404) and the registered action is inert unless a
+    # trigger fires it. When on, a :class:`~friday.system.monitor.SystemMonitor`
+    # over the real :class:`~friday.system.monitor.PsutilSampler` reports the
+    # host's CPU / memory / disk utilisation (plus optional temperature + load),
+    # and the four thresholds below decide when a metric breach raises an alert.
+    enable_system_monitor: bool = False
+    # Breach thresholds for ``GET /system/check`` and the scheduler action: a
+    # metric value strictly ABOVE its threshold raises one alert (boundary-equal
+    # is healthy). CPU/memory are utilisation percentages, disk a usage
+    # percentage, temperature degrees Celsius.
+    sys_cpu_threshold: float = 90.0
+    sys_mem_threshold: float = 90.0
+    sys_disk_threshold: float = 95.0
+    sys_temp_threshold: float = 85.0
+
     # --- Persona ---
     owner_address: str = "Boss"
 

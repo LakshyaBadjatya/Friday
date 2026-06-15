@@ -209,6 +209,16 @@ class Settings(BaseSettings):
     # and the long-term facts that mention it.
     enable_knowledge_graph: bool = False
 
+    # --- Study / productivity (Tier 2; default off) ---
+    # Gates the whole ``/study`` REST surface (flashcards + study sessions). Off by
+    # default so the offline build exposes no study routes (each -> 404). When on,
+    # spaced-repetition flashcards (scheduled by a pure SM-2 core) and logged study
+    # sessions are persisted in a sibling SQLite file alongside ``memory_db_path``.
+    # ``GET /study/review`` returns the cards due for utcnow; ``POST
+    # /study/review/{id}`` applies SM-2 for the given recall grade (0..5) and
+    # reschedules the card. Reuses ``memory_db_path`` (no new path setting).
+    enable_study: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 

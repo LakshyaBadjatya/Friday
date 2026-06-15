@@ -114,6 +114,25 @@ class ProtocolStore(Protocol):
         ...
 
 
+@runtime_checkable
+class N8nServiceProtocol(Protocol):
+    """The slice of the n8n-service contract the orchestrator depends on.
+
+    Only :meth:`make_workflow` is needed: given a description and the turn's
+    confirm flag, it returns either a ``needs_confirmation`` payload (n8n is down)
+    or a drafted/imported workflow result. :class:`~friday.n8n.service.N8nService`
+    satisfies this structurally, so the orchestrator depends on the contract — not
+    the concrete service — and stays constructible un-wired in narrow unit tests
+    (and never imports the ``n8n`` package).
+    """
+
+    async def make_workflow(
+        self, description: str, *, confirmed: bool = False
+    ) -> dict[str, Any]:
+        """Draft (and optionally import) a workflow; confirm-gate the n8n start."""
+        ...
+
+
 class MemoryWrite(BaseModel):
     """A memory write an agent *proposes*; the orchestrator decides if it lands.
 
@@ -193,6 +212,42 @@ _RUN_PROTOCOL_RULES: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
 )
+
+
+# "make a workflow on n8n <X>" / "n8n workflow <X>" intent (Tier 2 n8n): a light
+# keyword check extracts the workflow description ``X``. Ordered most-specific-first
+# so the fuller "make a workflow on n8n ..." lead-in is tried before the bare "n8n
+# workflow ...". Each pattern captures the description in its only group. The router
+# has no N8N mode, so this is detected up front (inert unless n8n is enabled +
+# wired). The leading verb is optional ("make/create/build/set up a workflow").
+_N8N_WORKFLOW_RULES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:make|create|build|set\s*up|draft)\s+(?:me\s+)?(?:an?\s+)?"
+        r"(?:workflow|automation)\s+(?:on|in|with|using|for)\s+n8n\s+(?:that\s+|to\s+|which\s+|for\s+)?(.+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"n8n\s+(?:workflow|automation)\s+(?:that\s+|to\s+|which\s+|for\s+)?(.+)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _extract_n8n_description(text: str) -> str | None:
+    """Return the workflow description ``X`` of an "n8n workflow X" command, or None.
+
+    Matches the ordered :data:`_N8N_WORKFLOW_RULES` and returns the captured
+    description with surrounding whitespace and a trailing period/quote stripped,
+    so ``"Make a workflow on n8n that posts to Slack."`` yields ``"posts to
+    Slack"``.
+    """
+    for pattern in _N8N_WORKFLOW_RULES:
+        match = pattern.search(text)
+        if match is not None:
+            description = match.group(1).strip().strip("\"'").rstrip(".!?").strip()
+            if description:
+                return description
+    return None
 
 
 def _extract_protocol_name(text: str) -> str | None:
@@ -313,6 +368,12 @@ class Orchestrator:
             never re-critiqued, and non-fatal — any critic error keeps the
             original). When absent or the flag is off, the critic is never called
             (no extra LLM cost), so existing orchestrator behavior is unchanged.
+        n8n_service: Optional n8n service (an :class:`N8nServiceProtocol`). When
+            wired *and* ``FRIDAY_ENABLE_N8N`` is set, a turn whose text matches
+            "make a workflow on n8n <X>" / "n8n workflow <X>" drafts (and
+            best-effort imports) a workflow, threading the turn's confirm flag (a
+            docker auto-start is confirm-gated). When absent or the flag is off the
+            hook is inert, so existing orchestrator tests behave unchanged.
     """
 
     def __init__(
@@ -329,6 +390,7 @@ class Orchestrator:
         protocol_store: ProtocolStore | None = None,
         protocol_runner: ProtocolRunner | None = None,
         critic: SelfCritic | None = None,
+        n8n_service: N8nServiceProtocol | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -342,6 +404,7 @@ class Orchestrator:
         self._protocol_store = protocol_store
         self._protocol_runner = protocol_runner
         self._critic = critic
+        self._n8n_service = n8n_service
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
@@ -761,6 +824,65 @@ class Orchestrator:
             f"({removed} record(s) removed)."
         )
 
+    # -- n8n workflows (Tier 2) -------------------------------------------- #
+    async def _make_n8n_workflow(self, description: str, state: GraphState) -> str:
+        """Draft (and maybe import) an n8n workflow and report it in persona.
+
+        Threads ``state.confirmed`` into the service so a docker auto-start is
+        gated by the confirm-step: when the service returns
+        ``needs_confirmation`` (n8n is down, unconfirmed) a persona confirm
+        question is surfaced and NOTHING is started or drafted; a confirming
+        follow-up re-fires and proceeds. Otherwise the drafted/imported workflow
+        and its setup notes are reported deterministically (no LLM call here — the
+        draft already used one), so an n8n turn is always truthful.
+        """
+        assert self._n8n_service is not None  # guarded by the caller
+        state.mode = Mode.AUTOMATION
+        result = await self._n8n_service.make_workflow(
+            description, confirmed=state.confirmed
+        )
+        state.scratchpad["n8n"] = result
+        return self._n8n_reply(result)
+
+    def _n8n_reply(self, result: dict[str, Any]) -> str:
+        """A deterministic persona reply describing an n8n workflow outcome."""
+        owner = get_settings().owner_address
+        if result.get("kind") == "needs_confirmation":
+            return (
+                f"n8n isn't running, {owner}, so I can't draft against it yet. I "
+                f"can start it with docker — that's a real-world action, so reply "
+                f"to confirm and I'll bring it up, then build the workflow."
+            )
+
+        workflow = result.get("workflow")
+        name = workflow.get("name") if isinstance(workflow, dict) else None
+        label = f"“{name}”" if name else "the workflow"
+        lines: list[str] = []
+        if result.get("started"):
+            lines.append(f"Started n8n via docker, {owner}, then drafted {label}.")
+        elif result.get("imported"):
+            lines.append(f"Done, {owner} — drafted and imported {label} into n8n.")
+        else:
+            lines.append(f"Done, {owner} — drafted {label}.")
+
+        import_error = result.get("import_error")
+        if import_error:
+            lines.append(
+                f"I couldn't import it automatically ({import_error}); the JSON is "
+                f"ready for you to import by hand."
+            )
+        elif not result.get("imported"):
+            lines.append(
+                "I didn't import it (no n8n API key set); the JSON is ready to "
+                "import in n8n."
+            )
+
+        setup_notes = result.get("setup_notes") or []
+        if isinstance(setup_notes, list) and setup_notes:
+            lines.append("Still to configure:")
+            lines.extend(f"- {note}" for note in setup_notes)
+        return "\n".join(lines)
+
     # -- voice protocols (Tier 1) ------------------------------------------ #
     def _match_protocol(self, text: str) -> ProtocolModel | None:
         """Return the enabled protocol ``text`` fires, or ``None``.
@@ -967,6 +1089,18 @@ class Orchestrator:
             state.response = await self._run_protocol(protocol, state)
             self._record(state)
             return state
+
+        # 2b-ii. An "n8n workflow <X>" request drafts (and maybe imports) a
+        # workflow through the n8n service, threading the turn's confirm flag (a
+        # docker auto-start is confirm-gated). Inert unless n8n is enabled + wired.
+        if self._n8n_service is not None and get_settings().enable_n8n:
+            n8n_description = _extract_n8n_description(state.user_input)
+            if n8n_description is not None:
+                state.response = await self._make_n8n_workflow(
+                    n8n_description, state
+                )
+                self._record(state)
+                return state
 
         # 2c. A "forget X" command removes everything stored about X (§10).
         forget_target = _extract_forget_target(state.user_input)

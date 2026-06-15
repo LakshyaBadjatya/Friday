@@ -34,6 +34,35 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # --- Optional n8n workflow-automation engine ---------------------------------
+  # FRIDAY's n8n integration (FRIDAY_ENABLE_N8N=true) drafts/imports workflows into
+  # a running n8n. This service makes `docker compose up -d n8n` bring one up on
+  # http://localhost:5678 — which is exactly the argv FRIDAY's confirm-gated
+  # auto-start runs (`docker compose -f docker-compose.yml up -d n8n`). It is an
+  # independent service (no depends_on on `api`), so the default `docker compose
+  # up` of just `api` is unaffected; n8n starts only when you ask for it.
+  #
+  # Basic auth is ON by default below — CHANGE the password before exposing this.
+  # Create a REST API key inside n8n (Settings -> API) and put it in your .env as
+  # FRIDAY_N8N_API_KEY so FRIDAY can import drafted workflows.
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: friday
+      N8N_BASIC_AUTH_PASSWORD: change-me
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      # Persist data + encryption key location inside the named volume below.
+      N8N_USER_FOLDER: /home/node/.n8n
+    # n8n's data (workflows, credentials, encryption key) persists across restarts
+    # via this named volume, mounted where n8n writes its home (~/.n8n).
+    volumes:
+      - friday-n8n:/home/node/.n8n
+    restart: unless-stopped
+
   # --- Optional future long-term / pgvector store (DISABLED by default) --------
   # Local-first default uses the SQLite volume above; this service is the
   # documented swap target for durable memory + vector retrieval on Postgres
@@ -68,4 +97,7 @@ services:
 
 volumes:
   friday-data:
+  # n8n home (~/.n8n): workflows, credentials, encryption key. Used by the n8n
+  # service above so a `docker compose up -d n8n` keeps state across restarts.
+  friday-n8n:
   # friday-pgdata:   # uncomment together with the postgres service above

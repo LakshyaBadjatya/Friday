@@ -262,6 +262,28 @@ class Settings(BaseSettings):
     # a command exceeding it is killed and surfaced as a timeout error.
     system_exec_timeout: float = 30.0
 
+    # --- n8n integration (Tier 2; default off) ---
+    # Gates the whole ``/n8n`` REST surface *and* the orchestrator's "make a
+    # workflow on n8n <X>" hook; off by default so the offline build exposes no
+    # n8n routes (each -> 404) and the orchestrator never reaches n8n. When on,
+    # FRIDAY drafts a MINIMAL valid n8n workflow JSON (one NON-FATAL LLM pass; a
+    # safe single-Manual-Trigger stub on failure) and, if a key is set, imports it
+    # into a running n8n via its REST API. n8n itself can be auto-started via
+    # ``docker compose up -d <service>`` — gated behind the confirm-step (a
+    # side-effecting action), spawned argv-only (``create_subprocess_exec`` — never
+    # a shell). The API key is a :class:`SecretStr` (never logged).
+    enable_n8n: bool = False
+    # Base URL of the local n8n instance the client probes / imports into.
+    n8n_base_url: str = "http://localhost:5678"
+    # n8n REST API key, read from ``FRIDAY_N8N_API_KEY``. A :class:`SecretStr` so it
+    # never leaks into repr/str/logs; sent ONLY as the ``X-N8N-API-KEY`` header.
+    # When unset, drafting still works but import is skipped/errors clearly.
+    n8n_api_key: SecretStr | None = None
+    # The compose file + service name used to build the docker auto-start argv:
+    # ``["docker", "compose", "-f", <file>, "up", "-d", <service>]``.
+    n8n_docker_compose_file: str = "docker-compose.yml"
+    n8n_docker_service: str = "n8n"
+
     # --- Perception (Tier 2; default off; PRIVACY-HEAVY) ---
     # Gates the whole ``/perception`` REST surface (vision / OCR / clipboard /
     # screen). Off by default so the offline build exposes no perception routes

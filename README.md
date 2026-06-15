@@ -90,17 +90,52 @@ than fabricating an answer — that is the persona working as designed, not a cr
 > `FRIDAY_LLM_TIMEOUT_SECONDS` (default `60`); past it the call fails cleanly with an honest
 > error instead of hanging.
 
+## Voice (optional, off by default)
+
+FRIDAY ships a full voice pipeline — wake word → microphone capture → Whisper STT
+→ orchestrator → TTS, with **barge-in** (start talking over FRIDAY and playback
+stops) — but it is **off by default** and its heavy backends are kept out of the
+core install so `uv sync` and the test suite stay fast and dependency-light.
+
+Turn it on and install the extras:
+
+```bash
+export FRIDAY_ENABLE_VOICE=true   # the master flag; everything voice is gated on it
+make install-voice                # uv pip install -r requirements-voice.txt
+```
+
+`make install-voice` pulls in the optional backends (`faster-whisper`,
+`openwakeword`, `piper-tts`, `sounddevice`) listed in `requirements-voice.txt`.
+These are **not** in `pyproject.toml`/the uv lock; the real adapters lazy-import
+them and raise a clear "run `make install-voice`" error if they're missing, so the
+package still imports and tests still pass without them. Live voice also needs a
+**working microphone** (sounddevice / PortAudio).
+
+When `FRIDAY_ENABLE_VOICE` is set, two endpoints come alive (they return `404` /
+refuse the socket while the flag is off):
+
+- `POST /voice` — one spoken turn: send audio as base64 (`{"audio_b64": "..."}`)
+  or a multipart file upload; get back `{transcript, text, mode, audio_b64}`.
+- `WS /ws/voice` — a minimal websocket scaffold for streaming + barge-in
+  signaling (full duplex streaming UX lands in a later tier).
+
+Pick a TTS backend with `FRIDAY_TTS_PROVIDER` (`piper` | `elevenlabs` | `fake`);
+`elevenlabs` needs `ELEVENLABS_API_KEY`. With the offline `fake` LLM provider the
+voice path uses `FakeSTT`/`FakeTTS` so it runs end-to-end with zero models.
+
 ## Make targets
 
-| Target          | What it does                                                        |
-|-----------------|---------------------------------------------------------------------|
-| `make install`  | `uv sync --all-groups` — create the venv and install all deps       |
-| `make test`     | Run the full test suite (`uv run pytest -q`)                        |
-| `make lint`     | `uv run ruff check src tests`                                       |
-| `make type`     | `uv run mypy` (`--strict`) over `src`                              |
-| `make run`      | Serve the app via uvicorn with `--reload`                           |
-| `make gate-0`   | Lint + types + unit tests — the Phase 0 foundation gate             |
-| `make gate-1`   | Lint + types + the full suite — the Phase 1 core-loop gate          |
+| Target              | What it does                                                        |
+|---------------------|---------------------------------------------------------------------|
+| `make install`      | `uv sync --all-groups` — create the venv and install all deps       |
+| `make install-voice`| `uv pip install -r requirements-voice.txt` — optional voice backends|
+| `make test`         | Run the full test suite (`uv run pytest -q`)                        |
+| `make lint`         | `uv run ruff check src tests`                                       |
+| `make type`         | `uv run mypy` (`--strict`) over `src`                              |
+| `make run`          | Serve the app via uvicorn with `--reload`                           |
+| `make gate-0`       | Lint + types + unit tests — the Phase 0 foundation gate             |
+| `make gate-1`       | Lint + types + the full suite — the Phase 1 core-loop gate          |
+| `make gate-3`       | Lint + types + the full suite — the Phase 3 voice gate              |
 
 ## What's built vs. deferred
 

@@ -39,12 +39,16 @@ from friday.agents.device import DeviceAgent
 from friday.agents.knowledge import KnowledgeAgent
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
+from friday.api.routes_voice import router as voice_router
+from friday.api.ws import router as ws_router
 from friday.config import Settings, get_settings
 from friday.core.orchestrator import Orchestrator
 from friday.logging import configure_logging, get_logger
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import InMemoryVectorStore
 from friday.providers.llm import FakeLLM, LLMProvider, NvidiaNIMProvider
+from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
+from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.tools.base import Tool
 from friday.tools.home import HomeControlTool
 from friday.tools.notify import NotifyTool
@@ -137,6 +141,45 @@ def build_orchestrator(settings: Settings) -> Orchestrator:
     )
 
 
+def _build_voice_stt(settings: Settings) -> STTProvider:
+    """Select the STT provider for voice turns.
+
+    When the LLM provider is the offline ``fake`` (tests / no credentials) we use
+    :class:`FakeSTT` so the app boots and exercises with zero models/network.
+    Otherwise the real :class:`FasterWhisperSTT` is chosen; it lazy-imports
+    ``faster-whisper`` and only fails at transcription time if the optional voice
+    extras are not installed (``make install-voice``).
+    """
+    if settings.llm_provider == "fake":
+        return FakeSTT()
+    return FasterWhisperSTT()
+
+
+def _build_voice_tts(settings: Settings) -> TTSProvider:
+    """Select the TTS provider for voice turns.
+
+    Offline (``fake`` LLM) defaults to :class:`FakeTTS`; otherwise the
+    config-selected real adapter (``FRIDAY_TTS_PROVIDER``) via :func:`make_tts`.
+    The real adapters lazy-load their heavy deps, so this stays import-light.
+    """
+    if settings.llm_provider == "fake":
+        return FakeTTS()
+    return make_tts(settings)
+
+
+def _wire_voice(app: FastAPI, settings: Settings) -> None:
+    """Stash the voice STT/TTS adapters on ``app.state`` when voice is enabled.
+
+    The ``/voice`` route reads these off ``app.state`` (falling back to fakes),
+    so wiring them only when ``enable_voice`` is set keeps the offline default
+    untouched and never constructs a heavy adapter unless asked for.
+    """
+    if not settings.enable_voice:
+        return
+    app.state.voice_stt = _build_voice_stt(settings)
+    app.state.voice_tts = _build_voice_tts(settings)
+
+
 def create_app() -> FastAPI:
     """Construct the FRIDAY FastAPI application.
 
@@ -151,12 +194,17 @@ def create_app() -> FastAPI:
         logger.info("FRIDAY starting up", extra={"llm_provider": settings.llm_provider})
         app.state.settings = settings
         app.state.orchestrator = build_orchestrator(settings)
+        _wire_voice(app, settings)
         yield
         logger.info("FRIDAY shutting down")
 
     app = FastAPI(title="FRIDAY", version="0.1.0", lifespan=lifespan)
     app.include_router(chat_router)
     app.include_router(health_router)
+    # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE
+    # (404 / socket refusal when off), so the offline default exposes no voice UX.
+    app.include_router(voice_router)
+    app.include_router(ws_router)
 
     # Build the orchestrator eagerly too so a TestClient that does not trigger
     # the lifespan (or any direct create_app() user) still has a working app.
@@ -164,5 +212,6 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app.state.settings = settings
     app.state.orchestrator = build_orchestrator(settings)
+    _wire_voice(app, settings)
 
     return app

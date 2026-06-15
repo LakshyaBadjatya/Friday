@@ -88,6 +88,17 @@ class Settings(BaseSettings):
     # the NVIDIA adapter records it for store sizing.
     embedding_dim: int = 64
 
+    # --- Personal RAG (Tier 1; default off) ---
+    # Gates the whole ``/rag`` ingestion surface; off by default so the offline
+    # build exposes no RAG routes (each -> 404). When on, ingested documents are
+    # chunked into the shared vector store and become answerable via the existing
+    # Knowledge path with citations. PDF reading stays optional/lazy (``pypdf``).
+    enable_rag: bool = False
+    # Target chunk size (characters) and inter-chunk overlap the ingestor uses to
+    # split a document; overlap keeps a fact spanning a boundary retrievable.
+    rag_chunk_size: int = 800
+    rag_chunk_overlap: int = 120
+
     # --- Persona ---
     owner_address: str = "Boss"
 

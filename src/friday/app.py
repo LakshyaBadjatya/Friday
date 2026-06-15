@@ -43,6 +43,7 @@ from friday.api.middleware import AuthMiddleware, RateLimitMiddleware
 from friday.api.routes_admin import router as admin_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
+from friday.api.routes_rag import router as rag_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
 from friday.api.routes_voice import router as voice_router
@@ -70,6 +71,7 @@ from friday.providers.llm import (
 )
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
+from friday.rag.ingest import DocumentIngestor
 from friday.studio.generator import (
     MeshyText3D,
     ProceduralGenerator,
@@ -274,6 +276,9 @@ class AppRuntime:
     #: The live LLM provider, shared with the studio's procedural generator so
     #: the (free) 3D scene generation uses the same provider as the chat loop.
     llm: LLMProvider
+    #: The shared persistent vector store — the same one the Knowledge agent
+    #: retrieves from, reused by personal RAG so ingested docs are answerable.
+    vector: SQLiteVectorStore
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -318,6 +323,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         long_term=long_term,
         flag_overrides=flag_overrides,
         llm=llm,
+        vector=vector,
     )
 
 
@@ -416,6 +422,26 @@ def _wire_studio(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     app.state.studio = _build_studio_service(settings, llm)
 
 
+def _wire_rag(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash a :class:`DocumentIngestor` on ``app.state`` when RAG is enabled.
+
+    The ingestor reuses the *shared* runtime stores — the same persistent vector
+    store the Knowledge agent retrieves from and the same long-term store — so an
+    ingested document is immediately answerable via the existing knowledge path
+    with citations. Building it only when ``enable_rag`` is set keeps the offline
+    default untouched (the ``/rag`` routes self-guard on the flag and 404 when
+    off). No retrieval logic is duplicated; this only adds the write/forget seam.
+    """
+    if not settings.enable_rag:
+        return
+    app.state.rag_ingestor = DocumentIngestor(
+        runtime.vector,
+        runtime.long_term,
+        chunk_size=settings.rag_chunk_size,
+        chunk_overlap=settings.rag_chunk_overlap,
+    )
+
+
 def _install_runtime(app: FastAPI, settings: Settings) -> None:
     """Assemble the runtime graph and stash every shared piece on ``app.state``.
 
@@ -435,6 +461,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.long_term = runtime.long_term
     app.state.flag_overrides = runtime.flag_overrides
     _wire_studio(app, settings, runtime.llm)
+    _wire_rag(app, settings, runtime)
 
 
 def create_app() -> FastAPI:
@@ -484,6 +511,10 @@ def create_app() -> FastAPI:
     # FRIDAY_ENABLE_STUDIO (404 when off), so the offline default exposes no
     # studio surface. The StaticFiles mount is added below only when enabled.
     app.include_router(studio_router)
+    # Personal RAG (Tier 1) — always registered but self-guards on
+    # FRIDAY_ENABLE_RAG (404 when off), so the offline default exposes no RAG
+    # surface. The DocumentIngestor is wired onto app.state only when enabled.
+    app.include_router(rag_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

@@ -207,6 +207,15 @@ Fast/Hi-Fi quality switch, GLB/STL/OBJ downloads). A status HUD shows the live
 gesture, voice state, last heard phrase, and API connection. If the API, camera, or
 mic is unavailable the Studio shows a friendly note and never hard-crashes.
 
+## Continuous integration
+
+Every push and pull request runs the same gate in GitHub Actions
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): a single `gate` job on
+`ubuntu-latest` that installs uv, pins **Python 3.12**, runs `uv sync --all-groups`,
+then executes **ruff** (`uv run ruff check src tests`), **`mypy --strict`** (`uv run
+mypy`), and the **full pytest suite** (`uv run pytest -q`) as separate steps so a
+failure pinpoints which check broke. Any non-zero step fails the build.
+
 ## Make targets
 
 | Target              | What it does                                                        |

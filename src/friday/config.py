@@ -188,6 +188,17 @@ class Settings(BaseSettings):
     # ``enable_plugins`` is on.
     plugins_dir: str = "plugins"
 
+    # --- Knowledge graph / entity cards (Tier 2; default off) ---
+    # Gates the whole ``/graph`` REST surface (entities list, entity card,
+    # extract). Off by default so the offline build exposes no graph routes (each
+    # -> 404) and builds no extraction seam. When on, a tiny knowledge graph of
+    # entities + relations is persisted in a sibling SQLite file alongside
+    # ``memory_db_path``; ``POST /graph/extract`` runs one NON-FATAL LLM pass to
+    # pull entities/relations from a note (any error -> empty result, never
+    # raises), and an entity card stitches an entity together with its relations
+    # and the long-term facts that mention it.
+    enable_knowledge_graph: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 

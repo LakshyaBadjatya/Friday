@@ -45,6 +45,7 @@ from friday.api.middleware import AuthMiddleware, RateLimitMiddleware
 from friday.api.routes_admin import router as admin_router
 from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
+from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_meetings import router as meetings_router
 from friday.api.routes_plugins import router as plugins_router
@@ -61,6 +62,8 @@ from friday.config import Settings, get_settings
 from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
 from friday.core.orchestrator import Orchestrator
 from friday.errors import ProviderError
+from friday.graph.extractor import EntityExtractor
+from friday.graph.store import SQLiteGraphStore
 from friday.logging import configure_logging, get_logger
 from friday.meetings.capture import MeetingCapture
 from friday.meetings.store import SQLiteMeetingStore
@@ -292,6 +295,26 @@ def _build_meeting_store(settings: Settings) -> SQLiteMeetingStore:
         meet_path = str(base.with_suffix(base.suffix + ".meet"))
         base.parent.mkdir(parents=True, exist_ok=True)
     return SQLiteMeetingStore(meet_path)
+
+
+def _build_graph_store(settings: Settings) -> SQLiteGraphStore:
+    """Build the local-first SQLite knowledge-graph store alongside the long-term DB.
+
+    Reuses ``memory_db_path``: the graph lives in a sibling file (``*.graph.db``)
+    next to the long-term database so they share the gitignored ``data/``
+    directory; ``":memory:"`` stays ephemeral. Entities are keyed on
+    ``(name, type)`` (idempotent upsert); the store is connection-per-call for file
+    paths (thread-safe). Built eagerly (cheap, no I/O beyond schema init) and
+    surfaced on the runtime; the ``/graph`` route self-guards on the flag.
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        graph_path = ":memory:"
+    else:
+        base = Path(db_path)
+        graph_path = str(base.with_suffix(base.suffix + ".graph"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteGraphStore(graph_path)
 
 
 def _build_rag_ingestor(
@@ -693,6 +716,12 @@ class AppRuntime:
     #: The shared meeting-capture pipeline (shared STT + live LLM + the RAG
     #: ingestor if available); the ``/meetings/capture`` route drives it.
     meeting_capture: MeetingCapture
+    #: The shared knowledge-graph store — the same one the ``/graph`` routes
+    #: read/write; entity cards read long-term facts from the shared long_term.
+    graph_store: SQLiteGraphStore
+    #: The entity extractor over the live LLM; ``POST /graph/extract`` drives it for
+    #: one NON-FATAL extraction pass that upserts into ``graph_store``.
+    graph_extractor: EntityExtractor
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -730,6 +759,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
     rag_ingestor = _build_rag_ingestor(settings, vector, long_term)
     meeting_store = _build_meeting_store(settings)
     meeting_capture = _build_meeting_capture(settings, llm, rag_ingestor)
+    graph_store = _build_graph_store(settings)
+    graph_extractor = EntityExtractor(llm)
     critic = _build_critic(llm)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
@@ -766,6 +797,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
         rag_ingestor=rag_ingestor,
         meeting_store=meeting_store,
         meeting_capture=meeting_capture,
+        graph_store=graph_store,
+        graph_extractor=graph_extractor,
     )
 
 
@@ -957,6 +990,22 @@ def _wire_meetings(app: FastAPI, settings: Settings, runtime: AppRuntime) -> Non
     app.state.meeting_store = runtime.meeting_store
 
 
+def _wire_graph(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared graph store + extractor on ``app.state`` when enabled.
+
+    The ``/graph`` routes read ``app.state.graph_store`` (the shared SQLite
+    entity/relation store) and ``app.state.graph_extractor`` (the entity extractor
+    over the live LLM); the entity card additionally reads long-term facts from the
+    already-stashed ``app.state.long_term``. Building it only when
+    ``enable_knowledge_graph`` is set keeps the offline default untouched (the
+    routes self-guard on the flag and 404 when off).
+    """
+    if not settings.enable_knowledge_graph:
+        return
+    app.state.graph_store = runtime.graph_store
+    app.state.graph_extractor = runtime.graph_extractor
+
+
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Load owner-supplied plugins into the shared registry when enabled.
 
@@ -1010,6 +1059,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_briefing(app, settings, runtime)
     _wire_protocols(app, settings, runtime)
     _wire_meetings(app, settings, runtime)
+    _wire_graph(app, settings, runtime)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
     _wire_plugins(app, settings, runtime)
@@ -1131,6 +1181,11 @@ def create_app() -> FastAPI:
     # meeting surface. The shared meeting capture pipeline + notes store are wired
     # onto app.state only when enabled.
     app.include_router(meetings_router)
+    # Knowledge graph / entity cards (Tier 2) — always registered but self-guards
+    # on FRIDAY_ENABLE_KNOWLEDGE_GRAPH (404 when off), so the offline default
+    # exposes no graph surface. The shared graph store + entity extractor are wired
+    # onto app.state only when enabled.
+    app.include_router(graph_router)
     # Plugins / extensions (Tier 2) — always registered but self-guards on
     # FRIDAY_ENABLE_PLUGINS (404 when off), so the offline default exposes no
     # plugin surface. The plugins are loaded into the shared registry and the

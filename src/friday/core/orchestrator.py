@@ -35,18 +35,37 @@ import logging
 import re
 from pathlib import Path
 
+from friday.agents.base import AgentRegistry, AgentResult
 from friday.config import get_settings
 from friday.core.router import route
+from friday.core.security import run_lockdown
 from friday.core.state import GraphState, Mode
 from friday.errors import FridayError, PermissionError, ProviderError
 from friday.memory.short_term import ShortTermMemory
 from friday.providers.llm import LLMProvider, Message
 from friday.tools.registry import ToolRegistry
+from friday.tools.security import AuditRecord
 
 logger = logging.getLogger("friday.core.orchestrator")
 
 # Tools the minimal Research path is allowed to reach this phase.
 _RESEARCH_ALLOWED_TOOLS: frozenset[str] = frozenset({"web_search"})
+
+# The specialist modes that dispatch to an :class:`Agent` in the registry, and
+# the tool whose side-effecting/idempotent metadata gates the confirm-step for
+# each. RESEARCH stays on the dedicated ``_research`` path (it is read-only), so
+# it is intentionally absent here.
+_MODE_TO_AGENT: dict[Mode, str] = {
+    Mode.AUTOMATION: "automation",
+    Mode.DEVICE_CONTROL: "device",
+    Mode.ALERTING: "alerting",
+}
+# The side-effecting tool whose confirm-step gates a dispatched mode. Modes
+# absent from this map are not confirmation-gated at the orchestrator level.
+_MODE_TO_GATED_TOOL: dict[Mode, str] = {
+    Mode.DEVICE_CONTROL: "home",
+    Mode.ALERTING: "notify",
+}
 
 # Out-of-scope / cut capabilities that earn an in-character refusal (build-spec
 # sections 2.1-2.2). Each entry is (regex, human-readable reason). The regexes
@@ -98,6 +117,11 @@ class Orchestrator:
         memory: Per-session short-term conversation buffer.
         persona_path: Path to ``persona/friday.md``, injected as the system
             prompt for every synthesized reply.
+        agents: Optional registry of specialist agents. When present the
+            orchestrator dispatches AUTOMATION / DEVICE_CONTROL / ALERTING turns
+            to the matching agent; when absent those modes fall back to a plain
+            persona conversation so the orchestrator is still constructible
+            without the full agent graph (e.g. in narrow unit tests).
     """
 
     def __init__(
@@ -106,11 +130,13 @@ class Orchestrator:
         registry: ToolRegistry,
         memory: ShortTermMemory,
         persona_path: str | Path,
+        agents: AgentRegistry | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
         self._memory = memory
         self._persona_path = Path(persona_path)
+        self._agents = agents
 
     # -- persona ----------------------------------------------------------- #
     def _persona_text(self) -> str:
@@ -248,6 +274,151 @@ class Orchestrator:
             f"say a bit more about what you're after?"
         )
 
+    # -- confirm-step (build-spec §12) ------------------------------------- #
+    def _needs_confirmation(self, mode: Mode, state: GraphState) -> bool:
+        """Whether a side-effecting dispatch must be confirmed before executing.
+
+        A mode is confirmation-gated when it dispatches a tool that is
+        ``side_effecting`` and not ``idempotent`` (read from the tool registry,
+        so the gate tracks the tool's own metadata rather than a hard-coded
+        list). An already-confirmed turn (``state.confirmed``) clears the gate.
+        """
+        if state.confirmed:
+            return False
+        tool_name = _MODE_TO_GATED_TOOL.get(mode)
+        if tool_name is None:
+            return False
+        try:
+            tool = self._registry.get(tool_name)
+        except KeyError:  # pragma: no cover - defensive: tool always registered
+            return False
+        return bool(tool.side_effecting and not tool.idempotent)
+
+    def _confirm_question(self, mode: Mode, state: GraphState) -> str:
+        """A persona confirm question for a pending side-effecting action.
+
+        The action stays *pending*: nothing is dispatched or executed. A
+        confirming follow-up (``state.confirmed=True``) then proceeds.
+        """
+        owner = get_settings().owner_address
+        what = self._pending_action_summary(mode, state)
+        return (
+            f"That's a real-world action, {owner}, so I'll confirm before I act: "
+            f"{what} Want me to go ahead? Reply to confirm."
+        )
+
+    @staticmethod
+    def _pending_action_summary(mode: Mode, state: GraphState) -> str:
+        """A short human description of the side-effecting action awaiting confirm."""
+        if mode is Mode.DEVICE_CONTROL:
+            device = state.scratchpad.get("device")
+            if isinstance(device, dict):
+                action = device.get("action", "act on")
+                device_id = device.get("device_id", "the device")
+                return f"I'm about to {action} {device_id!r}."
+            return "I'm about to control a device."
+        if mode is Mode.ALERTING:
+            alert = state.scratchpad.get("alert")
+            if isinstance(alert, dict):
+                subject = alert.get("subject", "an alert")
+                target = alert.get("target", "the target")
+                return f"I'm about to send the alert {subject!r} to {target}."
+            return "I'm about to send a notification."
+        return "I'm about to take a side-effecting action."
+
+    # -- agent dispatch ---------------------------------------------------- #
+    async def _dispatch_agent(self, mode: Mode, state: GraphState) -> AgentResult:
+        """Look up the agent for ``mode`` and run it against ``state``.
+
+        Raises :class:`KeyError` if the agent is not registered — a programmer
+        error (``app.py`` populates the registry), surfaced honestly by
+        :meth:`handle`'s ``FridayError`` guard would not catch it, so callers
+        only invoke this when an agent registry is present.
+        """
+        assert self._agents is not None  # guarded by the caller
+        agent_name = _MODE_TO_AGENT[mode]
+        agent = self._agents.get(agent_name)
+        result = await agent.run(state)
+        state.scratchpad["agent"] = agent_name
+        state.scratchpad["agent_confidence"] = result.confidence
+        return result
+
+    async def _handle_agent_mode(
+        self, mode: Mode, state: GraphState, history: list[Message]
+    ) -> str:
+        """Resolve a specialist-agent turn: confirm-gate, dispatch, then persona.
+
+        When the mode is confirmation-gated and the turn is unconfirmed, returns
+        a persona confirm question WITHOUT dispatching the agent (nothing
+        executes). Otherwise it runs the agent and synthesizes a tight,
+        in-persona reply grounded in the agent's ``output``.
+        """
+        if self._agents is None or mode not in self._agents_for_mode():
+            # No agent wired for this mode: fall back to a plain persona answer
+            # rather than crash, keeping the orchestrator usable un-wired.
+            return await self._converse(state, history)
+
+        if self._needs_confirmation(mode, state):
+            return self._confirm_question(mode, state)
+
+        result = await self._dispatch_agent(mode, state)
+        return await self._persona_wrap(state, history, result.output)
+
+    def _agents_for_mode(self) -> frozenset[Mode]:
+        """The modes this orchestrator can dispatch (agent present in registry)."""
+        if self._agents is None:
+            return frozenset()
+        return frozenset(
+            mode for mode, name in _MODE_TO_AGENT.items() if name in self._agents
+        )
+
+    async def _persona_wrap(
+        self, state: GraphState, history: list[Message], draft: str
+    ) -> str:
+        """Synthesize a persona reply that conveys ``draft`` faithfully.
+
+        The agent has already done the work and any honesty/anti-fabrication
+        guard; the LLM only re-voices it in the FRIDAY persona. If synthesis
+        fails or comes back empty, the agent's own ``draft`` is returned verbatim
+        so the turn never loses the real result.
+        """
+        task = Message(
+            role="user",
+            content=(
+                "Relay the following result to the owner in your voice — keep it "
+                "answer-first and tight, change no facts, and add nothing the "
+                f"result does not contain:\n\n{draft}"
+            ),
+        )
+        messages = [self._system_prompt(), *history, task]
+        try:
+            response = await self._llm.complete(messages, tools=None)
+        except ProviderError as exc:
+            logger.warning("persona wrap failed; using agent draft: %s", exc)
+            return draft
+        text = response.text
+        if not text or not text.strip():
+            return draft
+        return text.strip()
+
+    # -- security lockdown (build-spec §9.9) ------------------------------- #
+    async def _lockdown(self, state: GraphState) -> str:
+        """Run the defensive lockdown subgraph and report the audit trail.
+
+        This is deliberately NOT a chatty agent path: the audit trail is reported
+        deterministically (no LLM call) so a lockdown is always truthful and
+        never blocked on a model. The records are stashed on ``scratchpad`` for
+        the API/audit view.
+        """
+        records: list[AuditRecord] = await run_lockdown(state)
+        state.scratchpad["lockdown_audit"] = [r.model_dump() for r in records]
+        owner = get_settings().owner_address
+        lines = [f"Lockdown complete, {owner}. Audit trail:"]
+        for record in records:
+            status = "ok" if record.ok else "FAILED"
+            lines.append(f"- {record.step} [{status}]: {record.detail}")
+        return "\n".join(lines)
+
     # -- public entrypoint ------------------------------------------------- #
     async def handle(self, state: GraphState) -> GraphState:
         """Run one turn end-to-end, mutating and returning ``state``.
@@ -292,8 +463,14 @@ class Orchestrator:
             state.response = self._clarify(state)
         elif decision.mode is Mode.RESEARCH:
             state.response = await self._research(state, history)
+        elif decision.mode is Mode.SECURITY_LOCKDOWN:
+            state.response = await self._lockdown(state)
+        elif decision.mode in _MODE_TO_AGENT:
+            state.response = await self._handle_agent_mode(
+                decision.mode, state, history
+            )
         else:
-            # CONVERSATION (and any non-clarify, non-research fallback).
+            # CONVERSATION (and any unrecognized fallback).
             state.mode = Mode.CONVERSATION
             state.response = await self._converse(state, history)
 
@@ -334,9 +511,12 @@ class Orchestrator:
         decision = await route(state)
         state.route = decision
         state.mode = decision.mode
-        # Normalize any non-clarify, non-research decision to CONVERSATION so the
-        # graph's conditional edge has a closed set of targets.
-        if decision.mode not in (Mode.CLARIFY, Mode.RESEARCH):
+        # Keep the graph's conditional-edge targets a closed set: the modes with
+        # a dedicated node (CLARIFY, RESEARCH, SECURITY_LOCKDOWN, and the
+        # specialist-agent modes) pass through; everything else normalizes to
+        # CONVERSATION.
+        known = {Mode.CLARIFY, Mode.RESEARCH, Mode.SECURITY_LOCKDOWN, *_MODE_TO_AGENT}
+        if decision.mode not in known:
             state.mode = Mode.CONVERSATION
         return state
 
@@ -360,5 +540,34 @@ class Orchestrator:
         """CLARIFY node: return a clarifying question, never a guess."""
         if state.response is None:
             state.response = self._clarify(state)
+        self._record(state)
+        return state
+
+    async def node_automation(self, state: GraphState) -> GraphState:
+        """AUTOMATION node: dispatch the automation agent (no confirm-gate)."""
+        return await self._node_agent_mode(Mode.AUTOMATION, state)
+
+    async def node_device(self, state: GraphState) -> GraphState:
+        """DEVICE_CONTROL node: confirm-gate then dispatch the device agent."""
+        return await self._node_agent_mode(Mode.DEVICE_CONTROL, state)
+
+    async def node_alerting(self, state: GraphState) -> GraphState:
+        """ALERTING node: confirm-gate then dispatch the alerting agent."""
+        return await self._node_agent_mode(Mode.ALERTING, state)
+
+    async def _node_agent_mode(self, mode: Mode, state: GraphState) -> GraphState:
+        """Shared node body for a specialist-agent mode."""
+        if state.response is None:
+            history = self._memory.history(state.session_id)
+            state.mode = mode
+            state.response = await self._handle_agent_mode(mode, state, history)
+        self._record(state)
+        return state
+
+    async def node_security_lockdown(self, state: GraphState) -> GraphState:
+        """SECURITY_LOCKDOWN node: run the lockdown subgraph, report the audit."""
+        if state.response is None:
+            state.mode = Mode.SECURITY_LOCKDOWN
+            state.response = await self._lockdown(state)
         self._record(state)
         return state

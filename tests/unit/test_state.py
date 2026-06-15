@@ -14,7 +14,7 @@ from friday.providers.llm import Message
 
 
 def test_mode_members() -> None:
-    # Exactly these six modes are defined this phase (voice/security deferred).
+    # Phase-1 text-loop modes plus the Phase-2 specialist + lockdown modes.
     assert {m.name for m in Mode} == {
         "IDLE",
         "LISTENING",
@@ -22,6 +22,11 @@ def test_mode_members() -> None:
         "CONVERSATION",
         "RESEARCH",
         "CLARIFY",
+        "AUTOMATION",
+        "DEVICE_CONTROL",
+        "ALERTING",
+        "SECURITY_LOCKDOWN",
+        "SCHEDULED",
     }
 
 
@@ -57,6 +62,7 @@ def test_graph_state_defaults() -> None:
     assert state.route is None
     assert state.scratchpad == {}
     assert state.response is None
+    assert state.confirmed is False
 
 
 def test_graph_state_round_trip_minimal() -> None:

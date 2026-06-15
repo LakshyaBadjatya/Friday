@@ -24,8 +24,9 @@ from friday.providers.llm import Message
 class Mode(StrEnum):
     """The operating mode of the core loop.
 
-    Voice/security modes are deferred to later phases; this phase defines the
-    minimal set needed for the text core loop.
+    The Phase-1 text-loop modes (IDLE..CLARIFY) are joined in Phase 2 by the
+    specialist-agent modes (AUTOMATION, DEVICE_CONTROL, ALERTING, SCHEDULED) and
+    the defensive SECURITY_LOCKDOWN subgraph mode.
     """
 
     IDLE = "IDLE"
@@ -34,6 +35,11 @@ class Mode(StrEnum):
     CONVERSATION = "CONVERSATION"
     RESEARCH = "RESEARCH"
     CLARIFY = "CLARIFY"
+    AUTOMATION = "AUTOMATION"
+    DEVICE_CONTROL = "DEVICE_CONTROL"
+    ALERTING = "ALERTING"
+    SECURITY_LOCKDOWN = "SECURITY_LOCKDOWN"
+    SCHEDULED = "SCHEDULED"
 
 
 class RouteDecision(BaseModel):
@@ -63,3 +69,6 @@ class GraphState(BaseModel):
     route: RouteDecision | None = None
     scratchpad: dict[str, Any] = Field(default_factory=dict)
     response: str | None = None
+    # Set when the user has explicitly confirmed a pending side-effecting action;
+    # threaded into the registry confirm-step (build-spec §12).
+    confirmed: bool = False

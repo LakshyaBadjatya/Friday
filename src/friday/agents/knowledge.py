@@ -29,8 +29,11 @@ the ``agents`` package clean for the SDK-isolation guard.
 
 from __future__ import annotations
 
+import re
+
 from friday.agents.base import AgentResult
 from friday.core.state import GraphState
+from friday.memory.long_term import LongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import Chunk, VectorStore
 
@@ -42,18 +45,51 @@ DEFAULT_TOP_K = 4
 # grounded answer.
 _NO_GROUNDING_CONFIDENCE = 0.0
 
+# Score assigned to a long-term fact match. The long-term store ranks by a
+# binary case-insensitive substring (LIKE) match rather than a graded
+# similarity, so a matched fact gets a fixed, deliberately-modest score: it is
+# real grounding (> 0.0) but should not outrank a strong semantic vector hit.
+_LONG_TERM_MATCH_SCORE = 0.5
+
+# Tokenizer for long-term recall: lowercase alphanumeric words of length >= 3 so
+# the substring query is built from salient terms, not stopwords/punctuation.
+_LT_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
+
+# Common short words that carry no retrieval signal — dropped before matching so
+# a long-term LIKE query is anchored on content words.
+_LT_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the", "and", "for", "are", "was", "were", "you", "your", "what",
+        "where", "when", "who", "why", "how", "does", "did", "can", "could",
+        "would", "should", "about", "tell", "know", "with", "that", "this",
+        "from", "have", "has", "had", "into", "out", "any", "all",
+    }
+)
+
 
 class KnowledgeAgent:
-    """Answers strictly from retrieved vector-store chunks, citing their sources.
+    """Answers strictly from retrieved sources (vector + long-term), citing them.
+
+    Retrieval is *hybrid* (build-spec §10, §9.7): the agent queries the injected
+    vector store for semantically-near chunks AND folds in recent long-term facts
+    matching the query. Both arrive as :class:`~friday.memory.vector.Chunk`
+    objects carrying a ``source_id``, are merged (deduplicated by source), and the
+    answer cites each. When nothing is retrieved from either source the agent says
+    so honestly — there is no LLM in this path, so a parametric guess is
+    impossible by construction.
 
     Args:
         store: The vector store queried for grounding passages. Only the
             structural :class:`~friday.memory.vector.VectorStore` contract is
-            depended upon, so any adapter (in-memory now, Chroma later) works.
+            depended upon, so any adapter (in-memory now, SQLite/Chroma later)
+            works.
         memory: Optional per-session short-term buffer. When present, recent
             user turns are folded into the retrieval query to sharpen recall;
             it is never used to fabricate an answer.
-        top_k: Maximum number of chunks to retrieve per query.
+        long_term: Optional durable store. When wired, recent facts whose text
+            matches the query are retrieved alongside the vector chunks so the
+            agent grounds in persisted memory as well as indexed documents.
+        top_k: Maximum number of chunks to retrieve per source.
     """
 
     name: str = "knowledge"
@@ -64,11 +100,13 @@ class KnowledgeAgent:
         store: VectorStore,
         memory: ShortTermMemory | None = None,
         top_k: int = DEFAULT_TOP_K,
+        long_term: LongTermStore | None = None,
     ) -> None:
         if top_k < 1:
             raise ValueError("top_k must be >= 1")
         self._store = store
         self._memory = memory
+        self._long_term = long_term
         self._top_k = top_k
 
     # -- query construction ------------------------------------------------- #
@@ -118,18 +156,80 @@ class KnowledgeAgent:
         lines.append(f"(Sources: {cited})")
         return "\n".join(lines)
 
+    # -- long-term grounding ------------------------------------------------ #
+    @staticmethod
+    def _salient_terms(text: str) -> list[str]:
+        """Content words (>=3 chars, non-stopword) of ``text``, order-preserving."""
+        seen: set[str] = set()
+        terms: list[str] = []
+        for tok in _LT_TOKEN_RE.findall(text.lower()):
+            if tok in _LT_STOPWORDS or tok in seen:
+                continue
+            seen.add(tok)
+            terms.append(tok)
+        return terms
+
+    def _long_term_chunks(self, state: GraphState) -> list[Chunk]:
+        """Retrieve recent long-term facts matching the turn as :class:`Chunk`s.
+
+        Long-term recall is a case-insensitive substring (LIKE) match, so a
+        whole-sentence query would rarely hit a stored fact. Instead each salient
+        content word of the user input is matched independently and the results
+        are merged (deduplicated by ``source_id``). Returns ``[]`` when no
+        long-term store is wired or nothing matches. Each matched fact becomes a
+        :class:`Chunk` carrying its ``source_id`` and :data:`_LONG_TERM_MATCH_SCORE`.
+        """
+        if self._long_term is None:
+            return []
+        seen: set[str] = set()
+        chunks: list[Chunk] = []
+        for term in self._salient_terms(state.user_input):
+            for fact in self._long_term.query_facts(term, limit=self._top_k):
+                if fact.source_id in seen:
+                    continue
+                seen.add(fact.source_id)
+                chunks.append(
+                    Chunk(
+                        text=fact.text,
+                        source_id=fact.source_id,
+                        score=_LONG_TERM_MATCH_SCORE,
+                    )
+                )
+        return chunks
+
+    @staticmethod
+    def _merge(vector_chunks: list[Chunk], long_term_chunks: list[Chunk]) -> list[Chunk]:
+        """Merge two chunk lists, deduplicating by ``source_id`` (highest score).
+
+        Vector hits come first (they carry graded similarity); a long-term fact
+        with the same ``source_id`` is folded in only if not already present, so
+        a source is cited once. The merged list is sorted by descending score so
+        the strongest grounding leads.
+        """
+        by_source: dict[str, Chunk] = {}
+        for chunk in [*vector_chunks, *long_term_chunks]:
+            existing = by_source.get(chunk.source_id)
+            if existing is None or chunk.score > existing.score:
+                by_source[chunk.source_id] = chunk
+        merged = list(by_source.values())
+        merged.sort(key=lambda chunk: chunk.score, reverse=True)
+        return merged
+
     # -- agent entrypoint --------------------------------------------------- #
     async def run(self, state: GraphState) -> AgentResult:
         """Retrieve grounding chunks and answer from them, or decline honestly.
 
-        Returns an :class:`AgentResult` whose ``output`` is either a grounded,
-        cited answer or an explicit "nothing retrieved" decline. Retrieved
-        chunks (if any) are returned in ``memory_writes`` for audit, and
-        ``confidence`` reflects the best retrieved chunk's score (0.0 when
-        nothing was retrieved).
+        Hybrid retrieval: vector-store chunks plus matching long-term facts,
+        merged and deduplicated by ``source_id``. Returns an :class:`AgentResult`
+        whose ``output`` is either a grounded, cited answer or an explicit
+        "nothing retrieved" decline. Retrieved chunks (if any) are returned in
+        ``memory_writes`` for audit, and ``confidence`` reflects the best
+        retrieved chunk's score (0.0 when nothing was retrieved).
         """
         query = self._retrieval_query(state)
-        chunks = self._store.query(query, k=self._top_k)
+        vector_chunks = self._store.query(query, k=self._top_k)
+        long_term_chunks = self._long_term_chunks(state)
+        chunks = self._merge(vector_chunks, long_term_chunks)
 
         if not chunks:
             return AgentResult(
@@ -139,7 +239,7 @@ class KnowledgeAgent:
                 confidence=_NO_GROUNDING_CONFIDENCE,
             )
 
-        # The store returns chunks closest-first; the top score is the agent's
+        # Chunks are merged closest-first; the top score is the agent's
         # calibrated confidence in the grounding (already in [0.0, 1.0]).
         confidence = chunks[0].score
         return AgentResult(

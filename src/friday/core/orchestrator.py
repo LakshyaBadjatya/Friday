@@ -20,6 +20,14 @@ section 5 it:
    (``persona/friday.md``) is injected as the system prompt and the owner is
    addressed as ``settings.owner_address``.
 
+Phase 4 adds the durable-memory policy (build-spec §10): after an agent runs the
+orchestrator applies a **write-consent** gate to its proposed :class:`MemoryWrite`
+records — non-sensitive writes auto-commit to the long-term + vector stores when
+``settings.memory_autowrite`` is set, while sensitive writes are never
+auto-persisted and only land on an explicit confirmation. A **"forget X"**
+command purges everything stored about ``X`` from both stores. Grounded recall
+itself lives in the Knowledge agent (hybrid vector + long-term retrieval).
+
 Honesty is structural: any :class:`~friday.errors.FridayError` is surfaced
 plainly rather than masked as success, and tool failures are reported as
 "couldn't retrieve" rather than fabricated.
@@ -34,6 +42,9 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+from pydantic import BaseModel
 
 from friday.agents.base import AgentRegistry, AgentResult
 from friday.config import get_settings
@@ -41,12 +52,62 @@ from friday.core.router import route
 from friday.core.security import run_lockdown
 from friday.core.state import GraphState, Mode
 from friday.errors import FridayError, PermissionError, ProviderError
+from friday.memory.long_term import LongTermStore
 from friday.memory.short_term import ShortTermMemory
+from friday.memory.vector import Chunk
 from friday.providers.llm import LLMProvider, Message
 from friday.tools.registry import ToolRegistry
 from friday.tools.security import AuditRecord
 
 logger = logging.getLogger("friday.core.orchestrator")
+
+
+@runtime_checkable
+class ForgettableVectorStore(Protocol):
+    """The slice of the vector-store contract the orchestrator depends on.
+
+    Extends the Phase-2 ``add``/``query`` retrieval surface with the Phase-4
+    ``forget`` operation (build-spec §10). Both
+    :class:`~friday.memory.vector.InMemoryVectorStore` and
+    :class:`~friday.memory.vector.SQLiteVectorStore` satisfy this structurally, so
+    the orchestrator can index auto-committed writes and purge them on a
+    "forget X" command without coupling to a concrete store.
+    """
+
+    def add(self, docs: list[tuple[str, str]]) -> None:
+        """Index ``docs`` as ``(text, source_id)`` pairs."""
+        ...
+
+    def query(self, text: str, k: int = 4) -> list[Chunk]:
+        """Return up to ``k`` chunks most relevant to ``text``, closest first."""
+        ...
+
+    def forget(self, query_or_source_id: str) -> int:
+        """Drop documents matching ``query_or_source_id``; return the count."""
+        ...
+
+
+class MemoryWrite(BaseModel):
+    """A memory write an agent *proposes*; the orchestrator decides if it lands.
+
+    Agents append these to :attr:`~friday.agents.base.AgentResult.memory_writes`
+    (whose declared type is ``list[Any]``, so this extends that shape without
+    changing the agent contract). The orchestrator's write-consent policy
+    (build-spec §10) then commits them:
+
+    * ``sensitive=False`` -> auto-committed to the long-term + vector stores when
+      ``settings.memory_autowrite`` is true; dropped when it is false.
+    * ``sensitive=True`` -> NEVER auto-persisted. The orchestrator holds the write
+      pending and asks the owner to confirm; only a confirming follow-up
+      (``state.confirmed``) commits it.
+
+    ``source_id`` ties the stored fact/chunk back to its origin so a grounded
+    answer can cite it (and so ``forget`` can target it).
+    """
+
+    text: str
+    source_id: str
+    sensitive: bool = False
 
 # Tools the minimal Research path is allowed to reach this phase.
 _RESEARCH_ALLOWED_TOOLS: frozenset[str] = frozenset({"web_search"})
@@ -66,6 +127,43 @@ _MODE_TO_GATED_TOOL: dict[Mode, str] = {
     Mode.DEVICE_CONTROL: "home",
     Mode.ALERTING: "notify",
 }
+
+# "Forget X" intent (build-spec §10): a light keyword check in the orchestrator
+# extracts the topic ``X`` to forget. Ordered most-specific-first so the longer
+# lead-in is tried before the bare "forget X". Each pattern captures ``X`` in its
+# only group. The router has no FORGET mode, so this is detected up front.
+_FORGET_RULES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:forget|delete|erase|wipe)\s+(?:everything|all|what)\s+(?:you\s+)?"
+        r"(?:know|remember|have)\s+about\s+(.+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:forget|delete|erase|wipe)\s+about\s+(.+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:forget|delete|erase|wipe)\s+(.+)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _extract_forget_target(text: str) -> str | None:
+    """Return the topic ``X`` of a "forget X" command, or ``None`` if not one.
+
+    Matches the ordered :data:`_FORGET_RULES` and returns the captured topic with
+    surrounding whitespace and a trailing period/quote stripped, so
+    ``"forget what you know about my address."`` yields ``"my address"``.
+    """
+    for pattern in _FORGET_RULES:
+        match = pattern.search(text)
+        if match is not None:
+            target = match.group(1).strip().strip("\"'").rstrip(".!?").strip()
+            if target:
+                return target
+    return None
+
 
 # Out-of-scope / cut capabilities that earn an in-character refusal (build-spec
 # sections 2.1-2.2). Each entry is (regex, human-readable reason). The regexes
@@ -122,6 +220,12 @@ class Orchestrator:
             to the matching agent; when absent those modes fall back to a plain
             persona conversation so the orchestrator is still constructible
             without the full agent graph (e.g. in narrow unit tests).
+        long_term: Optional durable store for the write-consent policy and the
+            "forget" command. When absent, agent-proposed writes are simply not
+            persisted (the orchestrator stays constructible un-wired).
+        vector: Optional persistent vector store. Auto-committed (and confirmed
+            sensitive) writes are also indexed here so the Knowledge agent can
+            retrieve them; ``forget`` removes them from here too.
     """
 
     def __init__(
@@ -131,12 +235,20 @@ class Orchestrator:
         memory: ShortTermMemory,
         persona_path: str | Path,
         agents: AgentRegistry | None = None,
+        long_term: LongTermStore | None = None,
+        vector: ForgettableVectorStore | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
         self._memory = memory
         self._persona_path = Path(persona_path)
         self._agents = agents
+        self._long_term = long_term
+        self._vector = vector
+        # Sensitive writes proposed but not yet confirmed, keyed by session id.
+        # They are held here (never persisted) until a confirming follow-up turn
+        # commits them — the write-consent gate for sensitive data (§10).
+        self._pending_writes: dict[str, list[MemoryWrite]] = {}
 
     # -- persona ----------------------------------------------------------- #
     def _persona_text(self) -> str:
@@ -362,6 +474,11 @@ class Orchestrator:
             return self._confirm_question(mode, state)
 
         result = await self._dispatch_agent(mode, state)
+        consent_prompt = self._apply_write_consent(state, result)
+        if consent_prompt is not None:
+            # A sensitive write is pending the owner's confirmation; surface the
+            # consent question instead of (or alongside) the agent's reply.
+            return consent_prompt
         return await self._persona_wrap(state, history, result.output)
 
     def _agents_for_mode(self) -> frozenset[Mode]:
@@ -400,6 +517,127 @@ class Orchestrator:
         if not text or not text.strip():
             return draft
         return text.strip()
+
+    # -- write-consent policy (build-spec §10) ----------------------------- #
+    def _apply_write_consent(
+        self, state: GraphState, result: AgentResult
+    ) -> str | None:
+        """Commit an agent's proposed writes per the consent policy.
+
+        Inspects ``result.memory_writes`` for :class:`MemoryWrite` records (other
+        write shapes — e.g. the automation agent's bare step strings — are left
+        for the audit trail and ignored here). For each :class:`MemoryWrite`:
+
+        * non-sensitive -> auto-committed when ``settings.memory_autowrite`` is
+          true, dropped otherwise;
+        * sensitive -> NEVER auto-persisted; held pending and a persona confirm
+          prompt is returned so the owner can authorize it.
+
+        Returns the confirm prompt when at least one sensitive write is pending,
+        else ``None`` (the caller then proceeds with the normal persona reply).
+        """
+        proposed = [w for w in result.memory_writes if isinstance(w, MemoryWrite)]
+        if not proposed:
+            return None
+
+        autowrite = get_settings().memory_autowrite
+        sensitive = [w for w in proposed if w.sensitive]
+        nonsensitive = [w for w in proposed if not w.sensitive]
+
+        if autowrite:
+            for write in nonsensitive:
+                self._commit_write(write)
+
+        if sensitive:
+            # Hold sensitive writes pending; do not persist anything sensitive.
+            self._pending_writes.setdefault(state.session_id, []).extend(sensitive)
+            return self._consent_question(sensitive)
+        return None
+
+    def _consent_question(self, writes: list[MemoryWrite]) -> str:
+        """A persona confirm prompt for one or more pending sensitive writes."""
+        owner = get_settings().owner_address
+        if len(writes) == 1:
+            what = f"“{writes[0].text}”"
+        else:
+            what = f"{len(writes)} sensitive item(s)"
+        return (
+            f"That's sensitive, {owner}, so I won't store it unless you say so: "
+            f"want me to remember {what}? Reply to confirm and I'll commit it."
+        )
+
+    def _commit_pending_writes(self, state: GraphState) -> int:
+        """Commit any sensitive writes pending for the session; return the count.
+
+        Called when a follow-up turn arrives confirmed (``state.confirmed``). The
+        pending writes (held un-persisted since the proposing turn) are committed
+        to the long-term + vector stores and cleared.
+        """
+        pending = self._pending_writes.pop(state.session_id, [])
+        for write in pending:
+            self._commit_write(write)
+        return len(pending)
+
+    def _commit_write(self, write: MemoryWrite) -> None:
+        """Persist one approved write to the long-term and vector stores.
+
+        Idempotent w.r.t. wiring: a store that was not injected is simply skipped,
+        so the orchestrator stays usable in narrow unit tests with no stores.
+        """
+        if self._long_term is not None:
+            self._long_term.add_fact(
+                write.text, write.source_id, sensitive=write.sensitive
+            )
+        if self._vector is not None:
+            self._vector.add([(write.text, write.source_id)])
+
+    # -- forget command (build-spec §10) ----------------------------------- #
+    def _forget(self, target: str) -> str:
+        """Remove everything FRIDAY knows about ``target`` and confirm in persona.
+
+        Calls ``forget`` on both the long-term and vector stores (each skipped if
+        not wired) and reports the total rows removed honestly — including the
+        "nothing matched" case, which is stated plainly rather than dressed up.
+        """
+        owner = get_settings().owner_address
+        removed = 0
+        if self._long_term is not None:
+            removed += self._long_term.forget(target)
+        if self._vector is not None:
+            removed += self._vector.forget(target)
+        if removed == 0:
+            return (
+                f"I had nothing stored about “{target}”, {owner}, so there was "
+                f"nothing to forget."
+            )
+        return (
+            f"Done, {owner} — I've forgotten what I knew about “{target}” "
+            f"({removed} record(s) removed)."
+        )
+
+    # -- knowledge turn (grounded retrieval entrypoint) -------------------- #
+    async def knowledge_turn(self, state: GraphState) -> GraphState:
+        """Run a grounded Knowledge-agent turn and synthesize a persona reply.
+
+        The deterministic router has no dedicated KNOWLEDGE mode, so this is the
+        explicit entrypoint callers use to ask the Knowledge agent (which does
+        hybrid vector + long-term retrieval and cites ``source_id``s). When no
+        agent registry / knowledge agent is wired, it falls back to a plain
+        persona conversation rather than crashing.
+        """
+        history = self._memory.history(state.session_id)
+        state.mode = Mode.CONVERSATION
+        if self._agents is None or "knowledge" not in self._agents:
+            state.response = await self._converse(state, history)
+            self._record(state)
+            return state
+        agent = self._agents.get("knowledge")
+        result = await agent.run(state)
+        state.scratchpad["agent"] = "knowledge"
+        state.scratchpad["agent_confidence"] = result.confidence
+        state.response = await self._persona_wrap(state, history, result.output)
+        self._record(state)
+        return state
 
     # -- security lockdown (build-spec §9.9) ------------------------------- #
     async def _lockdown(self, state: GraphState) -> str:
@@ -450,6 +688,27 @@ class Orchestrator:
         if reason is not None:
             state.mode = Mode.CONVERSATION
             state.response = self._decline(reason)
+            self._record(state)
+            return state
+
+        # 2a. A confirmed follow-up commits any sensitive writes held pending from
+        # a prior turn (the write-consent gate for sensitive data, §10).
+        if state.confirmed and self._pending_writes.get(state.session_id):
+            committed = self._commit_pending_writes(state)
+            owner = get_settings().owner_address
+            state.mode = Mode.CONVERSATION
+            state.response = (
+                f"Stored, {owner} — committed {committed} item(s) to memory as "
+                f"you confirmed."
+            )
+            self._record(state)
+            return state
+
+        # 2b. A "forget X" command removes everything stored about X (§10).
+        forget_target = _extract_forget_target(state.user_input)
+        if forget_target is not None:
+            state.mode = Mode.CONVERSATION
+            state.response = self._forget(forget_target)
             self._record(state)
             return state
 

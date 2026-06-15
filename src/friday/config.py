@@ -51,6 +51,19 @@ class Settings(BaseSettings):
 
     # --- Memory ---
     memory_autowrite: bool = True
+    # Local-first durable store. ``data/`` is gitignored; tests use ":memory:"
+    # or a tmp_path file and never touch this real path.
+    memory_db_path: str = "data/friday.db"
+
+    # --- Embeddings (persistent vector store) ---
+    # ``fake`` is the deterministic, offline default (tests, no key, no network);
+    # ``nvidia`` selects the real NIM ``/embeddings`` adapter (providers/ only).
+    embedding_provider: Literal["fake", "nvidia"] = "fake"
+    # NVIDIA embedding model id; only used when ``embedding_provider == "nvidia"``.
+    embedding_model: str = ""
+    # Vector dimensionality the store is sized to; the fake honors it directly,
+    # the NVIDIA adapter records it for store sizing.
+    embedding_dim: int = 64
 
     # --- Persona ---
     owner_address: str = "Boss"

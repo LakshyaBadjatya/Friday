@@ -123,12 +123,34 @@ Pick a TTS backend with `FRIDAY_TTS_PROVIDER` (`piper` | `elevenlabs` | `fake`);
 `elevenlabs` needs `ELEVENLABS_API_KEY`. With the offline `fake` LLM provider the
 voice path uses `FakeSTT`/`FakeTTS` so it runs end-to-end with zero models.
 
+## Dashboard (optional)
+
+FRIDAY ships a small [Streamlit](https://streamlit.io/) operator console that reads the
+live admin surface: current state, the conversation log, the tool-call audit, per-request
+traces, metrics, and feature-flag toggles. It is a **separate UI process** — not part of
+the `friday` package, never imported by the test suite, and its deps (`streamlit`,
+`requests`) are kept **out** of `pyproject.toml` / the uv lock (so `uv sync` and the gate
+stay fast). The gate tests the admin endpoints the dashboard consumes, not the UI itself.
+
+```bash
+make install-dashboard   # uv pip install -r requirements-dashboard.txt
+make run                 # start the API on http://127.0.0.1:8000 (in one shell)
+make dashboard           # uv run streamlit run dashboard/app.py (in another)
+```
+
+Set the **API base URL** in the sidebar (default `http://127.0.0.1:8000`). If the API is
+down the dashboard shows a friendly banner and never crashes — start it with `make run`
+and refresh. See [`dashboard/README.md`](dashboard/README.md) for the panel-by-endpoint
+map.
+
 ## Make targets
 
 | Target              | What it does                                                        |
 |---------------------|---------------------------------------------------------------------|
 | `make install`      | `uv sync --all-groups` — create the venv and install all deps       |
 | `make install-voice`| `uv pip install -r requirements-voice.txt` — optional voice backends|
+| `make install-dashboard`| `uv pip install -r requirements-dashboard.txt` — optional UI deps|
+| `make dashboard`    | `uv run streamlit run dashboard/app.py` — launch the operator console|
 | `make test`         | Run the full test suite (`uv run pytest -q`)                        |
 | `make lint`         | `uv run ruff check src tests`                                       |
 | `make type`         | `uv run mypy` (`--strict`) over `src`                              |
@@ -136,6 +158,7 @@ voice path uses `FakeSTT`/`FakeTTS` so it runs end-to-end with zero models.
 | `make gate-0`       | Lint + types + unit tests — the Phase 0 foundation gate             |
 | `make gate-1`       | Lint + types + the full suite — the Phase 1 core-loop gate          |
 | `make gate-3`       | Lint + types + the full suite — the Phase 3 voice gate              |
+| `make gate-5`       | Lint + types + the full suite — the Phase 5 dashboard + observability gate |
 
 ## What's built vs. deferred
 

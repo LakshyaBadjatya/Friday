@@ -19,15 +19,41 @@ from collections.abc import Iterable
 from pydantic import ValidationError
 
 from friday.errors import PermissionError
+from friday.observability.audit import AuditLog
+from friday.observability.metrics import Metrics
 from friday.providers.llm import ToolSpec
 from friday.tools.base import Tool, ToolError, ToolResult
 
 
 class ToolRegistry:
-    """An in-process registry mapping tool names to :class:`Tool` instances."""
+    """An in-process registry mapping tool names to :class:`Tool` instances.
 
-    def __init__(self) -> None:
+    Observability is optional. When an :class:`~friday.observability.audit.AuditLog`
+    and/or :class:`~friday.observability.metrics.Metrics` are injected, every
+    :meth:`execute` records one redacted :class:`~friday.observability.audit.ToolCallAudit`
+    row and bumps the ``tool_calls`` counter (build-spec §11). When they are absent
+    (the default) the registry behaves exactly as before, so call sites — and unit
+    tests — that construct it bare keep working unchanged.
+
+    Args:
+        audit: Optional tool-call audit log; rows are recorded on every execute.
+        metrics: Optional counter set; ``tool_calls`` is incremented on every execute.
+        correlation_id: The request id stamped onto audit rows. ``app.py`` rebuilds
+            the registry's wiring per request (or sets this) so rows tie back to
+            the turn's trace; defaults to ``"-"`` when unset.
+    """
+
+    def __init__(
+        self,
+        *,
+        audit: AuditLog | None = None,
+        metrics: Metrics | None = None,
+        correlation_id: str = "-",
+    ) -> None:
         self._tools: dict[str, Tool] = {}
+        self._audit = audit
+        self._metrics = metrics
+        self._correlation_id = correlation_id
 
     def register(self, tool: Tool) -> None:
         """Register ``tool`` under its ``name``, replacing any prior entry."""
@@ -83,6 +109,13 @@ class ToolRegistry:
            with ``confirmed=True``, skips this gate.
         5. Otherwise invoke the tool with the validated args and return its
            :class:`ToolResult`.
+
+        **Observability (build-spec §11).** A permission denial raises *before*
+        the tool is ever considered, so it is not audited as a tool call. Every
+        path that reaches a real tool decision — bad args, confirmation required,
+        or an actual invocation — records one redacted
+        :class:`~friday.observability.audit.ToolCallAudit` row and bumps the
+        ``tool_calls`` metric (no-ops when neither store is wired).
         """
         if name not in allowed_tools:
             raise PermissionError(f"tool {name!r} is not in the allowed set")
@@ -91,6 +124,19 @@ class ToolRegistry:
         if tool is None:
             raise PermissionError(f"tool {name!r} is not registered")
 
+        result = await self._dispatch(tool, name, raw_args, confirmed=confirmed)
+        self._emit(name, raw_args, result)
+        return result
+
+    async def _dispatch(
+        self,
+        tool: Tool,
+        name: str,
+        raw_args: dict[str, object],
+        *,
+        confirmed: bool,
+    ) -> ToolResult:
+        """Validate, gate the confirm-step, then invoke ``tool`` (steps 3-5)."""
         try:
             args = tool.args_model.model_validate(raw_args)
         except ValidationError as exc:
@@ -119,3 +165,18 @@ class ToolRegistry:
             )
 
         return await tool(args)
+
+    def _emit(
+        self, name: str, raw_args: dict[str, object], result: ToolResult
+    ) -> None:
+        """Record the audit row + metric for one executed tool call (if wired)."""
+        if self._metrics is not None:
+            self._metrics.inc_tool_calls()
+        if self._audit is not None:
+            self._audit.record(
+                correlation_id=self._correlation_id,
+                tool=name,
+                args=raw_args,
+                ok=result.ok,
+                error_code=result.error.code if result.error is not None else None,
+            )

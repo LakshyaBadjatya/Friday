@@ -39,10 +39,12 @@ This module never imports an LLM SDK — it depends only on the
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -55,6 +57,8 @@ from friday.errors import FridayError, PermissionError, ProviderError
 from friday.memory.long_term import LongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import Chunk
+from friday.observability.metrics import Metrics
+from friday.observability.tracing import Tracer
 from friday.providers.llm import LLMProvider, Message
 from friday.tools.registry import ToolRegistry
 from friday.tools.security import AuditRecord
@@ -226,6 +230,14 @@ class Orchestrator:
         vector: Optional persistent vector store. Auto-committed (and confirmed
             sensitive) writes are also indexed here so the Knowledge agent can
             retrieve them; ``forget`` removes them from here too.
+        tracer: Optional per-request :class:`~friday.observability.tracing.Tracer`.
+            When present, :meth:`handle` opens a trace per turn with route /
+            dispatch / synth spans and stamps the turn's mode (build-spec §11).
+            When absent (the default) no trace is opened, so orchestrator unit
+            tests that don't pass one behave exactly as before.
+        metrics: Optional :class:`~friday.observability.metrics.Metrics` counters.
+            When present, each turn increments ``requests`` and the per-mode
+            counter (and ``errors`` on a domain failure). No-op when absent.
     """
 
     def __init__(
@@ -237,6 +249,8 @@ class Orchestrator:
         agents: AgentRegistry | None = None,
         long_term: LongTermStore | None = None,
         vector: ForgettableVectorStore | None = None,
+        tracer: Tracer | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -245,10 +259,27 @@ class Orchestrator:
         self._agents = agents
         self._long_term = long_term
         self._vector = vector
+        self._tracer = tracer
+        self._metrics = metrics
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
         self._pending_writes: dict[str, list[MemoryWrite]] = {}
+
+    # -- tracing ----------------------------------------------------------- #
+    @contextlib.contextmanager
+    def _span(self, name: str, **attrs: Any) -> Iterator[None]:
+        """Open a tracer span for ``name`` when a tracer is wired, else a no-op.
+
+        Centralizes the ``tracer is None`` guard so the turn body reads cleanly
+        and behaves identically (no timing, no recording) when observability is
+        not injected.
+        """
+        if self._tracer is None:
+            yield
+            return
+        with self._tracer.span(name, **attrs):
+            yield
 
     # -- persona ----------------------------------------------------------- #
     def _persona_text(self) -> str:
@@ -664,13 +695,26 @@ class Orchestrator:
         The returned state carries the final ``mode``, the ``route`` decision,
         and the synthesized ``response``. The user turn and the assistant reply
         are recorded in short-term memory.
+
+        When a :class:`~friday.observability.tracing.Tracer` / metrics are wired
+        (build-spec §11), the turn opens one trace (with route / dispatch / synth
+        spans, stamped with the final mode) and increments the request, per-mode,
+        and — on a domain failure — error counters. These emit points are no-ops
+        when nothing is injected, so the turn semantics are otherwise unchanged.
         """
+        if self._tracer is not None:
+            self._tracer.start_trace(state.session_id)
+        if self._metrics is not None:
+            self._metrics.inc_requests()
+
+        errored = False
         try:
             return await self._handle_inner(state)
         except FridayError as exc:
             # Map any domain error to an honest, in-character message; never
             # fake success. Surfaced here so a stray FridayError from a deeper
             # call site still produces a truthful reply.
+            errored = True
             logger.warning("orchestrator caught FridayError: %s", exc)
             owner = get_settings().owner_address
             state.response = (
@@ -678,6 +722,13 @@ class Orchestrator:
                 f"That's the honest status."
             )
             return state
+        finally:
+            if self._metrics is not None:
+                self._metrics.inc_mode(str(state.mode))
+                if errored:
+                    self._metrics.inc_errors()
+            if self._tracer is not None:
+                self._tracer.finish().mode = str(state.mode)
 
     async def _handle_inner(self, state: GraphState) -> GraphState:
         # 1. Load short-term history for the session.
@@ -712,28 +763,35 @@ class Orchestrator:
             self._record(state)
             return state
 
-        # 3. Route the turn.
-        decision = await route(state)
-        state.route = decision
-        state.mode = decision.mode
+        # 3. Route the turn (timed as the "route" span).
+        with self._span("route"):
+            decision = await route(state)
+            state.route = decision
+            state.mode = decision.mode
 
-        # 4. Dispatch on mode.
-        if decision.mode is Mode.CLARIFY:
-            state.response = self._clarify(state)
-        elif decision.mode is Mode.RESEARCH:
-            state.response = await self._research(state, history)
-        elif decision.mode is Mode.SECURITY_LOCKDOWN:
-            state.response = await self._lockdown(state)
-        elif decision.mode in _MODE_TO_AGENT:
-            state.response = await self._handle_agent_mode(
-                decision.mode, state, history
-            )
-        else:
-            # CONVERSATION (and any unrecognized fallback).
-            state.mode = Mode.CONVERSATION
-            state.response = await self._converse(state, history)
+        # 4. Dispatch on mode (timed as the "dispatch" span). The mode handler
+        # produces the response — including any LLM synthesis embedded in the
+        # research / agent paths.
+        with self._span("dispatch", mode=str(decision.mode)):
+            if decision.mode is Mode.CLARIFY:
+                state.response = self._clarify(state)
+            elif decision.mode is Mode.RESEARCH:
+                state.response = await self._research(state, history)
+            elif decision.mode is Mode.SECURITY_LOCKDOWN:
+                state.response = await self._lockdown(state)
+            elif decision.mode in _MODE_TO_AGENT:
+                state.response = await self._handle_agent_mode(
+                    decision.mode, state, history
+                )
+            else:
+                # CONVERSATION (and any unrecognized fallback).
+                state.mode = Mode.CONVERSATION
+                state.response = await self._converse(state, history)
 
-        self._record(state)
+        # 5. Persist the turn (timed as the "synth" span — the final assembly +
+        # short-term-memory write that completes the synthesized reply).
+        with self._span("synth"):
+            self._record(state)
         return state
 
     def _record(self, state: GraphState) -> None:

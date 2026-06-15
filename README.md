@@ -1,13 +1,20 @@
 # FRIDAY
 
 FRIDAY is a local-first, provider-abstracted personal AI assistant you run on your own
-machine. Phases 0 and 1 are done: there is a real, runnable core chat loop — a FastAPI
-`POST /chat` endpoint that drives an orchestrator through a deterministic intent router,
-short-term per-session memory, a typed tool layer with permission checks, and a keyless
-`web_search` tool — all wearing the FRIDAY persona (confident, dry, honest, calls you
-"Boss"). The LLM sits behind a provider interface: an NVIDIA NIM adapter powers real
-replies, while a `FakeLLM` keeps the entire test suite green with zero network and no API
-keys. Nothing here phones home unless you point it at NVIDIA on purpose.
+machine. A FastAPI `POST /chat` endpoint drives an orchestrator that classifies each turn
+with a deterministic router and dispatches to five specialist agents (analysis, knowledge,
+automation, device, alerting), a defensive security-lockdown flow, short-term memory and
+persistent SQLite-backed long-term + vector memory, a typed tool layer with permission
+checks and a confirm-step on anything side-effecting — all wearing the FRIDAY persona
+(confident, dry, honest, calls you "Boss"). On top of that core: an optional voice pipeline
+(wake word → Whisper → TTS, with barge-in), a 3D Studio (describe a model, explore it with
+hand gestures and voice, download GLB/STL/OBJ), per-request tracing + a tool-call audit + an
+admin API with a Streamlit dashboard, and gateway auth + rate-limiting + container packaging.
+
+The LLM sits behind a provider interface: NVIDIA NIM powers real replies with Gemini as a
+fallback, while a `FakeLLM` keeps the entire test suite green with zero network and no API
+keys. Nothing phones home unless you point it at a real provider on purpose. Every non-core
+capability is behind a feature flag, default **off**.
 
 ## Requirements
 
@@ -75,10 +82,11 @@ A representative response (NVIDIA provider, persona reply):
 }
 ```
 
-`mode` is the active conversation mode (`CONVERSATION`, `RESEARCH`, `CLARIFY`, …). `route`
-is the router's deterministic decision for the turn — it is populated even when the
-language backend is unreachable, because routing happens before synthesis. `audio` is
-always `null` this phase; voice is a later flag.
+`mode` is the active conversation mode (`CONVERSATION`, `RESEARCH`, `AUTOMATION`,
+`DEVICE_CONTROL`, `ALERTING`, `SECURITY_LOCKDOWN`, `CLARIFY`, …). `route` is the router's
+deterministic decision for the turn — it is populated even when the language backend is
+unreachable, because routing happens before synthesis. `audio` is `null` on the text path;
+spoken audio comes from the voice pipeline (below), off by default.
 
 If you set `FRIDAY_LLM_PROVIDER=fake` with the default empty script, FRIDAY still routes
 your turn correctly and then honestly tells you the language backend is unavailable rather
@@ -87,8 +95,9 @@ than fabricating an answer — that is the persona working as designed, not a cr
 > **Heads-up on the NVIDIA free tier:** the first request after a cold start can take
 > roughly 30 seconds while the model spins up. Subsequent turns are fast. If it consistently
 > stalls, double-check the model name and key in `.env`. The cap is controlled by
-> `FRIDAY_LLM_TIMEOUT_SECONDS` (default `60`); past it the call fails cleanly with an honest
-> error instead of hanging.
+> `FRIDAY_LLM_TIMEOUT_SECONDS` (default `120`); past it the call fails cleanly with an honest
+> error instead of hanging. With `FRIDAY_LLM_FALLBACK_PROVIDER=gemini` and a Gemini key, a
+> timed-out NVIDIA call falls through to Gemini before giving up.
 
 ## Voice (optional, off by default)
 
@@ -213,11 +222,7 @@ mic is unavailable the Studio shows a friendly note and never hard-crashes.
 | `make docker-build` | `docker build -t friday .` — build the container image              |
 | `make docker-up`    | `docker compose up -d` — start the local container stack            |
 | `make docker-down`  | `docker compose down` — stop the stack (the data volume is kept)    |
-| `make gate-0`       | Lint + types + unit tests — the Phase 0 foundation gate             |
-| `make gate-1`       | Lint + types + the full suite — the Phase 1 core-loop gate          |
-| `make gate-3`       | Lint + types + the full suite — the Phase 3 voice gate              |
-| `make gate-5`       | Lint + types + the full suite — the Phase 5 dashboard + observability gate |
-| `make gate-6`       | Lint + types + the full suite — the Phase 6 hardening + container gate |
+| `make gate-0` … `gate-7` | Lint + types + tests — the per-phase gates (0 foundation, 1 core loop, 2 agents, 3 voice, 4 memory, 5 dashboard, 6 hardening, 7 studio) |
 
 ## Deployment
 
@@ -257,71 +262,89 @@ Azure Container Apps — choosing one, not all. Prove the loops locally first.
 
 ## What's built vs. deferred
 
-**Built (Phases 0 + 1):**
+**Built:**
 
 - **Phase 0 — foundation:** typed `Settings` (env + feature flags, `SecretStr` keys),
   structured JSON logging with correlation ids and secret redaction, the `FridayError`
-  hierarchy, the `LLMProvider` contract with `FakeLLM` + `FallbackLLM`, the NVIDIA NIM
-  adapter (the only file allowed to import the `openai` SDK — enforced by a grep test), and
-  STT/TTS provider interfaces with fakes.
+  hierarchy, the `LLMProvider` contract with `FakeLLM` + `FallbackLLM`, the NVIDIA NIM +
+  Gemini adapters (the only files allowed to import the `openai` SDK — enforced by a grep
+  test), and STT/TTS provider interfaces with fakes.
 - **Phase 1 — core loop:** `GraphState` / `Mode` / `RouteDecision`, the deterministic
-  `route()`, short-term session memory, the typed `Tool` protocol + registry with
-  permission gating, the keyless `web_search` tool, the orchestrator (memory → route →
-  dispatch → persona synthesis → honest refusal), the FRIDAY persona spec, the mode graph,
-  and `POST /chat` on the FastAPI factory.
+  `route()`, short-term session memory, the typed `Tool` protocol + registry with permission
+  gating, the keyless `web_search` tool, the orchestrator (memory → route → dispatch →
+  persona synthesis → honest refusal), the FRIDAY persona spec, the mode graph, and
+  `POST /chat`. Plus hardening: a per-call LLM timeout, `GET /health`, and `/chat` input
+  validation.
+- **Phase 2 — agents + tools:** five specialist agents (analysis with confidence tags and
+  no fabricated probabilities, knowledge with grounded citations, automation with a hard
+  step cap, device with an allowlist, alerting with dedupe + rate-limit), the `notify` /
+  `home` / `security` tools, the **confirm-step** required before any side-effecting
+  non-idempotent tool runs, and the **security lockdown** subgraph (revoke → kill → notify,
+  audited).
+- **Phase 3 — voice:** wake word, Whisper STT, Piper/ElevenLabs TTS, the capture→STT→
+  orchestrator→TTS pipeline with **barge-in**. Off behind `FRIDAY_ENABLE_VOICE`.
+- **Phase 4 — memory:** persistent **SQLite** long-term store (facts/tasks/audit) and a
+  SQLite vector store behind a `VectorStore` interface, an `EmbeddingProvider` (NVIDIA real
+  / deterministic fake), a **write-consent** policy (sensitive writes need confirmation), and
+  a **"forget X"** command that wipes facts + vectors.
+- **Phase 5 — observability + dashboard:** per-request **tracing**, a **tool-call audit**,
+  **metrics**, an `/admin` API (flags/state/audit/traces/metrics), and a Streamlit dashboard.
+- **Phase 6 — hardening + packaging:** gateway **auth** + **rate-limiting** (both off by
+  default, `/health` exempt), a load/error-budget smoke, and a `Dockerfile` + `docker-compose.yml`.
+- **3D Studio:** describe a model → validated JSON scene-graph → interactive Three.js canvas
+  with MediaPipe hand-tracking + Web Speech voice + GLB/STL/OBJ export. Off behind
+  `FRIDAY_ENABLE_STUDIO`.
+- **Gemini fallback:** NVIDIA primary with Gemini as the `FallbackLLM` secondary.
 
-**Deferred (behind flags / future phases):**
+**Deferred / documented swaps:**
 
-- Voice (STT/TTS, wake word) — interfaces exist, real adapters and the `/chat` `audio`
-  field are off behind `FRIDAY_ENABLE_VOICE`.
-- The other specialist agents — only the conversation and minimal research paths are wired;
-  `agents/base.py` is the protocol the rest will implement.
-- Security lockdown / hardening.
-- Durable memory on Postgres + pgvector — documented as the future swap (a
-  commented-out `postgres` service in `docker-compose.yml`); the local-first default
-  uses the SQLite volume.
-- A hosted **cloud** deployment — deferred to a single managed container runtime
-  later (no Terraform/multi-cloud/Kubernetes); see the Deployment section.
+- **Real voice/3D models on this machine** — the heavy backends (`faster-whisper`,
+  `openwakeword`, `piper`, MediaPipe) ship as optional installs, not core deps; the logic is
+  fully tested against fakes and a validated scene-graph.
+- **Durable memory on Postgres + pgvector and the Chroma vector backend** — wired as lazy,
+  flagged adapter stubs; the local-first default is SQLite (a commented-out `postgres`
+  service documents the swap).
+- **`docker compose up` was not run here** (Docker isn't installed in this build env) — the
+  files are written and the compose parses; verify on a Docker host (see Deployment).
+- **A hosted cloud deployment** — a single managed container runtime later (no
+  Terraform/multi-cloud/Kubernetes); see the Deployment section.
+- **Gemini fallback is wired but quota-gated** — the provided key authenticates but returns
+  `429` on a zero free-tier quota until billing is enabled on it.
 
 ## Project layout
 
 ```
 src/friday/
-  config.py            # typed Settings: env + feature flags, SecretStr keys
-  logging.py           # structured JSON logging + correlation id + redaction
-  errors.py            # FridayError hierarchy
-  app.py               # FastAPI factory + lifespan wiring
+  config.py · logging.py · errors.py · app.py     # settings, logging, errors, FastAPI factory
   api/
-    routes_chat.py     # POST /chat
+    routes_chat.py · routes_health.py · routes_admin.py · routes_voice.py · routes_studio.py
+    ws.py · middleware.py                          # websocket scaffold; auth + rate-limit
   core/
-    state.py           # Mode, RouteDecision, GraphState
-    router.py          # route() -> RouteDecision
-    orchestrator.py    # memory -> route -> dispatch -> persona -> refusal
-    modes.py           # mode node functions
-    graph.py           # mode-loop assembly
+    state.py · router.py · orchestrator.py · modes.py · graph.py · security.py
   agents/
-    base.py            # Agent protocol + AgentResult
+    base.py · analysis.py · knowledge.py · automation.py · device.py · alerting.py
   tools/
-    base.py            # Tool protocol, ToolResult, ToolError
-    registry.py        # typed registry + permission gating
-    web_search.py      # keyless web search tool
+    base.py · registry.py · web_search.py · notify.py · home.py · security.py
   memory/
-    short_term.py      # in-process, session-scoped conversation buffer
+    short_term.py · long_term.py · vector.py       # in-process + SQLite long-term + vector
   providers/
-    llm.py             # LLMProvider, FakeLLM, FallbackLLM, NvidiaNIMProvider
-    stt.py             # STTProvider + FakeSTT (real adapter deferred)
-    tts.py             # TTSProvider + FakeTTS (real adapter deferred)
-  persona/
-    friday.md          # the FRIDAY persona spec
-tests/
-  conftest.py          # fake-provider fixtures
-  unit/                # per-module unit tests
-  integration/         # /chat core-loop end-to-end (against fakes)
+    llm.py · embeddings.py · stt.py · tts.py        # NVIDIA/Gemini, embeddings, voice fakes+adapters
+  voice/
+    wake_word.py · capture.py · vad.py · pipeline.py · fixtures.py
+  studio/
+    scene.py · generator.py · static/              # JSON scene-graph + the Three.js canvas
+  observability/
+    tracing.py · audit.py · metrics.py
+  persona/friday.md
+dashboard/app.py                                   # Streamlit operator console (separate process)
+Dockerfile · docker-compose.yml                    # container packaging
+tests/  unit/ · integration/ · conftest.py
 ```
 
-The full design and the phased implementation plan live under
-[`docs/superpowers/`](docs/superpowers/).
+The full design, the per-phase implementation plans, and the original build spec live under
+[`docs/superpowers/`](docs/superpowers/) and [`FRIDAY-build-spec.md`](FRIDAY-build-spec.md).
 
 ## Gate status
 
-ruff clean · `mypy --strict` clean · **120 tests passing** (gate-1 green).
+ruff clean · `mypy --strict` clean (56 source files) · **433 tests passing** · SDK-isolation
+guard green. Gates 0–7 all green; built phase-by-phase via TDD, each behind a feature flag.

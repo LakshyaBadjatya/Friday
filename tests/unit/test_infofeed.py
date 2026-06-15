@@ -7,14 +7,36 @@ against XXE / billion-laughs, so a feed declaring a DOCTYPE is refused.
 
 from __future__ import annotations
 
+import socket
+
 import httpx
 import pytest
 import respx
 
+from friday.tools import infofeed as infofeed_mod
 from friday.tools.base import ToolResult
 from friday.tools.infofeed import FeedArgs, InfofeedTool
 
 FEED_URL = "https://example.com/feed.xml"
+
+
+@pytest.fixture(autouse=True)
+def _resolve_example_com_to_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``example.com`` resolve to a public IP without real DNS.
+
+    The SSRF guard resolves the host before fetching; pinning ``example.com`` to
+    a public address keeps the respx-mocked happy-path tests fully offline and
+    deterministic. Literal-IP hosts (127.0.0.1, 169.254.x, 10.x) used by the
+    SSRF tests resolve locally via the real getaddrinfo and don't need this.
+    """
+    real = socket.getaddrinfo
+
+    def fake(host: str, port: int, *args: object, **kwargs: object) -> object:
+        if host == "example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+        return real(host, port, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(infofeed_mod.socket, "getaddrinfo", fake)
 
 RSS_BODY = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -197,3 +219,48 @@ async def test_doctype_feed_is_rejected_not_expanded() -> None:
     assert result.error is not None
     assert result.error.code == "feed_parse_failed"
     assert "items" not in result.data
+
+
+# -- SSRF guard ---------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/feed",  # loopback
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata
+        "http://10.0.0.5/feed",  # private 10/8
+        "http://192.168.1.10/feed",  # private 192.168/16
+        "http://[::1]/feed",  # ipv6 loopback
+    ],
+)
+async def test_blocks_internal_addresses(url: str) -> None:
+    # No respx mock: the request must be refused BEFORE any socket is opened.
+    result = await InfofeedTool()(FeedArgs(url=url))
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "url_not_allowed"
+    assert result.error.retriable is False
+    assert "items" not in result.data
+
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://example.com/x", "gopher://x/"])
+async def test_blocks_non_http_schemes(url: str) -> None:
+    result = await InfofeedTool()(FeedArgs(url=url))
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "url_not_allowed"
+
+
+async def test_blocks_public_host_that_resolves_to_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A public-looking host whose DNS resolves inward (rebinding-style) is blocked.
+    def fake(host: str, port: int, *a: object, **k: object) -> object:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.5", port))]
+
+    monkeypatch.setattr(infofeed_mod.socket, "getaddrinfo", fake)
+    result = await InfofeedTool()(FeedArgs(url="https://feeds.evil.example/rss"))
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "url_not_allowed"

@@ -1,0 +1,22 @@
+# Optional perception deps — install via: make install-perception
+#
+# These heavy backends are deliberately kept OUT of pyproject.toml / the uv lock
+# so `uv sync` and the CI gate stay fast and dependency-light on machines without
+# a display / GPU. The real adapters lazy-import each library inside their
+# methods/__init__ and raise a clear error (with this install hint) when it is
+# missing, so the package imports and the test suite run green without them.
+#
+# Perception is PRIVACY-HEAVY (it can read your screen and clipboard) and is OFF
+# by default — gated behind FRIDAY_ENABLE_PERCEPTION.
+#
+# Install into the project venv with:
+#     make install-perception        # uv pip install -r requirements-perception.txt
+#
+# OCR also needs the `tesseract` binary present on the host (e.g.
+# `apt install tesseract-ocr`); pytesseract only wraps it.
+opencv-python
+ultralytics
+pytesseract
+pillow
+mss
+pyperclip

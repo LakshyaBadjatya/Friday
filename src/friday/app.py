@@ -57,6 +57,7 @@ from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
 from friday.api.routes_rag import router as rag_router
 from friday.api.routes_reminders import router as reminders_router
+from friday.api.routes_roster import router as roster_router
 from friday.api.routes_schedules import router as schedules_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
@@ -65,9 +66,11 @@ from friday.api.routes_system import router as system_router
 from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
+from friday.broker import Broker, HashChainedAudit
 from friday.config import Settings, get_settings
 from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
 from friday.core.orchestrator import ForgettableVectorStore, Orchestrator
+from friday.desktop import AuditedDesktop, DesktopAction, FakeDesktop
 from friday.errors import ProviderError
 from friday.family import router as family_router
 from friday.graph.extractor import EntityExtractor
@@ -100,6 +103,7 @@ from friday.perception.screen import (
 from friday.perception.vision import FakeVision
 from friday.plugins.loader import PluginInfo, load_into
 from friday.presence import router as presence_router
+from friday.proactive import AnomalyDetector, Foresight
 from friday.protocols.runner import ProtocolRunner
 from friday.protocols.store import SQLiteProtocolStore
 from friday.providers.embeddings import (
@@ -119,8 +123,18 @@ from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.rag.ingest import DocumentIngestor
 from friday.reminders.store import SQLiteReminderStore
+from friday.roster import ROSTER, RosterRegistry
 from friday.scheduler.engine import Scheduler
 from friday.scheduler.store import SQLiteTriggerStore, Trigger
+from friday.secrets import (
+    EnvVault,
+    FileVault,
+    KeyringVault,
+    MemoryVault,
+    SecretVault,
+    SecretVaultError,
+    scan_for_plaintext_secrets,
+)
 from friday.studio.generator import (
     MeshyText3D,
     ProceduralGenerator,
@@ -130,8 +144,15 @@ from friday.studio.generator import (
 from friday.study.store import SQLiteStudyStore
 from friday.system.monitor import PsutilSampler, SystemMonitor
 from friday.tools.agent_reach import AgentReachTool
+from friday.tools.ask_user import AskUserTool
 from friday.tools.base import Tool
+from friday.tools.browser_tool import BrowserTool
+from friday.tools.capabilities import CapabilitiesTool
+from friday.tools.dossier import DossierTool
+from friday.tools.downloads_butler import DownloadsButlerTool
 from friday.tools.home import HomeControlTool
+from friday.tools.infofeed import InfofeedTool
+from friday.tools.media import MediaTool
 from friday.tools.notify import NotifyTool, SentMessage
 from friday.tools.registry import ToolRegistry
 from friday.tools.reminders import (
@@ -141,6 +162,7 @@ from friday.tools.reminders import (
 )
 from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
 from friday.tools.web_search import WebSearchTool
+from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity
 
 # The system-automation tool names added to the Automation agent's allow-list
 # (and registered) only when ``enable_system_automation`` is set.
@@ -777,8 +799,15 @@ def _build_system_monitor(settings: Settings) -> SystemMonitor:
     )
 
 
+# Upper bound on the rolling CPU history the proactive anomaly detector scores;
+# keeps memory bounded across an unbounded run of scheduled ticks.
+_ANOMALY_HISTORY_LIMIT = 64
+
+
 def _make_system_check_action(
-    monitor: SystemMonitor, notify: NotifyTool
+    monitor: SystemMonitor,
+    notify: NotifyTool,
+    anomaly_detector: AnomalyDetector | None = None,
 ) -> Callable[[Trigger], Awaitable[None]]:
     """Build the ``system_check`` scheduler action over the shared monitor.
 
@@ -789,7 +818,16 @@ def _make_system_check_action(
     proactively. When the host is healthy (no alerts) nothing is sent. The
     sampling is the action's only side seam; ``check()`` itself is the
     deterministic, fake-sampler-tested unit.
+
+    **Proactive anomaly detection (Stage 2).** When an
+    :class:`~friday.proactive.AnomalyDetector` is wired (``enable_proactive``), the
+    action ALSO keeps a bounded rolling history of the sampled CPU utilisation and
+    flags the latest reading when it is a causal rolling-z-score outlier — so a
+    *spike* (a sharp deviation from recent history) is surfaced even when it stays
+    below the static breach threshold. This is purely additive to the existing
+    threshold alerts; off (no detector) the behaviour is exactly as before.
     """
+    cpu_history: list[float] = []
 
     async def _system_check(trigger: Trigger) -> None:
         alerts = monitor.check()
@@ -802,9 +840,36 @@ def _make_system_check_action(
                     body=alert.message,
                 )
             )
+        anomaly_flagged = False
+        if anomaly_detector is not None:
+            cpu = monitor.stats().cpu_percent
+            cpu_history.append(cpu)
+            if len(cpu_history) > _ANOMALY_HISTORY_LIMIT:
+                del cpu_history[0]
+            anomalies = anomaly_detector.detect(cpu_history)
+            # Only the latest reading matters for a proactive, real-time flag.
+            latest = cpu_history[-1] if cpu_history else None
+            for anomaly in anomalies:
+                if anomaly.index == len(cpu_history) - 1:
+                    anomaly_flagged = True
+                    notify.sink.append(
+                        SentMessage(
+                            channel="webhook",
+                            target="scheduler",
+                            subject="System anomaly",
+                            body=(
+                                f"CPU spike detected: {latest:g}% is a "
+                                f"{anomaly.zscore:.1f}-sigma outlier vs recent history."
+                            ),
+                        )
+                    )
         logger.info(
             "scheduler system_check fired",
-            extra={"trigger": trigger.name, "alerts": len(alerts)},
+            extra={
+                "trigger": trigger.name,
+                "alerts": len(alerts),
+                "anomaly": anomaly_flagged,
+            },
         )
 
     return _system_check
@@ -818,6 +883,7 @@ def _build_scheduler(
     journal_service: JournalService,
     journal_store: SQLiteJournalStore,
     system_monitor: SystemMonitor,
+    anomaly_detector: AnomalyDetector | None = None,
 ) -> Scheduler:
     """Assemble the :class:`Scheduler` and register the default actions.
 
@@ -847,10 +913,199 @@ def _build_scheduler(
         "journal", _make_journal_action(journal_service, journal_store)
     )
     scheduler.register_action(
-        "system_check", _make_system_check_action(system_monitor, notify_tool)
+        "system_check",
+        _make_system_check_action(system_monitor, notify_tool, anomaly_detector),
     )
     scheduler.register_action("noop", _noop_action)
     return scheduler
+
+
+class _DesktopAuditAdapter:
+    """Adapt the hash-chained ledger to the desktop :class:`AuditSink` shape.
+
+    :class:`~friday.desktop.AuditedDesktop` records each action to a sink whose
+    contract is ``append(DesktopAction)``, whereas
+    :class:`~friday.broker.HashChainedAudit` appends a plain ``dict``. This thin
+    adapter bridges the two: it serializes each :class:`~friday.desktop.DesktopAction`
+    to a redaction-safe record (``kind`` + ``args``) and appends it to the ledger,
+    so EVERY desktop action lands one tamper-evident, hash-chained row BEFORE it
+    executes (frictionless but fully audited). The ledger redacts sensitive-keyed
+    values itself before hashing, so a typed password never reaches disk verbatim.
+    """
+
+    def __init__(self, ledger: HashChainedAudit) -> None:
+        self._ledger = ledger
+
+    def append(self, action: DesktopAction) -> None:
+        """Record one desktop action to the hash-chained ledger."""
+        self._ledger.append(
+            {"desktop_action": action.kind, "args": dict(action.args)}
+        )
+
+
+def _build_desktop(
+    settings: Settings, hash_audit: HashChainedAudit
+) -> AuditedDesktop | None:
+    """Build the frictionless, fully-audited desktop controller, or ``None``.
+
+    Returns an :class:`~friday.desktop.AuditedDesktop` wrapping a deterministic
+    :class:`~friday.desktop.FakeDesktop` (no real mouse/keyboard/display) ONLY when
+    ``enable_desktop`` is set; off by default it returns ``None`` so the offline
+    build constructs no desktop seam. The wrapper is FRICTIONLESS (no per-action
+    prompt) but FULLY AUDITED — every action is appended to the shared hash-chained
+    ledger (via :class:`_DesktopAuditAdapter`) BEFORE it executes. The real
+    ``pyautogui`` adapter is wired only when explicitly chosen (it lazy-imports its
+    backend); the default fake keeps this construction side-effect-free.
+    """
+    if not settings.enable_desktop:
+        return None
+    logger.info("desktop control enabled (audited, frictionless; fake backend)")
+    return AuditedDesktop(
+        FakeDesktop(), audit_sink=_DesktopAuditAdapter(hash_audit)
+    )
+
+
+def _build_owner_identity(settings: Settings) -> OwnerIdentity | None:
+    """Build advisory owner recognition over a deterministic voiceprint, or ``None``.
+
+    Returns an :class:`~friday.voice.voiceprint.OwnerIdentity` over a deterministic
+    :class:`~friday.voice.voiceprint.FakeVoiceprint` ONLY when ``enable_voiceprint``
+    is set; off by default it returns ``None`` so no voiceprint seam is built.
+    Owner recognition is ADVISORY by default (it never blocks — only opt-in callers
+    gate on it). The real ``resemblyzer`` backend stays OPTIONAL/LAZY (excluded from
+    the uv lock); the fake makes this construction model-free and I/O-free. The
+    profile is enrolled on a stable owner-marker sample so the identity is usable
+    out of the box without a saved enrollment.
+    """
+    if not settings.enable_voiceprint:
+        return None
+    verifier = FakeVoiceprint()
+    # A stable, deterministic owner marker; the real build loads a saved profile
+    # from an EnrollmentStore. Enrolling here keeps the advisory identity usable.
+    profile = verifier.enroll([b"FRIDAY_OWNER_VOICEPRINT"])
+    logger.info("voiceprint owner recognition enabled (advisory; fake backend)")
+    return OwnerIdentity(verifier, profile)
+
+
+def _build_anomaly_detector(settings: Settings) -> AnomalyDetector | None:
+    """Build the proactive anomaly detector, or ``None`` when proactive is off.
+
+    Returns a pure, deterministic :class:`~friday.proactive.AnomalyDetector` ONLY
+    when ``enable_proactive`` is set; off by default it returns ``None`` so the
+    scheduler's ``system_check`` action keeps its plain threshold-only behaviour.
+    When built it is wired into the ``system_check`` action so a spike in the
+    sampled metric history (a causal rolling z-score outlier) is ALSO flagged —
+    additive to the existing breach alerts.
+    """
+    if not settings.enable_proactive:
+        return None
+    return AnomalyDetector()
+
+
+def _build_foresight(settings: Settings) -> Foresight | None:
+    """Build the proactive foresight engine, or ``None`` when proactive is off.
+
+    Returns a deterministic, rule-based :class:`~friday.proactive.Foresight` ONLY
+    when ``enable_proactive`` is set; off by default it returns ``None``. It imports
+    no LLM SDK and takes every input injected, so construction is side-effect-free.
+    """
+    if not settings.enable_proactive:
+        return None
+    return Foresight()
+
+
+class _BrokerSecretAdapter:
+    """Adapt a :class:`~friday.secrets.SecretVault` to the broker's resolver shape.
+
+    The broker's secret-provider contract is ``get(name) -> str`` (a marker is
+    always resolved to a concrete value), whereas a :class:`SecretVault` returns
+    ``str | None`` (``None`` when the secret is absent so callers can layer
+    vaults). This thin adapter bridges the two: it forwards to the wrapped vault
+    and raises a clear :class:`~friday.secrets.SecretVaultError` when the requested
+    secret is missing — so a ``{{secret:NAME}}`` marker for an unset credential
+    fails loud at injection time rather than silently injecting ``None`` into a
+    tool's arguments.
+    """
+
+    def __init__(self, vault: SecretVault) -> None:
+        self._vault = vault
+
+    def get(self, name: str) -> str:
+        value = self._vault.get(name)
+        if value is None:
+            raise SecretVaultError(
+                f"secret {name!r} is not set in the configured vault"
+            )
+        return value
+
+
+def _build_audit_ledger(settings: Settings) -> HashChainedAudit:
+    """Build the tamper-evident, hash-chained audit ledger over ``audit_ledger_path``.
+
+    The ledger is an append-only JSONL file; every tool the shared registry
+    executes appends ONE hash-chained record (the tamper-evident system-of-record),
+    additive to the in-memory observability :class:`AuditLog`. A missing parent
+    directory is created on first append by the ledger itself; ``data/`` is
+    gitignored. Construction performs no I/O (the file is opened only on append /
+    verify), so this is safe to call eagerly at startup.
+    """
+    return HashChainedAudit(settings.audit_ledger_path)
+
+
+def _build_secret_vault(settings: Settings) -> SecretVault:
+    """Construct the secret backend selected by ``secret_vault`` (lazy / safe).
+
+    ``env`` (default) reads ``FRIDAY_<NAME>`` from the process environment;
+    ``memory`` is in-process only; ``file`` is a ``0600`` JSON dev fallback stored
+    next to the long-term DB's ``data/`` directory; ``keyring`` wraps the OPTIONAL
+    OS-keychain backend (``keyring`` is lazy-imported only here, when selected —
+    it is kept out of the core lock). A misconfigured/absent ``keyring`` raises a
+    clear :class:`~friday.secrets.SecretVaultError` from its constructor, so the
+    opt-in fails fast and loud while the default ``env`` path never touches the
+    optional dependency. The vault is the broker's ``{{secret:NAME}}`` resolver.
+    """
+    backend = settings.secret_vault
+    if backend == "memory":
+        logger.info("using in-memory secret vault")
+        return MemoryVault()
+    if backend == "file":
+        # Co-locate the dev secret file with the gitignored data/ dir; fall back to
+        # data/ when the DB is purely in-memory (tests).
+        db_path = settings.memory_db_path
+        data_dir = Path(db_path).parent if db_path != ":memory:" else Path("data")
+        path = str(data_dir / "secrets.json")
+        logger.info("using file secret vault", extra={"path": path})
+        return FileVault(path)
+    if backend == "keyring":
+        logger.info("using OS keyring secret vault")
+        return KeyringVault()
+    logger.info("using environment secret vault")
+    return EnvVault()
+
+
+def _run_secret_self_check(settings: Settings, repo_root: str) -> None:
+    """Scan ``repo_root`` for plaintext secrets and LOG a WARNING per finding.
+
+    Warn-only by design: this NEVER raises and NEVER refuses to boot — it is a
+    default-safe nudge to move a committed credential into the vault. Skipped
+    entirely when ``enable_secret_self_check`` is off. The scan reads only
+    committed source files (``.py`` / ``.env``-family, excluding the git-ignored
+    ``.env``); any unreadable file is silently skipped by the scanner.
+    """
+    if not settings.enable_secret_self_check:
+        return
+    findings = scan_for_plaintext_secrets(repo_root)
+    for finding in findings:
+        logger.warning(
+            "possible plaintext secret in tracked source",
+            extra={"file": finding.file, "line": finding.line, "kind": finding.kind},
+        )
+    if findings:
+        logger.warning(
+            "secret self-check found %d possible plaintext secret(s); "
+            "move them into the secret vault (boot continues)",
+            len(findings),
+        )
 
 
 def _build_registry(
@@ -858,6 +1113,7 @@ def _build_registry(
     reminder_store: SQLiteReminderStore,
     audit: AuditLog | None = None,
     metrics: Metrics | None = None,
+    hash_audit: HashChainedAudit | None = None,
 ) -> ToolRegistry:
     """Build the tool registry with every Phase-2 tool plus the reminder tools.
 
@@ -880,8 +1136,14 @@ def _build_registry(
     passed (the app wires the process-wide instances), every ``execute`` records a
     redacted tool-call audit row and bumps the ``tool_calls`` counter (build-spec
     §11). They default to ``None`` so a bare registry behaves exactly as before.
+
+    When a hash-chained :class:`~friday.broker.HashChainedAudit` ledger is passed
+    (the app wires the process-wide instance), every ``execute`` ADDITIONALLY
+    appends one tamper-evident record to the on-disk ledger (the system-of-record
+    verified by ``GET /admin/audit/verify``). This is purely additive — the
+    in-memory ``audit`` row above is unchanged — and defaults to ``None``.
     """
-    registry = ToolRegistry(audit=audit, metrics=metrics)
+    registry = ToolRegistry(audit=audit, metrics=metrics, hash_audit=hash_audit)
     registry.register(cast(Tool, WebSearchTool()))
     registry.register(cast(Tool, NotifyTool()))
     registry.register(cast(Tool, HomeControlTool()))
@@ -907,6 +1169,96 @@ def _build_registry(
         registry.register(cast(Tool, FindFilesTool()))
         registry.register(cast(Tool, OpenAppTool()))
     return registry
+
+
+# The read-only idea-batch tool names, by which agent they are added to. The
+# Capabilities + AskUser tools reach EVERY agent (planning + clarification are
+# universal); the dossier reaches the Knowledge agent (it stitches graph + memory);
+# infofeed + browser reach the Research (analysis) agent (read-only web reach).
+_EXTRA_TOOLS_FOR_ALL: frozenset[str] = frozenset({"capabilities", "ask_user"})
+_EXTRA_TOOLS_FOR_KNOWLEDGE: frozenset[str] = frozenset({"entity_dossier"})
+_EXTRA_TOOLS_FOR_RESEARCH: frozenset[str] = frozenset({"infofeed", "browser"})
+
+
+def _register_extra_tools(
+    settings: Settings,
+    registry: ToolRegistry,
+    graph_store: SQLiteGraphStore,
+    long_term: LongTermStore,
+) -> None:
+    """Register the read-only idea-batch tools into the shared registry (flag ON).
+
+    Registered only when ``enable_extra_tools`` is set (default ON) — they are all
+    read-only (``side_effecting=False``), so they add no real-world action, only a
+    capability map, a clarification pause, an entity dossier, an RSS/Atom read, and
+    a keyless page read. The capabilities tool reflects over the SAME shared
+    registry (so its map always matches what is registered), and the dossier reads
+    the shared knowledge graph + long-term store with the registered ``web_search``
+    as its optional, best-effort fallback (consulted only when the local graph /
+    memory turn up nothing). Off, none are registered, so the offline tool surface
+    is unchanged. The companion :func:`_extend_agent_extra_tools` adds the matching
+    names to the fitting agents' allow-lists.
+    """
+    if not settings.enable_extra_tools:
+        return
+    searcher = None
+    try:
+        searcher = registry.get("web_search")
+    except KeyError:  # pragma: no cover - web_search is always registered
+        searcher = None
+    registry.register(cast(Tool, CapabilitiesTool(registry)))
+    registry.register(cast(Tool, AskUserTool()))
+    registry.register(
+        cast(Tool, DossierTool(graph_store, long_term, searcher=searcher))
+    )
+    registry.register(cast(Tool, InfofeedTool()))
+    registry.register(cast(Tool, BrowserTool()))
+
+
+def _register_side_effecting_extra_tools(
+    settings: Settings, registry: ToolRegistry
+) -> None:
+    """Register the side-effecting idea-batch tools behind their OWN readiness flags.
+
+    These are NOT gated by ``enable_extra_tools`` — each rides its own flag so the
+    owner opts in deliberately. ``downloads_butler`` (organize a folder) is
+    side-effecting + non-idempotent, so a real (non-dry-run) move is gated by the
+    registry's confirm-step; ``media`` (play/pause/next/prev/volume) is
+    side-effecting but idempotent transport, so it dispatches straight through. Both
+    default off, so the offline build registers neither.
+    """
+    if settings.enable_downloads_butler:
+        registry.register(cast(Tool, DownloadsButlerTool()))
+    if settings.enable_media_control:
+        registry.register(cast(Tool, MediaTool()))
+
+
+def _extend_agent_extra_tools(settings: Settings, agents: AgentRegistry) -> None:
+    """Add the read-only idea-batch tools to the fitting agents' allow-lists (flag ON).
+
+    Mirrors :func:`_register_extra_tools`: capabilities + ask_user reach EVERY
+    registered agent; the dossier reaches the Knowledge agent; infofeed + browser
+    reach the Research (analysis) agent. Off (``enable_extra_tools`` unset) the
+    allow-lists are the class defaults, so the offline build is unchanged. The
+    registry still enforces each allow-list, so an agent can reach only the tools
+    added here.
+    """
+    if not settings.enable_extra_tools:
+        return
+    for name in ("analysis", "knowledge", "automation", "device", "alerting"):
+        if name in agents:
+            agent = agents.get(name)
+            agent.allowed_tools = agent.allowed_tools | _EXTRA_TOOLS_FOR_ALL
+    if "knowledge" in agents:
+        knowledge = agents.get("knowledge")
+        knowledge.allowed_tools = (
+            knowledge.allowed_tools | _EXTRA_TOOLS_FOR_KNOWLEDGE
+        )
+    if "analysis" in agents:
+        analysis = agents.get("analysis")
+        analysis.allowed_tools = (
+            analysis.allowed_tools | _EXTRA_TOOLS_FOR_RESEARCH
+        )
 
 
 def _build_agents(
@@ -1046,9 +1398,41 @@ class AppRuntime:
     #: same one the ``/n8n`` routes drive and the orchestrator's "make a workflow
     #: on n8n" hook reaches; only reachable when ``enable_n8n`` is on.
     n8n_service: N8nService
+    #: The tamper-evident, hash-chained audit ledger (the security spine's
+    #: system-of-record). Every executed tool call appends one record here in
+    #: addition to the in-memory ``audit`` log; ``GET /admin/audit/verify`` walks
+    #: the chain. Always constructed (uniform wiring) over ``audit_ledger_path``.
+    hash_audit: HashChainedAudit
+    #: The action broker (validate → classify → deny-by-default gate → secret
+    #: injection → execute → hash-chained audit) over the shared registry +
+    #: ledger + secret vault. Always constructed (uniform wiring) but only
+    #: interposed into dispatch when ``enable_broker`` is on; with the flag off the
+    #: orchestrator keeps the plain registry path, so dispatch is unchanged.
+    broker: Broker
+    #: The persona roster registry (FRIDAY + eight least-privilege specialists) —
+    #: always built (no flag). Surfaced for ``GET /roster`` and injected into the
+    #: orchestrator so an addressed turn ("GECKO, ...") routes under the named
+    #: persona's least-privilege scope + memory namespace.
+    roster: RosterRegistry
+    #: The frictionless, fully-audited desktop controller (an
+    #: :class:`~friday.desktop.AuditedDesktop` over a :class:`FakeDesktop`), or
+    #: ``None`` when ``enable_desktop`` is off. Every action is appended to the
+    #: hash-chained ledger before it runs.
+    desktop: AuditedDesktop | None
+    #: Advisory owner recognition (an :class:`~friday.voice.voiceprint.OwnerIdentity`
+    #: over a :class:`FakeVoiceprint`), or ``None`` when ``enable_voiceprint`` is
+    #: off. Advisory by default — it never blocks.
+    owner_identity: OwnerIdentity | None
+    #: The proactive anomaly detector wired into the scheduler's ``system_check``
+    #: action so a CPU spike is flagged, or ``None`` when ``enable_proactive`` is
+    #: off.
+    anomaly_detector: AnomalyDetector | None
+    #: The proactive, rule-based foresight engine surfaced for suggestions, or
+    #: ``None`` when ``enable_proactive`` is off.
+    foresight: Foresight | None
 
 
-def build_runtime(settings: Settings) -> AppRuntime:
+def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     """Assemble the full runtime graph from ``settings``.
 
     Constructs the process-wide observability stores first, injects the audit +
@@ -1056,16 +1440,42 @@ def build_runtime(settings: Settings) -> AppRuntime:
     counted) and the tracer + metrics into the orchestrator (so every turn opens a
     trace and bumps the request/by-mode counters), and returns everything bundled
     in an :class:`AppRuntime` so the admin API can read the same instances.
+
+    The Stage-1 security spine is wired here too: a tamper-evident, hash-chained
+    :class:`~friday.broker.HashChainedAudit` ledger (over ``audit_ledger_path``)
+    is injected into the shared registry so every executed tool call ALSO appends
+    one tamper-evident record (additive — the in-memory audit is untouched); a
+    secret vault is constructed per ``secret_vault`` (lazy; ``env`` default); the
+    plaintext-secret self-check runs over ``repo_root`` when enabled (warn-only,
+    never refusing boot); and an action :class:`~friday.broker.Broker` over the
+    registry + ledger + vault is constructed and surfaced. Routing dispatch THROUGH
+    the broker is opt-in via ``enable_broker`` (off by default → dispatch
+    unchanged); ``repo_root`` is the directory the self-check scans (the process
+    working directory by default; tests pin a tmp path).
     """
     tracer = Tracer()
     audit = AuditLog()
     metrics = Metrics()
     flag_overrides: dict[str, bool] = {}
 
+    # Security spine: the tamper-evident ledger + secret vault are built first so
+    # the registry can append a hash-chained record per tool call and the broker
+    # can resolve ``{{secret:NAME}}`` markers. The self-check is warn-only.
+    hash_audit = _build_audit_ledger(settings)
+    secret_vault = _build_secret_vault(settings)
+    _run_secret_self_check(settings, repo_root)
+
     reminder_store = _build_reminder_store(settings)
     trigger_store = _build_trigger_store(settings)
     registry = _build_registry(
-        settings, reminder_store, audit=audit, metrics=metrics
+        settings, reminder_store, audit=audit, metrics=metrics, hash_audit=hash_audit
+    )
+    # The action broker over the shared registry + ledger + vault. Always built
+    # (uniform wiring) and surfaced on the runtime, but only interposed into
+    # dispatch when ``enable_broker`` is on — off by default, the orchestrator
+    # keeps the plain registry path, so existing dispatch behaviour is unchanged.
+    broker = Broker(
+        registry, hash_audit, secret_provider=_BrokerSecretAdapter(secret_vault)
     )
     # Select the live LLM, then engage strict offline mode when configured:
     # ``select_llm`` swaps in the network-free OfflineLLM when
@@ -1078,7 +1488,24 @@ def build_runtime(settings: Settings) -> AppRuntime:
     # driver / validate the DSN when ``enable_postgres`` is on).
     long_term = _select_long_term(settings)
     vector = _select_vector(settings, embedder)
+    # The knowledge-graph store is built BEFORE the registry's read-only idea-batch
+    # tools because the entity dossier reads it (graph + long-term) — both are
+    # already constructed here, so the dossier is wired against the SAME shared
+    # stores the rest of the runtime uses.
+    graph_store = _build_graph_store(settings)
+    graph_extractor = EntityExtractor(llm)
+    # Stage-2 idea-batch tools: the read-only ones (capabilities / ask_user /
+    # entity_dossier / infofeed / browser) are registered into the shared registry
+    # when ``enable_extra_tools`` is on (default), and the side-effecting ones
+    # (downloads_butler / media) ride their own readiness flags. Their own gates
+    # (read-only, or the registry confirm-step) keep them safe.
+    _register_extra_tools(settings, registry, graph_store, long_term)
+    _register_side_effecting_extra_tools(settings, registry)
     agents = _build_agents(settings, registry, llm, vector, long_term)
+    # Add the read-only idea-batch tools to the fitting agents' allow-lists
+    # (capabilities/ask_user to all; entity_dossier to knowledge; infofeed/browser
+    # to research). Inert when ``enable_extra_tools`` is off (class defaults stand).
+    _extend_agent_extra_tools(settings, agents)
     briefing = _build_briefing_service(
         settings, reminder_store, audit, metrics, llm
     )
@@ -1087,6 +1514,14 @@ def build_runtime(settings: Settings) -> AppRuntime:
         reminder_store, audit, metrics, llm, settings.owner_address
     )
     system_monitor = _build_system_monitor(settings)
+    # Stage-2 perception extras: the desktop controller, advisory owner recognition,
+    # and the proactive engines — each ``None`` unless its own flag is set, so the
+    # offline default constructs no seam. The anomaly detector is wired into the
+    # scheduler's ``system_check`` action so a CPU spike is flagged proactively.
+    desktop = _build_desktop(settings, hash_audit)
+    owner_identity = _build_owner_identity(settings)
+    anomaly_detector = _build_anomaly_detector(settings)
+    foresight = _build_foresight(settings)
     scheduler = _build_scheduler(
         trigger_store,
         reminder_store,
@@ -1095,17 +1530,20 @@ def build_runtime(settings: Settings) -> AppRuntime:
         journal_service,
         journal_store,
         system_monitor,
+        anomaly_detector,
     )
     protocol_store = _build_protocol_store(settings)
     protocol_runner = _build_protocol_runner(registry)
     rag_ingestor = _build_rag_ingestor(settings, vector, long_term)
     meeting_store = _build_meeting_store(settings)
     meeting_capture = _build_meeting_capture(settings, llm, rag_ingestor)
-    graph_store = _build_graph_store(settings)
-    graph_extractor = EntityExtractor(llm)
     study_store = _build_study_store(settings)
     critic = _build_critic(llm)
     n8n_service = _build_n8n_service(settings, llm)
+    # The persona roster (FRIDAY + eight least-privilege specialists). Always built
+    # (no flag); the canonical pre-built ROSTER is reused so the registry instance
+    # is shared with ``GET /roster`` and the orchestrator's address-by-name hook.
+    roster = ROSTER
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
         llm=llm,
@@ -1121,6 +1559,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         protocol_runner=protocol_runner,
         critic=critic,
         n8n_service=n8n_service,
+        roster=roster,
     )
     return AppRuntime(
         orchestrator=orchestrator,
@@ -1149,6 +1588,13 @@ def build_runtime(settings: Settings) -> AppRuntime:
         study_store=study_store,
         system_monitor=system_monitor,
         n8n_service=n8n_service,
+        hash_audit=hash_audit,
+        broker=broker,
+        roster=roster,
+        desktop=desktop,
+        owner_identity=owner_identity,
+        anomaly_detector=anomaly_detector,
+        foresight=foresight,
     )
 
 
@@ -1497,6 +1943,22 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.short_term = runtime.short_term
     app.state.long_term = runtime.long_term
     app.state.flag_overrides = runtime.flag_overrides
+    # Security spine: the hash-chained ledger (read back by GET /admin/audit/verify)
+    # and the action broker. The ledger is the tamper-evident system-of-record the
+    # shared registry appends to per tool call; the broker is exposed for opt-in
+    # routing (``enable_broker``) but is not interposed into dispatch by default.
+    app.state.hash_audit = runtime.hash_audit
+    app.state.broker = runtime.broker
+    # Stage-2 roster: always surfaced (no flag) so ``GET /roster`` reads the SAME
+    # registry the orchestrator's address-by-name hook uses.
+    app.state.roster = runtime.roster
+    # Stage-2 perception extras — surfaced for completeness; each is ``None`` unless
+    # its own flag is set, so the offline default exposes no desktop/voiceprint/
+    # proactive seam.
+    app.state.desktop = runtime.desktop
+    app.state.owner_identity = runtime.owner_identity
+    app.state.anomaly_detector = runtime.anomaly_detector
+    app.state.foresight = runtime.foresight
     _wire_studio(app, settings, runtime.llm)
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
@@ -1597,6 +2059,9 @@ def create_app() -> FastAPI:
     app.include_router(ws_router)
     # The admin/observability control plane (Phase 5, Stage 2A).
     app.include_router(admin_router)
+    # The persona roster listing (Stage 2) — always available (no flag); a pure
+    # read-only listing of FRIDAY + the eight least-privilege specialists.
+    app.include_router(roster_router)
     # The 3D Studio (Phase 7) — always registered but self-guards on
     # FRIDAY_ENABLE_STUDIO (404 when off), so the offline default exposes no
     # studio surface. The StaticFiles mount is added below only when enabled.

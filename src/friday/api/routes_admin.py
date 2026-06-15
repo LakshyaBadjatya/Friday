@@ -33,6 +33,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from friday.broker import HashChainedAudit
 from friday.config import Settings, get_settings
 from friday.observability.audit import AuditLog, ToolCallAudit
 from friday.observability.metrics import Metrics
@@ -90,6 +91,18 @@ class AuditResponse(BaseModel):
     security: list[dict[str, Any]]
 
 
+class AuditVerifyResponse(BaseModel):
+    """The tamper-evidence verdict for the hash-chained audit ledger.
+
+    ``ok`` is ``True`` iff the whole chain recomputes intact; ``broken_at`` names
+    the zero-based index of the first inconsistent entry (``None`` when intact, or
+    when no ledger is wired — an empty chain is trivially intact).
+    """
+
+    ok: bool
+    broken_at: int | None
+
+
 class TraceView(BaseModel):
     """A serializable view of one recent trace for the traces endpoint."""
 
@@ -141,6 +154,11 @@ def _audit(request: Request) -> AuditLog | None:
 def _metrics(request: Request) -> Metrics | None:
     metrics = getattr(request.app.state, "metrics", None)
     return metrics if isinstance(metrics, Metrics) else None
+
+
+def _hash_audit(request: Request) -> HashChainedAudit | None:
+    audit = getattr(request.app.state, "hash_audit", None)
+    return audit if isinstance(audit, HashChainedAudit) else None
 
 
 def _effective_flags(settings: Settings, overrides: dict[str, bool]) -> dict[str, bool]:
@@ -226,6 +244,24 @@ async def get_audit(request: Request) -> AuditResponse:
     audit = _audit(request)
     tool_calls = audit.recent(100) if audit is not None else []
     return AuditResponse(tool_calls=tool_calls, security=_security_audit(request))
+
+
+@router.get("/audit/verify", response_model=AuditVerifyResponse)
+async def verify_audit(request: Request) -> AuditVerifyResponse:
+    """Walk the tamper-evident hash-chained ledger and report its integrity.
+
+    Runs :meth:`~friday.broker.HashChainedAudit.verify` over the on-disk ledger
+    wired on ``app.state`` and returns ``{"ok", "broken_at"}``: ``ok=True`` /
+    ``broken_at=None`` for an intact (or empty / unwired) chain, else ``ok=False``
+    with the zero-based index of the first inconsistent entry. This is the
+    tamper-evidence check the dashboard surfaces — any in-place edit, deletion, or
+    forged insertion in the ledger flips ``ok`` to ``False``.
+    """
+    ledger = _hash_audit(request)
+    if ledger is None:
+        return AuditVerifyResponse(ok=True, broken_at=None)
+    ok, broken_at = ledger.verify()
+    return AuditVerifyResponse(ok=ok, broken_at=broken_at)
 
 
 @router.get("/traces", response_model=TracesResponse)

@@ -47,6 +47,7 @@ from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
+from friday.api.routes_journal import router as journal_router
 from friday.api.routes_meetings import router as meetings_router
 from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
@@ -64,6 +65,8 @@ from friday.core.orchestrator import Orchestrator
 from friday.errors import ProviderError
 from friday.graph.extractor import EntityExtractor
 from friday.graph.store import SQLiteGraphStore
+from friday.journal.service import JournalService
+from friday.journal.store import SQLiteJournalStore
 from friday.logging import configure_logging, get_logger
 from friday.meetings.capture import MeetingCapture
 from friday.meetings.store import SQLiteMeetingStore
@@ -317,6 +320,78 @@ def _build_graph_store(settings: Settings) -> SQLiteGraphStore:
     return SQLiteGraphStore(graph_path)
 
 
+def _build_journal_store(settings: Settings) -> SQLiteJournalStore:
+    """Build the local-first SQLite journal store alongside the long-term DB.
+
+    Reuses ``memory_db_path``: the journal entries live in a sibling file
+    (``*.journal.db``) next to the long-term database so they share the gitignored
+    ``data/`` directory; ``":memory:"`` stays ephemeral. Entries are upserted by
+    date; the store is connection-per-call for file paths (thread-safe). Built
+    eagerly (cheap, no I/O beyond schema init) and surfaced on the runtime; the
+    ``/journal`` route self-guards on the flag.
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        journal_path = ":memory:"
+    else:
+        base = Path(db_path)
+        journal_path = str(base.with_suffix(base.suffix + ".journal"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteJournalStore(journal_path)
+
+
+def _build_journal_service(
+    reminder_store: SQLiteReminderStore,
+    audit: AuditLog,
+    metrics: Metrics,
+    llm: LLMProvider,
+    owner_address: str,
+) -> JournalService:
+    """Assemble the :class:`JournalService` over the shared local stores.
+
+    Pure assembly from the *shared* runtime pieces — the same reminder store the
+    reminder tools/routes use (so the day's completed reminders are counted), the
+    process-wide audit log + metrics — plus the live LLM for an optional, non-fatal
+    natural-language summary. Constructing the service performs no I/O.
+    """
+    return JournalService(
+        audit,
+        reminder_store=reminder_store,
+        metrics=metrics,
+        llm=llm,
+        owner_address=owner_address,
+    )
+
+
+def _make_journal_action(
+    journal_service: JournalService, journal_store: SQLiteJournalStore
+) -> Callable[[Trigger], Awaitable[None]]:
+    """Build the ``journal`` scheduler action over the shared service + store.
+
+    Builds the journal entry for ``utcnow`` from the *shared* :class:`JournalService`
+    and saves it (upsert by date) into the *shared* :class:`SQLiteJournalStore`, so
+    an enabled trigger writes an end-of-day journal proactively. ``utcnow`` is read
+    here in the background action only — the tested ``JournalService.build_entry(day)``
+    unit stays clock-injected; this action is exercised through the run-now route,
+    not for timing. Any LLM error is already swallowed inside ``build_entry``
+    (deterministic-summary fallback), so this never raises.
+    """
+
+    async def _journal(trigger: Trigger) -> None:
+        entry = await journal_service.build_entry(datetime.now(UTC))
+        journal_store.save(entry)
+        logger.info(
+            "scheduler journal fired",
+            extra={
+                "trigger": trigger.name,
+                "date": entry.date,
+                "events": entry.event_count,
+            },
+        )
+
+    return _journal
+
+
 def _build_rag_ingestor(
     settings: Settings, vector: SQLiteVectorStore, long_term: SQLiteLongTermStore
 ) -> DocumentIngestor | None:
@@ -541,15 +616,18 @@ def _build_scheduler(
     reminder_store: SQLiteReminderStore,
     registry: ToolRegistry,
     briefing_service: BriefingService,
+    journal_service: JournalService,
+    journal_store: SQLiteJournalStore,
 ) -> Scheduler:
     """Assemble the :class:`Scheduler` and register the default actions.
 
     Registers ``"due_reminders"`` (emit due reminders via the shared notify tool's
     sink/log), ``"briefing"`` (build + emit the proactive briefing via the same
-    sink), and a ``"noop"`` placeholder. The notify tool is pulled from the shared
-    :class:`ToolRegistry` so the scheduler emits into the *same* sink the alerting
-    agent uses (one auditable place for everything that would have been sent); a
-    fresh :class:`NotifyTool` is used as a fallback if absent.
+    sink), ``"journal"`` (build + save the day's journal entry into the shared
+    journal store), and a ``"noop"`` placeholder. The notify tool is pulled from
+    the shared :class:`ToolRegistry` so the scheduler emits into the *same* sink the
+    alerting agent uses (one auditable place for everything that would have been
+    sent); a fresh :class:`NotifyTool` is used as a fallback if absent.
     """
     scheduler = Scheduler(trigger_store)
     try:
@@ -562,6 +640,9 @@ def _build_scheduler(
     )
     scheduler.register_action(
         "briefing", _make_briefing_action(briefing_service, notify_tool)
+    )
+    scheduler.register_action(
+        "journal", _make_journal_action(journal_service, journal_store)
     )
     scheduler.register_action("noop", _noop_action)
     return scheduler
@@ -700,6 +781,13 @@ class AppRuntime:
     #: store + audit log + metrics the rest of the runtime uses; the ``/briefing``
     #: route and the scheduler ``briefing`` action both build through it.
     briefing: BriefingService
+    #: The shared journal service — aggregates a day's events (audit + reminders +
+    #: metrics) into a deterministic entry; the ``/journal/build`` route and the
+    #: scheduler ``journal`` action both build through it.
+    journal_service: JournalService
+    #: The shared journal store — the same one the ``/journal`` routes and the
+    #: scheduler ``journal`` action read/write (upsert by date).
+    journal_store: SQLiteJournalStore
     #: The shared protocol store — the same one the ``/protocols`` routes and the
     #: orchestrator's trigger-phrase hook read/write.
     protocol_store: SQLiteProtocolStore
@@ -751,8 +839,17 @@ def build_runtime(settings: Settings) -> AppRuntime:
     briefing = _build_briefing_service(
         settings, reminder_store, audit, metrics, llm
     )
+    journal_store = _build_journal_store(settings)
+    journal_service = _build_journal_service(
+        reminder_store, audit, metrics, llm, settings.owner_address
+    )
     scheduler = _build_scheduler(
-        trigger_store, reminder_store, registry, briefing
+        trigger_store,
+        reminder_store,
+        registry,
+        briefing,
+        journal_service,
+        journal_store,
     )
     protocol_store = _build_protocol_store(settings)
     protocol_runner = _build_protocol_runner(registry)
@@ -792,6 +889,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
         trigger_store=trigger_store,
         scheduler=scheduler,
         briefing=briefing,
+        journal_service=journal_service,
+        journal_store=journal_store,
         protocol_store=protocol_store,
         protocol_runner=protocol_runner,
         rag_ingestor=rag_ingestor,
@@ -958,6 +1057,23 @@ def _wire_briefing(app: FastAPI, settings: Settings, runtime: AppRuntime) -> Non
     app.state.briefing = runtime.briefing
 
 
+def _wire_journal(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared journal service + store on ``app.state`` when enabled.
+
+    The ``/journal`` routes read ``app.state.journal_service`` — the *same*
+    :class:`JournalService` the scheduler ``journal`` action builds through — and
+    ``app.state.journal_store`` — the *same* :class:`SQLiteJournalStore` that
+    action saves into — so an on-demand HTTP build and the proactive scheduled one
+    assemble + persist through one service + store. Building it only when
+    ``enable_journal`` is set keeps the offline default untouched (the routes
+    self-guard on the flag and 404 when off).
+    """
+    if not settings.enable_journal:
+        return
+    app.state.journal_service = runtime.journal_service
+    app.state.journal_store = runtime.journal_store
+
+
 def _wire_protocols(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Stash the shared protocol store + runner on ``app.state`` when enabled.
 
@@ -1057,6 +1173,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_reminders(app, settings, runtime)
     _wire_scheduler(app, settings, runtime)
     _wire_briefing(app, settings, runtime)
+    _wire_journal(app, settings, runtime)
     _wire_protocols(app, settings, runtime)
     _wire_meetings(app, settings, runtime)
     _wire_graph(app, settings, runtime)
@@ -1171,6 +1288,12 @@ def create_app() -> FastAPI:
     # briefing surface. The shared briefing service is wired onto app.state only
     # when enabled.
     app.include_router(briefing_router)
+    # Auto-journaling (Tier 2) — always registered but self-guards on
+    # FRIDAY_ENABLE_JOURNAL (404 when off), so the offline default exposes no
+    # journal surface. The shared journal service + store are wired onto app.state
+    # only when enabled, and the scheduler "journal" action saves into the same
+    # store.
+    app.include_router(journal_router)
     # Voice protocols (Tier 1) — always registered but self-guards on
     # FRIDAY_ENABLE_PROTOCOLS (404 when off), so the offline default exposes no
     # protocol surface. The shared protocol store + runner are wired onto

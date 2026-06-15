@@ -156,6 +156,16 @@ class Settings(BaseSettings):
     # summarizes (one line each).
     briefing_recent_activity: int = 5
 
+    # --- Auto-journaling (Tier 2; default off) ---
+    # Gates the whole ``/journal`` surface *and* the scheduler ``journal`` action;
+    # off by default so the offline build exposes no journal route (-> 404) and the
+    # registered action is inert unless a trigger fires it. When on, a day's events
+    # (tool-call audit rows + reminders completed + a metrics line) are aggregated
+    # into a deterministic :class:`~friday.journal.service.JournalEntry` and saved
+    # (upsert by date) in a sibling SQLite file alongside ``memory_db_path``; an
+    # optional, non-fatal LLM narration falls back to a deterministic summary.
+    enable_journal: bool = False
+
     # --- Voice protocols (Tier 1; default off) ---
     # Gates the whole ``/protocols`` REST surface *and* the orchestrator's
     # trigger-phrase hook; off by default so the offline build exposes no protocol

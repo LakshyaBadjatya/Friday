@@ -262,6 +262,17 @@ class Settings(BaseSettings):
     # a command exceeding it is killed and surfaced as a timeout error.
     system_exec_timeout: float = 30.0
 
+    # --- Perception (Tier 2; default off; PRIVACY-HEAVY) ---
+    # Gates the whole ``/perception`` REST surface (vision / OCR / clipboard /
+    # screen). Off by default so the offline build exposes no perception routes
+    # (each -> 404) and constructs no capture/clipboard seam. PRIVACY note: when
+    # enabled, perception can READ YOUR SCREEN AND CLIPBOARD — only turn it on if
+    # you intend FRIDAY to observe them. The heavy backends (opencv/ultralytics,
+    # pytesseract/pillow, pyperclip, mss) are kept OUT of the uv lock and lazy-
+    # imported by the real adapters (``make install-perception``); the app wires
+    # the fakes by default, so the offline build needs no heavy library.
+    enable_perception: bool = False
+
     # --- Persona ---
     owner_address: str = "Boss"
 

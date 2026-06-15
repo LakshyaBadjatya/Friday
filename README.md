@@ -132,6 +132,39 @@ Pick a TTS backend with `FRIDAY_TTS_PROVIDER` (`piper` | `elevenlabs` | `fake`);
 `elevenlabs` needs `ELEVENLABS_API_KEY`. With the offline `fake` LLM provider the
 voice path uses `FakeSTT`/`FakeTTS` so it runs end-to-end with zero models.
 
+## Perception (optional, off by default, privacy-heavy)
+
+FRIDAY can **see**: object detection (YOLO), screen/clipboard OCR (Tesseract), the
+system clipboard, and full-screen capture — composed into a single
+`describe_screen()` pass (capture → OCR + detect on the same image). It is **off by
+default** and is **privacy-heavy**: when enabled it can **read your screen and
+clipboard**, so only turn it on if you intend FRIDAY to observe them.
+
+```bash
+export FRIDAY_ENABLE_PERCEPTION=true   # the master flag; everything perception is gated on it
+make install-perception                # uv pip install -r requirements-perception.txt
+```
+
+`make install-perception` pulls in the optional backends (`opencv-python`,
+`ultralytics`, `pytesseract`, `pillow`, `mss`, `pyperclip`) listed in
+`requirements-perception.txt`. These are **not** in `pyproject.toml`/the uv lock;
+the real adapters lazy-import them and raise a clear "run `make install-perception`"
+error if they're missing, so the package still imports and tests still pass without
+them. OCR also needs the **`tesseract` binary** on the host (e.g.
+`apt install tesseract-ocr`). The app wires deterministic **fake** providers by
+default, so the offline build needs **no heavy library and performs no real
+capture**.
+
+When `FRIDAY_ENABLE_PERCEPTION` is set, five endpoints come alive (they return
+`404` while the flag is off):
+
+- `POST /perception/vision` — `{ "image_b64": "..." }` → `{detections, count}`.
+- `POST /perception/ocr` — `{ "image_b64": "..." }` → `{text}`.
+- `GET  /perception/clipboard` → `{text}`; `POST /perception/clipboard`
+  `{ "text": "..." }` → `{ok}`.
+- `POST /perception/screen` — capture the screen and describe it →
+  `{ocr_text, detections}`.
+
 ## Dashboard (optional)
 
 FRIDAY ships a small [Streamlit](https://streamlit.io/) operator console that reads the
@@ -222,6 +255,7 @@ failure pinpoints which check broke. Any non-zero step fails the build.
 |---------------------|---------------------------------------------------------------------|
 | `make install`      | `uv sync --all-groups` — create the venv and install all deps       |
 | `make install-voice`| `uv pip install -r requirements-voice.txt` — optional voice backends|
+| `make install-perception`| `uv pip install -r requirements-perception.txt` — optional perception backends|
 | `make install-dashboard`| `uv pip install -r requirements-dashboard.txt` — optional UI deps|
 | `make dashboard`    | `uv run streamlit run dashboard/app.py` — launch the operator console|
 | `make test`         | Run the full test suite (`uv run pytest -q`)                        |

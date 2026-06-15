@@ -49,6 +49,7 @@ from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
 from friday.api.routes_meetings import router as meetings_router
+from friday.api.routes_perception import router as perception_router
 from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
 from friday.api.routes_rag import router as rag_router
@@ -78,6 +79,13 @@ from friday.memory.vector import SQLiteVectorStore
 from friday.observability.audit import AuditLog
 from friday.observability.metrics import Metrics
 from friday.observability.tracing import Tracer
+from friday.perception.clipboard import FakeClipboard
+from friday.perception.ocr import FakeOCR
+from friday.perception.screen import (
+    FakeScreen,
+    PerceptionService,
+)
+from friday.perception.vision import FakeVision
 from friday.plugins.loader import PluginInfo, load_into
 from friday.protocols.runner import ProtocolRunner
 from friday.protocols.store import SQLiteProtocolStore
@@ -1272,6 +1280,41 @@ def _wire_system(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     app.state.system_monitor = runtime.system_monitor
 
 
+def _build_perception_service() -> PerceptionService:
+    """Assemble the :class:`PerceptionService` from the offline fakes.
+
+    Built entirely from fakes (:class:`FakeVision` / :class:`FakeOCR` /
+    :class:`FakeClipboard` / :class:`FakeScreen`) so the perception surface boots
+    with zero heavy libraries (opencv/ultralytics, pytesseract/pillow, pyperclip,
+    mss are all kept OUT of the uv lock). The real adapters are constructed only
+    lazily/when explicitly configured (each lazy-imports its backend and raises a
+    ``make install-perception`` hint when absent), so this default construction
+    performs no capture, clipboard access, or model load. Privacy-heavy by design:
+    the whole surface is gated behind ``enable_perception``, so this is only wired
+    onto ``app.state`` when the flag is on.
+    """
+    return PerceptionService(
+        vision=FakeVision(),
+        ocr=FakeOCR(),
+        clipboard=FakeClipboard(),
+        screen=FakeScreen(),
+    )
+
+
+def _wire_perception(app: FastAPI, settings: Settings) -> None:
+    """Stash the :class:`PerceptionService` on ``app.state`` when enabled.
+
+    The ``/perception`` routes read ``app.state.perception``; building it only
+    when ``enable_perception`` is set keeps the offline default untouched (the
+    routes self-guard on the flag and 404 when off) and — since perception can
+    READ THE SCREEN AND CLIPBOARD — never constructs the seam unless explicitly
+    asked for. The service is composed from fakes (no heavy library) by default.
+    """
+    if not settings.enable_perception:
+        return
+    app.state.perception = _build_perception_service()
+
+
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Load owner-supplied plugins into the shared registry when enabled.
 
@@ -1329,6 +1372,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_graph(app, settings, runtime)
     _wire_study(app, settings, runtime)
     _wire_system(app, settings, runtime)
+    _wire_perception(app, settings)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
     _wire_plugins(app, settings, runtime)
@@ -1476,6 +1520,12 @@ def create_app() -> FastAPI:
     # plugin surface. The plugins are loaded into the shared registry and the
     # resulting PluginInfo list is stashed on app.state only when enabled.
     app.include_router(plugins_router)
+    # Perception (Tier 2; PRIVACY-HEAVY) — always registered but self-guards on
+    # FRIDAY_ENABLE_PERCEPTION (404 when off), so the offline default exposes no
+    # perception surface. The PerceptionService (built from fakes by default) is
+    # wired onto app.state only when enabled; perception can read the screen and
+    # clipboard, so it never constructs that seam unless the flag is on.
+    app.include_router(perception_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

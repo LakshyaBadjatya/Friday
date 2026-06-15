@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     # registry. Reuses ``memory_db_path`` (no new path setting).
     enable_reminders: bool = False
 
+    # --- Meeting capture (Tier 1; default off) ---
+    # Gates the whole ``/meetings`` REST surface; off by default so the offline
+    # build exposes no meeting routes (each -> 404). When on, a meeting's audio is
+    # transcribed (FakeSTT unless voice is configured), summarized by one
+    # NON-FATAL LLM pass (any error -> transcript-only notes), optionally ingested
+    # into the shared vector store (so the meeting is answerable via Knowledge),
+    # and persisted in a sibling SQLite file alongside ``memory_db_path``.
+    enable_meetings: bool = False
+
     # --- Scheduled triggers (Tier 1; default off) ---
     # Gates the whole ``/schedules`` REST surface *and* the background tick loop;
     # off by default so the offline build exposes no scheduler routes (each ->

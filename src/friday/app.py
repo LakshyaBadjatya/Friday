@@ -46,6 +46,7 @@ from friday.api.routes_admin import router as admin_router
 from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
+from friday.api.routes_meetings import router as meetings_router
 from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
 from friday.api.routes_rag import router as rag_router
@@ -59,7 +60,10 @@ from friday.briefing.service import BriefingService
 from friday.config import Settings, get_settings
 from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
 from friday.core.orchestrator import Orchestrator
+from friday.errors import ProviderError
 from friday.logging import configure_logging, get_logger
+from friday.meetings.capture import MeetingCapture
+from friday.meetings.store import SQLiteMeetingStore
 from friday.memory.long_term import SQLiteLongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import SQLiteVectorStore
@@ -268,6 +272,87 @@ def _build_protocol_store(settings: Settings) -> SQLiteProtocolStore:
         proto_path = str(base.with_suffix(base.suffix + ".proto"))
         base.parent.mkdir(parents=True, exist_ok=True)
     return SQLiteProtocolStore(proto_path)
+
+
+def _build_meeting_store(settings: Settings) -> SQLiteMeetingStore:
+    """Build the local-first SQLite meeting store alongside the long-term DB.
+
+    Reuses ``memory_db_path``: the meeting notes live in a sibling file
+    (``*.meet.db``) next to the long-term database so they share the gitignored
+    ``data/`` directory; ``":memory:"`` stays ephemeral. Action items are
+    persisted as JSON in the store; the store is connection-per-call for file
+    paths (thread-safe).
+    """
+    db_path = settings.memory_db_path
+    if db_path == ":memory:":
+        meet_path = ":memory:"
+    else:
+        base = Path(db_path)
+        meet_path = str(base.with_suffix(base.suffix + ".meet"))
+        base.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteMeetingStore(meet_path)
+
+
+def _build_rag_ingestor(
+    settings: Settings, vector: SQLiteVectorStore, long_term: SQLiteLongTermStore
+) -> DocumentIngestor | None:
+    """Build the shared :class:`DocumentIngestor`, or ``None`` when RAG is off.
+
+    The ingestor reuses the *shared* runtime stores — the same persistent vector
+    store the Knowledge agent retrieves from and the same long-term store — so an
+    ingested document (a RAG upload or a meeting transcript) is immediately
+    answerable via the existing knowledge path with citations. Built only when
+    ``enable_rag`` is set, so the offline default constructs no write seam; the
+    one instance is shared by both the ``/rag`` routes and meeting capture.
+    """
+    if not settings.enable_rag:
+        return None
+    return DocumentIngestor(
+        vector,
+        long_term,
+        chunk_size=settings.rag_chunk_size,
+        chunk_overlap=settings.rag_chunk_overlap,
+    )
+
+
+def _build_meeting_stt(settings: Settings) -> STTProvider:
+    """Select the STT provider for meeting capture (safe to call eagerly).
+
+    Offline (``fake`` LLM) -> :class:`FakeSTT` (tests / no credentials). With a
+    real LLM the real :class:`FasterWhisperSTT` is preferred, but its construction
+    (which lazy-imports the optional ``faster-whisper`` voice extra) is wrapped:
+    if the extra is missing the runtime degrades to :class:`FakeSTT` rather than
+    failing startup, so the offline build (and a real-LLM build without the voice
+    extra) still boots. The ``/meetings`` route self-guards on the flag, so this
+    only affects whether a real transcript is produced once meetings are enabled.
+    """
+    if settings.llm_provider == "fake":
+        return FakeSTT()
+    try:
+        return FasterWhisperSTT()
+    except ProviderError:
+        logger.info(
+            "faster-whisper not installed; meeting capture uses FakeSTT "
+            "(install voice extras for real transcription)"
+        )
+        return FakeSTT()
+
+
+def _build_meeting_capture(
+    settings: Settings,
+    llm: LLMProvider,
+    ingestor: DocumentIngestor | None,
+) -> MeetingCapture:
+    """Assemble the :class:`MeetingCapture` pipeline over the shared providers.
+
+    Drives the meeting STT provider (:func:`_build_meeting_stt` — ``FakeSTT``
+    offline / without the voice extra, real Whisper otherwise) and the live LLM
+    (the same one the chat loop uses) for the one non-fatal summary pass. The RAG
+    ingestor is passed through when available (RAG enabled) so a captured
+    transcript is also indexed for retrieval; otherwise capture still works, just
+    without indexing. Construction performs no network I/O.
+    """
+    return MeetingCapture(_build_meeting_stt(settings), llm, ingestor=ingestor)
 
 
 def _registered_tool_names(registry: ToolRegistry) -> frozenset[str]:
@@ -572,6 +657,16 @@ class AppRuntime:
     #: The protocol runner over the shared registry; its ``allowed_tools`` is the
     #: set of registered tool names, so a protocol runs only registered tools.
     protocol_runner: ProtocolRunner
+    #: The shared RAG document ingestor, or ``None`` when RAG is disabled. The same
+    #: instance the ``/rag`` routes and meeting capture write through, so an
+    #: ingested doc or meeting transcript is answerable via the Knowledge path.
+    rag_ingestor: DocumentIngestor | None
+    #: The shared meeting-notes store — the same one the ``/meetings`` routes
+    #: read/write.
+    meeting_store: SQLiteMeetingStore
+    #: The shared meeting-capture pipeline (shared STT + live LLM + the RAG
+    #: ingestor if available); the ``/meetings/capture`` route drives it.
+    meeting_capture: MeetingCapture
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -604,6 +699,9 @@ def build_runtime(settings: Settings) -> AppRuntime:
     )
     protocol_store = _build_protocol_store(settings)
     protocol_runner = _build_protocol_runner(registry)
+    rag_ingestor = _build_rag_ingestor(settings, vector, long_term)
+    meeting_store = _build_meeting_store(settings)
+    meeting_capture = _build_meeting_capture(settings, llm, rag_ingestor)
     critic = _build_critic(llm)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
@@ -637,6 +735,9 @@ def build_runtime(settings: Settings) -> AppRuntime:
         briefing=briefing,
         protocol_store=protocol_store,
         protocol_runner=protocol_runner,
+        rag_ingestor=rag_ingestor,
+        meeting_store=meeting_store,
+        meeting_capture=meeting_capture,
     )
 
 
@@ -745,14 +846,9 @@ def _wire_rag(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     default untouched (the ``/rag`` routes self-guard on the flag and 404 when
     off). No retrieval logic is duplicated; this only adds the write/forget seam.
     """
-    if not settings.enable_rag:
+    if not settings.enable_rag or runtime.rag_ingestor is None:
         return
-    app.state.rag_ingestor = DocumentIngestor(
-        runtime.vector,
-        runtime.long_term,
-        chunk_size=settings.rag_chunk_size,
-        chunk_overlap=settings.rag_chunk_overlap,
-    )
+    app.state.rag_ingestor = runtime.rag_ingestor
 
 
 def _wire_reminders(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
@@ -818,6 +914,21 @@ def _wire_protocols(app: FastAPI, settings: Settings, runtime: AppRuntime) -> No
     app.state.protocol_runner = runtime.protocol_runner
 
 
+def _wire_meetings(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared meeting capture + store on ``app.state`` when enabled.
+
+    The ``/meetings`` routes read ``app.state.meeting_capture`` (the shared
+    pipeline over the shared STT + live LLM + the RAG ingestor when available) and
+    ``app.state.meeting_store`` (the shared SQLite notes store). Building it only
+    when ``enable_meetings`` is set keeps the offline default untouched (the routes
+    self-guard on the flag and 404 when off).
+    """
+    if not settings.enable_meetings:
+        return
+    app.state.meeting_capture = runtime.meeting_capture
+    app.state.meeting_store = runtime.meeting_store
+
+
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Load owner-supplied plugins into the shared registry when enabled.
 
@@ -870,6 +981,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_scheduler(app, settings, runtime)
     _wire_briefing(app, settings, runtime)
     _wire_protocols(app, settings, runtime)
+    _wire_meetings(app, settings, runtime)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
     _wire_plugins(app, settings, runtime)
@@ -986,6 +1098,11 @@ def create_app() -> FastAPI:
     # protocol surface. The shared protocol store + runner are wired onto
     # app.state only when enabled.
     app.include_router(protocols_router)
+    # Meeting capture (Tier 1) — always registered but self-guards on
+    # FRIDAY_ENABLE_MEETINGS (404 when off), so the offline default exposes no
+    # meeting surface. The shared meeting capture pipeline + notes store are wired
+    # onto app.state only when enabled.
+    app.include_router(meetings_router)
     # Plugins / extensions (Tier 2) — always registered but self-guards on
     # FRIDAY_ENABLE_PLUGINS (404 when off), so the offline default exposes no
     # plugin surface. The plugins are loaded into the shared registry and the

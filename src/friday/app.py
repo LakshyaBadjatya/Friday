@@ -49,6 +49,7 @@ from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
 from friday.api.routes_meetings import router as meetings_router
+from friday.api.routes_n8n import router as n8n_router
 from friday.api.routes_perception import router as perception_router
 from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
@@ -76,6 +77,9 @@ from friday.meetings.store import SQLiteMeetingStore
 from friday.memory.long_term import SQLiteLongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import SQLiteVectorStore
+from friday.n8n.client import N8nClient
+from friday.n8n.drafter import WorkflowDrafter
+from friday.n8n.service import N8nService
 from friday.observability.audit import AuditLog
 from friday.observability.metrics import Metrics
 from friday.observability.tracing import Tracer
@@ -549,6 +553,42 @@ def _build_critic(llm: LLMProvider) -> SelfCritic:
     return SelfCritic(llm, persona_markers=list(DEFAULT_PERSONA_MARKERS))
 
 
+def _build_n8n_service(settings: Settings, llm: LLMProvider) -> N8nService:
+    """Assemble the :class:`N8nService` over the live LLM + an n8n REST client.
+
+    The client targets ``n8n_base_url`` with the (optional) ``n8n_api_key`` (a
+    :class:`~pydantic.SecretStr` whose value is unwrapped only here, into the
+    client's ``X-N8N-API-KEY`` header — never logged). The drafter drives the
+    *same* live LLM the chat loop uses for one NON-FATAL draft pass. The docker
+    auto-start argv is built from the compose file + service name
+    (``docker compose -f <file> up -d <service>``) and spawned argv-only by the
+    service behind the confirm-step. Always constructed (uniform wiring); the
+    ``/n8n`` route and orchestrator hook only become reachable when
+    ``enable_n8n`` is on. Construction performs no network I/O (the ``httpx``
+    client is created per-call inside :class:`N8nClient`).
+    """
+    api_key = (
+        settings.n8n_api_key.get_secret_value()
+        if settings.n8n_api_key is not None
+        else None
+    )
+    client = N8nClient(
+        settings.n8n_base_url,
+        api_key,
+        timeout=settings.llm_timeout_seconds,
+    )
+    start_cmd = [
+        "docker",
+        "compose",
+        "-f",
+        settings.n8n_docker_compose_file,
+        "up",
+        "-d",
+        settings.n8n_docker_service,
+    ]
+    return N8nService(client, WorkflowDrafter(llm), start_cmd=start_cmd)
+
+
 def _make_due_reminders_action(
     reminder_store: SQLiteReminderStore, notify: NotifyTool
 ) -> Callable[[Trigger], Awaitable[None]]:
@@ -935,6 +975,10 @@ class AppRuntime:
     #: same one the ``/system`` routes read and the scheduler ``system_check``
     #: action samples; its thresholds come from settings.
     system_monitor: SystemMonitor
+    #: The shared n8n service (REST client + LLM drafter + docker auto-start) — the
+    #: same one the ``/n8n`` routes drive and the orchestrator's "make a workflow
+    #: on n8n" hook reaches; only reachable when ``enable_n8n`` is on.
+    n8n_service: N8nService
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -987,6 +1031,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
     graph_extractor = EntityExtractor(llm)
     study_store = _build_study_store(settings)
     critic = _build_critic(llm)
+    n8n_service = _build_n8n_service(settings, llm)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
         llm=llm,
@@ -1001,6 +1046,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         protocol_store=protocol_store,
         protocol_runner=protocol_runner,
         critic=critic,
+        n8n_service=n8n_service,
     )
     return AppRuntime(
         orchestrator=orchestrator,
@@ -1028,6 +1074,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         graph_extractor=graph_extractor,
         study_store=study_store,
         system_monitor=system_monitor,
+        n8n_service=n8n_service,
     )
 
 
@@ -1280,6 +1327,21 @@ def _wire_system(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     app.state.system_monitor = runtime.system_monitor
 
 
+def _wire_n8n(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash the shared n8n service on ``app.state`` when n8n is enabled.
+
+    The ``/n8n`` routes read ``app.state.n8n_service`` — the *same*
+    :class:`~friday.n8n.service.N8nService` the orchestrator's "make a workflow on
+    n8n" hook reaches — so an HTTP-driven draft and a spoken request operate on one
+    service (one REST client + drafter + docker auto-start). Building it only when
+    ``enable_n8n`` is set keeps the offline default untouched (the routes
+    self-guard on the flag and 404 when off).
+    """
+    if not settings.enable_n8n:
+        return
+    app.state.n8n_service = runtime.n8n_service
+
+
 def _build_perception_service() -> PerceptionService:
     """Assemble the :class:`PerceptionService` from the offline fakes.
 
@@ -1372,6 +1434,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_graph(app, settings, runtime)
     _wire_study(app, settings, runtime)
     _wire_system(app, settings, runtime)
+    _wire_n8n(app, settings, runtime)
     _wire_perception(app, settings)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
@@ -1526,6 +1589,11 @@ def create_app() -> FastAPI:
     # wired onto app.state only when enabled; perception can read the screen and
     # clipboard, so it never constructs that seam unless the flag is on.
     app.include_router(perception_router)
+    # n8n integration (Tier 2) — always registered but self-guards on
+    # FRIDAY_ENABLE_N8N (404 when off), so the offline default exposes no n8n
+    # surface. The shared N8nService (REST client + LLM drafter + docker
+    # auto-start) is wired onto app.state only when enabled.
+    app.include_router(n8n_router)
 
     # Build the runtime eagerly too so a TestClient that does not trigger the
     # lifespan (or any direct create_app() user) still has a working app. The

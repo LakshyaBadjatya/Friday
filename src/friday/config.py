@@ -122,6 +122,24 @@ class Settings(BaseSettings):
     # the comma-splitting ``field_validator`` below receives the plain string.
     device_allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
+    # --- Gateway hardening (Phase 6) ---
+    # When true, every route except ``/health`` requires an ``Authorization:
+    # Bearer <key>`` header whose key is in ``api_keys``; missing/invalid -> 401.
+    # Default off keeps the local-first gateway open (no credentials needed).
+    require_auth: bool = False
+    # Accepted bearer keys. Read from ``FRIDAY_API_KEYS`` as a comma-separated
+    # string (e.g. ``key1,key2``) and split into a list (same ``NoDecode`` +
+    # before-validator pattern as ``device_allowlist``); empty means no key is
+    # accepted (so ``require_auth`` with no keys rejects everything).
+    api_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Fixed-window rate limit per client (bearer key if present, else client IP):
+    # at most ``rate_limit_requests`` requests per ``rate_limit_window_seconds``;
+    # over the limit -> 429 with ``Retry-After``. ``/health`` is exempt. Toggle
+    # the whole gate off via ``rate_limit_enabled``.
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = 60
+    rate_limit_window_seconds: float = 60.0
+
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +
     # rate-limit). Time is injected at the call site, never read from the clock
@@ -142,6 +160,20 @@ class Settings(BaseSettings):
         we accept a plain comma-separated string (whitespace-trimmed, empties
         dropped) so ``"a, b ,c"`` -> ``["a", "b", "c"]`` and ``""`` -> ``[]``.
         A value that is already a list/tuple is passed through unchanged.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("api_keys", mode="before")
+    @classmethod
+    def _split_api_keys(cls, value: object) -> object:
+        """Comma-split a raw ``FRIDAY_API_KEYS`` string into a list of keys.
+
+        Mirrors :meth:`_split_device_allowlist`: a plain comma-separated string
+        (whitespace-trimmed, empties dropped) so ``"k1, k2 ,k3"`` ->
+        ``["k1", "k2", "k3"]`` and ``""`` -> ``[]``; a value that is already a
+        list/tuple is passed through unchanged.
         """
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]

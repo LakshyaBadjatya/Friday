@@ -210,10 +210,50 @@ mic is unavailable the Studio shows a friendly note and never hard-crashes.
 | `make lint`         | `uv run ruff check src tests`                                       |
 | `make type`         | `uv run mypy` (`--strict`) over `src`                              |
 | `make run`          | Serve the app via uvicorn with `--reload`                           |
+| `make docker-build` | `docker build -t friday .` — build the container image              |
+| `make docker-up`    | `docker compose up -d` — start the local container stack            |
+| `make docker-down`  | `docker compose down` — stop the stack (the data volume is kept)    |
 | `make gate-0`       | Lint + types + unit tests — the Phase 0 foundation gate             |
 | `make gate-1`       | Lint + types + the full suite — the Phase 1 core-loop gate          |
 | `make gate-3`       | Lint + types + the full suite — the Phase 3 voice gate              |
 | `make gate-5`       | Lint + types + the full suite — the Phase 5 dashboard + observability gate |
+| `make gate-6`       | Lint + types + the full suite — the Phase 6 hardening + container gate |
+
+## Deployment
+
+FRIDAY is **local-first**: the default deployment is a single container running the
+FastAPI app against a SQLite database on a persistent named volume. No cloud account
+and no external database are required. Full details and verification steps live in
+[`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+```bash
+cp .env.example .env     # then edit: provider, keys, flags (see below)
+make docker-build        # docker build -t friday .
+make docker-up           # docker compose up -d
+curl -s http://localhost:8000/health
+make docker-down         # docker compose down (the friday-data volume is preserved)
+```
+
+The image is multi-stage and uv-based on `python:3.12-slim` (3.12 is the safe
+container base; local dev is on 3.14), installs production deps from the committed
+`uv.lock`, runs as a **non-root** user, exposes `8000`, and serves
+`uvicorn friday.app:create_app --factory`. **No secrets are baked in** — `.env` is
+excluded by `.dockerignore` and supplied at run time via compose's `env_file`. The
+SQLite db persists in the named volume `friday-data` mounted at `/app/data`, and the
+compose healthcheck probes `/health` (which is exempt from both auth and
+rate-limiting). A commented-out `postgres`/pgvector service documents the future
+durable-memory swap; the local-first default stays single-service.
+
+> **Honest note (binding):** `docker build` / `docker compose up` were **not**
+> executed or verified in the environment that produced these files — **Docker is
+> not installed there.** The `Dockerfile`/`docker-compose.yml`/`.dockerignore` were
+> written and syntactically validated only (compose parsed with PyYAML). Verify the
+> build and runtime on a host that has Docker; the steps are in `docs/DEPLOY.md`.
+
+**Cloud (deferred, per spec §15):** a hosted deployment is a *later* target with
+**no Terraform/Pulumi, no multi-cloud, no Kubernetes**. When it's needed, ship this
+same image to a **single** managed container runtime — Cloud Run / ECS-Fargate /
+Azure Container Apps — choosing one, not all. Prove the loops locally first.
 
 ## What's built vs. deferred
 
@@ -237,9 +277,11 @@ mic is unavailable the Studio shows a friendly note and never hard-crashes.
 - The other specialist agents — only the conversation and minimal research paths are wired;
   `agents/base.py` is the protocol the rest will implement.
 - Security lockdown / hardening.
-- Durable memory (Postgres + vector store) — today's memory is in-process and session-scoped.
-- A dashboard / UI.
-- Docker packaging.
+- Durable memory on Postgres + pgvector — documented as the future swap (a
+  commented-out `postgres` service in `docker-compose.yml`); the local-first default
+  uses the SQLite volume.
+- A hosted **cloud** deployment — deferred to a single managed container runtime
+  later (no Terraform/multi-cloud/Kubernetes); see the Deployment section.
 
 ## Project layout
 

@@ -39,6 +39,7 @@ from friday.agents.automation import AutomationAgent
 from friday.agents.base import AgentRegistry
 from friday.agents.device import DeviceAgent
 from friday.agents.knowledge import KnowledgeAgent
+from friday.api.middleware import AuthMiddleware, RateLimitMiddleware
 from friday.api.routes_admin import router as admin_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_health import router as health_router
@@ -455,6 +456,22 @@ def create_app() -> FastAPI:
         logger.info("FRIDAY shutting down")
 
     app = FastAPI(title="FRIDAY", version="0.1.0", lifespan=lifespan)
+
+    # Gateway hardening (Phase 6). ``add_middleware`` is LIFO, so the *last*
+    # registered runs *outermost* (first per request). We add rate-limit first
+    # and auth second, so the request order is: AuthMiddleware -> then
+    # RateLimitMiddleware -> then the route. Rationale: reject an unauthenticated
+    # caller (401) before it can consume a rate-limit slot, so a bad token can't
+    # exhaust a client's budget. Both gates self-exempt ``/health`` and self-
+    # disable via settings (``require_auth`` / ``rate_limit_enabled``), keeping
+    # the local-first default open. The rate-limit clock is injectable via
+    # ``app.state.rate_limit_clock`` (default ``time.monotonic``) so rate-limit
+    # tests advance "now" deterministically without the wall clock.
+    gateway_settings = get_settings()
+    app.state.rate_limit_clock = time.monotonic
+    app.add_middleware(RateLimitMiddleware, settings=gateway_settings)
+    app.add_middleware(AuthMiddleware, settings=gateway_settings)
+
     app.include_router(chat_router)
     app.include_router(health_router)
     # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE

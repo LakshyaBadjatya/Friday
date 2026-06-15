@@ -1,0 +1,16 @@
+# Optional voice deps — install via: make install-voice
+#
+# These heavy backends are deliberately kept OUT of pyproject.toml / the uv lock
+# so `uv sync` and the CI gate stay fast and dependency-light on machines without
+# voice hardware. The real adapters lazy-import each library inside their
+# methods/__init__ and raise a clear error (with this install hint) when it is
+# missing, so the package imports and the test suite run green without them.
+#
+# Install into the project venv with:
+#     make install-voice            # uv pip install -r requirements-voice.txt
+#
+# Live voice also needs a working microphone (sounddevice / PortAudio).
+faster-whisper
+openwakeword
+piper-tts
+sounddevice

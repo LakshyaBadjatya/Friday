@@ -47,6 +47,7 @@ from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_comms import router as comms_router
 from friday.api.routes_email import router as email_router
+from friday.api.routes_ensemble import router as ensemble_router
 from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
@@ -54,6 +55,7 @@ from friday.api.routes_meetings import router as meetings_router
 from friday.api.routes_models import router as models_router
 from friday.api.routes_n8n import router as n8n_router
 from friday.api.routes_perception import router as perception_router
+from friday.api.routes_planner import router as planner_router
 from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
 from friday.api.routes_rag import router as rag_router
@@ -71,7 +73,9 @@ from friday.broker import Broker, HashChainedAudit
 from friday.config import Settings, get_settings
 from friday.core.confidence import ConfidenceScorer
 from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
+from friday.core.ensemble import Ensemble
 from friday.core.orchestrator import ForgettableVectorStore, Orchestrator
+from friday.core.planner import Planner
 from friday.desktop import AuditedDesktop, DesktopAction, FakeDesktop
 from friday.errors import ProviderError
 from friday.family import router as family_router
@@ -1941,6 +1945,29 @@ def _wire_studio(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     app.state.studio = _build_studio_service(settings, llm)
 
 
+def _wire_ensemble(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
+    """Stash an :class:`Ensemble` on ``app.state`` when ensemble/debate is enabled.
+
+    The ``/ensemble`` route reads ``app.state.ensemble`` and 404s when absent. Built
+    over the same LLM the chat loop uses; off by default so the offline build
+    constructs no debate seam.
+    """
+    if not settings.enable_ensemble:
+        return
+    app.state.ensemble = Ensemble(llm)
+
+
+def _wire_planner(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
+    """Stash a :class:`Planner` on ``app.state`` when the planner is enabled.
+
+    The ``/planner`` route reads ``app.state.planner`` and 404s when absent. Built
+    over the same LLM; off by default so the offline build constructs no planner.
+    """
+    if not settings.enable_planner:
+        return
+    app.state.planner = Planner(llm)
+
+
 def _wire_rag(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Stash a :class:`DocumentIngestor` on ``app.state`` when RAG is enabled.
 
@@ -2213,6 +2240,8 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.gateway = runtime.gateway
     app.state.model_catalog = runtime.model_catalog
     _wire_studio(app, settings, runtime.llm)
+    _wire_ensemble(app, settings, runtime.llm)
+    _wire_planner(app, settings, runtime.llm)
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
     _wire_scheduler(app, settings, runtime)
@@ -2312,6 +2341,8 @@ def create_app() -> FastAPI:
     # FRIDAY_LLM_PROVIDER == "gateway"); with no gateway every /models route is
     # 404, so the offline fake build exposes no model surface.
     app.include_router(models_router)
+    app.include_router(ensemble_router)
+    app.include_router(planner_router)
     # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE
     # (404 / socket refusal when off), so the offline default exposes no voice UX.
     app.include_router(voice_router)

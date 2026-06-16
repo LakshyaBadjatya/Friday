@@ -615,6 +615,16 @@ class Settings(BaseSettings):
     rate_limit_requests: int = 60
     rate_limit_window_seconds: float = 60.0
 
+    # --- Multi-agent Brain (Wave 1; default off) ---
+    # Gates the ensemble/debate surface (``POST /ensemble/debate``): several named
+    # operators each draft an answer and one synthesis pass fuses them. Off by
+    # default so the route 404s; when on it drives the same LLM the chat loop uses.
+    enable_ensemble: bool = False
+    # Gates the planner surface (``POST /planner/plan``): decompose a goal into a
+    # DAG of steps and render it for confirmation (planning only — execution stays
+    # a separate, broker-gated action). Off by default so the route 404s.
+    enable_planner: bool = False
+
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +
     # rate-limit). Time is injected at the call site, never read from the clock

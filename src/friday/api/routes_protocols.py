@@ -25,6 +25,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from friday.logging import get_logger
+from friday.observability.audit import AuditLog
+from friday.protocols.learn import has_redacted_args, learn_protocol
 from friday.protocols.runner import ProtocolRunner
 from friday.protocols.store import ProtocolStep, SQLiteProtocolStore
 
@@ -39,6 +41,15 @@ class CreateProtocolRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     trigger_phrase: str = Field(min_length=1, max_length=400)
     steps: list[ProtocolStep] = Field(default_factory=list)
+
+
+class LearnProtocolRequest(BaseModel):
+    """JSON body for ``POST /protocols/learn`` — learn a macro from recent actions."""
+
+    name: str = Field(min_length=1, max_length=200)
+    trigger_phrase: str = Field(min_length=1, max_length=400)
+    only_successful: bool = True
+    include_tools: list[str] = Field(default_factory=list)
 
 
 class RunProtocolRequest(BaseModel):
@@ -95,6 +106,54 @@ async def create_protocol(request: Request) -> JSONResponse:
         steps=body.steps,
     )
     return JSONResponse(status_code=200, content=protocol.model_dump())
+
+
+@router.post("/protocols/learn", response_model=None)
+async def learn_protocol_route(request: Request) -> JSONResponse:
+    """Learn a draft (disabled) protocol from the recent tool-call audit.
+
+    Folds the recent audited tool-calls into a named protocol via
+    :func:`~friday.protocols.learn.learn_protocol` and persists it DISABLED, so the
+    owner reviews (and any redacted secret arg is filled in) before it can fire.
+    404 when protocols are off; 400 when there is nothing to learn from.
+    """
+    if not _protocols_enabled(request):
+        return _disabled()
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse(status_code=422, content={"detail": "expected a JSON body"})
+    try:
+        body = LearnProtocolRequest.model_validate(raw)
+    except ValidationError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    audit = getattr(request.app.state, "audit", None)
+    calls = audit.recent() if isinstance(audit, AuditLog) else []
+    try:
+        draft = learn_protocol(
+            body.name,
+            body.trigger_phrase,
+            calls,
+            only_successful=body.only_successful,
+            include_tools=body.include_tools or None,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    saved = _get_store(request).add(
+        name=draft.name,
+        trigger_phrase=draft.trigger_phrase,
+        steps=draft.steps,
+        enabled=False,
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "protocol": saved.model_dump(),
+            "has_redacted_args": has_redacted_args(saved),
+        },
+    )
 
 
 @router.get("/protocols", response_model=None)

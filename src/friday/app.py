@@ -2256,6 +2256,9 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.registry = runtime.registry
     app.state.short_term = runtime.short_term
     app.state.long_term = runtime.long_term
+    # The in-memory tool-call audit log, exposed so the /protocols/learn route can
+    # fold recent tool-calls into a draft macro.
+    app.state.audit = runtime.audit
     app.state.flag_overrides = runtime.flag_overrides
     # Security spine: the hash-chained ledger (read back by GET /admin/audit/verify)
     # and the action broker. The ledger is the tamper-evident system-of-record the

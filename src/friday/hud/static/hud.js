@@ -1654,6 +1654,107 @@
     }
   }
 
+  // ==========================================================================
+  // VOICE — wake/summon: reveal the cockpit + speak each operator's own voice.
+  // ==========================================================================
+  var VOICE_STYLES = {
+    FRIDAY: { pitch: 1.15, rate: 1.02, hint: "female" },
+    EDITH: { pitch: 0.9, rate: 1.08, hint: "female" },
+    ORACLE: { pitch: 1.0, rate: 0.92, hint: "female" },
+    GECKO: { pitch: 0.7, rate: 1.0, hint: "male" },
+    KAREN: { pitch: 1.3, rate: 1.12, hint: "female" },
+    VERONICA: { pitch: 1.08, rate: 1.05, hint: "female" },
+    JOCASTA: { pitch: 0.95, rate: 0.88, hint: "female" },
+    VISION: { pitch: 0.85, rate: 0.98, hint: "male" },
+    FORGE: { pitch: 0.62, rate: 1.0, hint: "male" },
+  };
+  var WAKE_OPS = Object.keys(VOICE_STYLES);
+
+  function pickVoice(hint) {
+    var synth = window.speechSynthesis;
+    if (!synth) return null;
+    var voices = synth.getVoices() || [];
+    var h = (hint || "").toLowerCase();
+    for (var i = 0; i < voices.length; i++) {
+      if (h && voices[i].name.toLowerCase().indexOf(h) !== -1) return voices[i];
+    }
+    return null;
+  }
+
+  function speak(text, operator) {
+    var synth = window.speechSynthesis;
+    if (!synth || !text) return;
+    var style =
+      VOICE_STYLES[(operator || "FRIDAY").toUpperCase()] ||
+      { pitch: 1, rate: 1, hint: "" };
+    var u = new SpeechSynthesisUtterance(text);
+    u.pitch = style.pitch;
+    u.rate = style.rate;
+    var v = pickVoice(style.hint);
+    if (v) u.voice = v;
+    synth.cancel();
+    synth.speak(u);
+  }
+
+  // Client-side mirror of friday.voice.wake.parse_wake_command (push-to-talk path).
+  function parseWake(text) {
+    var t = (text || "").trim().toLowerCase();
+    if (!t) return null;
+    var sum = t.match(
+      /\bfrid?ay\s*,?\s+(?:summon|spawn|call|get|bring up|wake)\s+([a-z]+)\b/
+    );
+    if (sum) {
+      var name = sum[1].toUpperCase();
+      if (WAKE_OPS.indexOf(name) !== -1) {
+        return { type: "summon", operator: name, greeting: name + " here, Boss." };
+      }
+      return null;
+    }
+    if (/\b(?:hey|hi|ok|okay)\s*,?\s+frid?ay\b/.test(t)) {
+      return { type: "wake", operator: "FRIDAY", greeting: "I'm up, Boss." };
+    }
+    return null;
+  }
+
+  // React to a wake/summon: reveal the cockpit, address the operator, speak.
+  function handleWake(evt) {
+    if (!evt || !evt.type || evt.type === "none") return;
+    showView("command");
+    if (evt.type === "summon" && evt.operator) {
+      setAddress(evt.operator);
+      toast("Summoned " + evt.operator);
+    }
+    speak(evt.greeting || "I'm up, Boss.", evt.operator || "FRIDAY");
+    logLine("wake: " + (evt.operator || "FRIDAY") + " — " + (evt.greeting || ""), "ok");
+  }
+
+  function wakeWsUrl() {
+    var base = resolveApiBase();
+    if (base && /^https?:/.test(base)) return base.replace(/^http/, "ws") + "/ws/wake";
+    var scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return scheme + "//" + window.location.host + "/ws/wake";
+  }
+
+  // Server-side always-on path: react to wake/summon events pushed over /ws/wake
+  // (a server STT runner feeds the wake engine). Inert when the wake word is off
+  // (the socket is refused) — the browser push-to-talk path still works.
+  function connectWake() {
+    if (!("WebSocket" in window)) return;
+    var ws;
+    try {
+      ws = new WebSocket(wakeWsUrl());
+    } catch (err) {
+      return;
+    }
+    ws.addEventListener("message", function (ev) {
+      try {
+        handleWake(JSON.parse(ev.data));
+      } catch (err) {
+        /* ignore ready / non-JSON frames */
+      }
+    });
+  }
+
   function wireVoice() {
     var btn = el("btn-mic");
     if (!btn) {
@@ -1684,8 +1785,13 @@
         return;
       }
       logLine("voice: " + said);
-      showView("command");
-      submitChat(said);
+      var wake = parseWake(said);
+      if (wake) {
+        handleWake(wake);
+      } else {
+        showView("command");
+        submitChat(said);
+      }
     });
     rec.addEventListener("end", function () {
       listening = false;
@@ -2127,6 +2233,7 @@
     wireDossier();
     wireGlobe();
     wireVoice();
+    connectWake();
     wireDragDrop();
     wireReplay();
     wireBrain();

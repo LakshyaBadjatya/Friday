@@ -667,6 +667,22 @@ class Settings(BaseSettings):
     # long-term facts as an Obsidian-style Markdown note. Off by default so the
     # route 404s.
     enable_kb_export: bool = False
+    # Gates the rules-engine surface (``POST /rules/evaluate``): evaluate
+    # IFTTT-style rules against a posted event and return the fired actions. Off
+    # by default (route 404s).
+    enable_rules: bool = False
+    # Gates the watcher surfaces (``POST /watchers/conflicts`` + ``/watchers/price``):
+    # calendar-conflict detection and price-breach checks. Off by default (404s).
+    enable_watchers: bool = False
+    # Gates the secret-rotation surface (``POST /security/rotation``): report which
+    # of the posted secrets are overdue for rotation. Off by default (route 404s).
+    enable_secret_rotation: bool = False
+    # Gates the audit-anchor surface (``POST /security/anchor``): pin the ledger's
+    # current head hash out-of-band to ``audit_anchor_path``. Off by default (404s).
+    enable_audit_anchor: bool = False
+    # File the audit anchor is appended to (one JSON line per anchor) — the
+    # out-of-band tamper-evidence sink. ``data/`` is gitignored.
+    audit_anchor_path: str = "data/anchors.jsonl"
 
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +

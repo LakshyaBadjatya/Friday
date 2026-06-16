@@ -190,6 +190,7 @@ from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
 from friday.tools.weather import WeatherTool
 from friday.tools.web_search import WebSearchTool
 from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity
+from friday.voice.wake_service import WakeService
 
 # The system-automation tool names added to the Automation agent's allow-list
 # (and registered) only when ``enable_system_automation`` is set.
@@ -1975,6 +1976,20 @@ def _wire_voice(app: FastAPI, settings: Settings) -> None:
     app.state.voice_tts = _build_voice_tts(settings)
 
 
+def _wire_wake(app: FastAPI, settings: Settings) -> None:
+    """Stash the :class:`WakeService` on ``app.state`` when the wake word is enabled.
+
+    The ``/ws/wake`` socket reads ``app.state.wake_service`` to turn transcripts
+    into wake/summon events. Built over the roster operator names + the owner
+    address; off by default so the offline build wires no wake service.
+    """
+    if not settings.enable_wakeword:
+        return
+    app.state.wake_service = WakeService(
+        [p.name for p in ROSTER_PERSONAS], owner_address=settings.owner_address
+    )
+
+
 def _build_studio_hifi(settings: Settings) -> Text3DProvider | None:
     """Build the optional high-fidelity text-to-3D provider, or ``None``.
 
@@ -2422,6 +2437,7 @@ def create_app() -> FastAPI:
         _warn_if_exposed_without_auth(settings)
         _install_runtime(app, settings)
         _wire_voice(app, settings)
+        _wire_wake(app, settings)
         scheduler_task = _start_scheduler_loop(app, settings)
         try:
             yield
@@ -2581,6 +2597,7 @@ def create_app() -> FastAPI:
     _warn_if_exposed_without_auth(settings)
     _install_runtime(app, settings)
     _wire_voice(app, settings)
+    _wire_wake(app, settings)
     _mount_studio_static(app, settings)
 
     return app

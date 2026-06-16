@@ -588,6 +588,16 @@ class Settings(BaseSettings):
     # hash-chained audit). Default OFF keeps dispatch on the plain registry path,
     # so the existing default-on behaviour is unchanged until explicitly enabled.
     enable_broker: bool = False
+    # When true AND the broker is on, the broker denies any tool call whose args
+    # carry an outbound URL to a host not on ``egress_allowlist`` (fail-closed: an
+    # empty allow-list blocks all such URLs). Off by default so the broker's
+    # behaviour is unchanged until explicitly enabled.
+    enable_egress_firewall: bool = False
+    # Hosts the egress firewall permits (subdomains of a listed host included).
+    # Read from ``FRIDAY_EGRESS_ALLOWLIST`` as a comma-separated string (same
+    # ``NoDecode`` + before-validator pattern as ``device_allowlist``); empty
+    # (default) blocks every outbound URL when the firewall is on.
+    egress_allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     # --- Gateway hardening (Phase 6) ---
     # The uvicorn bind host the CLI ``serve`` default uses *and* the host the
@@ -719,6 +729,20 @@ class Settings(BaseSettings):
         Mirrors :meth:`_split_device_allowlist`: a plain comma-separated string
         (whitespace-trimmed, empties dropped) so ``"k1, k2 ,k3"`` ->
         ``["k1", "k2", "k3"]`` and ``""`` -> ``[]``; a value that is already a
+        list/tuple is passed through unchanged.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("egress_allowlist", mode="before")
+    @classmethod
+    def _split_egress_allowlist(cls, value: object) -> object:
+        """Comma-split a raw ``FRIDAY_EGRESS_ALLOWLIST`` string into a list of hosts.
+
+        Mirrors :meth:`_split_device_allowlist`: a plain comma-separated string
+        (whitespace-trimmed, empties dropped) so ``"a.com, b.com"`` ->
+        ``["a.com", "b.com"]`` and ``""`` -> ``[]``; a value that is already a
         list/tuple is passed through unchanged.
         """
         if isinstance(value, str):

@@ -30,6 +30,7 @@ module imports nothing from :mod:`friday.config` or :mod:`friday.app`.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -67,6 +68,14 @@ class _SecretProvider(Protocol):
         ...
 
 
+class _EgressPolicy(Protocol):
+    """The slice of an egress policy the broker consults for outbound URLs."""
+
+    def allows(self, target: str) -> bool:
+        """Whether an outbound ``target`` (URL or host) is permitted."""
+        ...
+
+
 class Broker:
     """Mediates tool execution with validation, gating, secrets, and auditing.
 
@@ -76,6 +85,9 @@ class Broker:
         audit: The hash-chained ledger; one record is appended per dispatch.
         secret_provider: Optional resolver for ``{{secret:NAME}}`` markers. When
             absent, markers are passed through to the tool unchanged.
+        egress_policy: Optional outbound allow-list. When wired, a dispatch whose
+            args carry an outbound URL to a non-allowed host is denied
+            (``code="egress_blocked"``) before the tool runs. Inert when absent.
     """
 
     def __init__(
@@ -84,10 +96,12 @@ class Broker:
         audit: _Audit,
         *,
         secret_provider: _SecretProvider | None = None,
+        egress_policy: _EgressPolicy | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
         self._secrets = secret_provider
+        self._egress = egress_policy
 
     async def dispatch(
         self,
@@ -160,6 +174,20 @@ class Broker:
             )
             self._record(tool_name, raw_args, result, decision, actor, channel)
             return result
+
+        # --- GATE: egress allow-list. Deny a call carrying an outbound URL whose
+        # host is not permitted, before the tool runs. Inert when no policy is
+        # wired, so the default dispatch path is unchanged. ---
+        if self._egress is not None:
+            blocked = _egress_violation(raw_args, self._egress)
+            if blocked is not None:
+                decision = "egress_blocked"
+                result = _fail(
+                    "egress_blocked",
+                    f"outbound target {blocked!r} is not on the egress allow-list",
+                )
+                self._record(tool_name, raw_args, result, decision, actor, channel)
+                return result
 
         # --- INJECT: resolve secret markers into the args the tool receives. ---
         # Audit uses the original ``raw_args`` (markers, not resolved secrets).
@@ -237,6 +265,31 @@ def _fail(code: str, message: str) -> ToolResult:
         data={},
         error=ToolError(code=code, message=message, retriable=False),
     )
+
+
+# Matches an outbound http(s) URL anywhere inside a string argument.
+_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+
+
+def _iter_strings(value: Any) -> Iterator[str]:
+    """Yield every string anywhere inside ``value`` (recursing dicts and lists)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_strings(item)
+
+
+def _egress_violation(args: dict[str, Any], policy: _EgressPolicy) -> str | None:
+    """Return the first outbound URL in ``args`` the policy blocks, or ``None``."""
+    for text in _iter_strings(args):
+        for url in _URL_PATTERN.findall(text):
+            if not policy.allows(str(url)):
+                return str(url)
+    return None
 
 
 def _scrub_value(value: Any, secrets: set[str]) -> Any:

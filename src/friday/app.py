@@ -149,6 +149,7 @@ from friday.secrets import (
     SecretVaultError,
     scan_for_plaintext_secrets,
 )
+from friday.security.egress import EgressPolicy
 from friday.studio.generator import (
     MeshyText3D,
     ProceduralGenerator,
@@ -1204,6 +1205,20 @@ def _build_audit_ledger(settings: Settings) -> HashChainedAudit:
     return HashChainedAudit(settings.audit_ledger_path)
 
 
+def _build_egress_policy(settings: Settings) -> EgressPolicy | None:
+    """Build the fail-closed egress allow-list, or ``None`` when the firewall is off.
+
+    Returns an :class:`~friday.security.egress.EgressPolicy` over
+    ``egress_allowlist`` ONLY when ``enable_egress_firewall`` is set; off by default
+    it returns ``None`` so the broker's dispatch is unchanged. The policy is pure
+    (no I/O); the broker consults it before executing a tool whose args carry an
+    outbound URL, denying a call to a host that is not on the allow-list.
+    """
+    if not settings.enable_egress_firewall:
+        return None
+    return EgressPolicy(settings.egress_allowlist)
+
+
 def _build_secret_vault(settings: Settings) -> SecretVault:
     """Construct the secret backend selected by ``secret_vault`` (lazy / safe).
 
@@ -1681,7 +1696,10 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     # dispatch when ``enable_broker`` is on — off by default, the orchestrator
     # keeps the plain registry path, so existing dispatch behaviour is unchanged.
     broker = Broker(
-        registry, hash_audit, secret_provider=_BrokerSecretAdapter(secret_vault)
+        registry,
+        hash_audit,
+        secret_provider=_BrokerSecretAdapter(secret_vault),
+        egress_policy=_build_egress_policy(settings),
     )
     # The multi-model gateway: built from whichever provider keys are set when a
     # gateway is selected (``FRIDAY_LLM_PROVIDER == "gateway"`` or an

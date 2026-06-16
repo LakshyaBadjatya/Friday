@@ -31,8 +31,16 @@ from friday.tools.dossier import DossierTool
 from friday.tools.downloads_butler import DownloadsButlerTool
 from friday.tools.infofeed import InfofeedTool
 from friday.tools.media import MediaTool
+from friday.tools.weather import WeatherTool
 
-_READ_ONLY_NAMES = ("capabilities", "ask_user", "entity_dossier", "infofeed", "browser")
+_READ_ONLY_NAMES = (
+    "capabilities",
+    "ask_user",
+    "entity_dossier",
+    "infofeed",
+    "browser",
+    "weather",
+)
 
 
 def _settings(**overrides: object) -> Settings:
@@ -56,6 +64,7 @@ def test_read_only_tools_registered_by_default() -> None:
     assert isinstance(reg.get("entity_dossier"), DossierTool)
     assert isinstance(reg.get("infofeed"), InfofeedTool)
     assert isinstance(reg.get("browser"), BrowserTool)
+    assert isinstance(reg.get("weather"), WeatherTool)
     # All read-only — no real-world action.
     for name in _READ_ONLY_NAMES:
         tool = reg.get(name)
@@ -80,11 +89,13 @@ def test_read_only_tools_added_to_agent_allow_lists() -> None:
     assert "entity_dossier" in knowledge
     assert "entity_dossier" not in analysis
 
-    # infofeed + browser -> research (analysis).
+    # infofeed + browser + weather -> research (analysis).
     assert "infofeed" in analysis
     assert "browser" in analysis
+    assert "weather" in analysis
     assert "infofeed" not in knowledge
     assert "browser" not in knowledge
+    assert "weather" not in knowledge
 
 
 async def test_capabilities_callable_via_registry() -> None:

@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     )
 
     # --- LLM provider ---
-    llm_provider: Literal["nvidia", "fake"] = "fake"
+    llm_provider: Literal[
+        "nvidia", "fake", "openrouter", "opencode", "gateway"
+    ] = "fake"
     nvidia_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("NVIDIA_API_KEY", "nvidia_api_key"),
@@ -53,7 +55,9 @@ class Settings(BaseSettings):
     # ``none`` (default) keeps the single-provider behaviour; ``gemini`` wraps
     # the primary in a fallback to Gemini's OpenAI-compatible endpoint, but only
     # when a Gemini key is present (env: ``FRIDAY_LLM_FALLBACK_PROVIDER``).
-    llm_fallback_provider: Literal["none", "gemini"] = "none"
+    llm_fallback_provider: Literal[
+        "none", "gemini", "openrouter", "opencode", "gateway"
+    ] = "none"
     # Gemini credentials/config, read from the provider-native ``GEMINI_*`` env
     # vars unprefixed (matching the OpenAI-compatible convention) via aliases.
     gemini_api_key: SecretStr | None = Field(
@@ -67,6 +71,47 @@ class Settings(BaseSettings):
     gemini_model: str = Field(
         default="gemini-2.0-flash",
         validation_alias=AliasChoices("GEMINI_MODEL", "gemini_model"),
+    )
+
+    # --- OpenRouter / OpenCode (multi-model free-tier providers) ---
+    # Both expose an OpenAI-compatible ``/chat/completions`` surface and broker
+    # many upstream models (a roster of free ones each). Keys are read from the
+    # provider-native ``OPENROUTER_API_KEY`` / ``OPENCODE_API_KEY`` env vars
+    # unprefixed (matching the NVIDIA/Gemini convention) via aliases; both are
+    # :class:`SecretStr` so they never leak into repr/str/logs.
+    openrouter_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENROUTER_API_KEY", "openrouter_api_key"),
+    )
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        validation_alias=AliasChoices("OPENROUTER_BASE_URL", "openrouter_base_url"),
+    )
+    opencode_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENCODE_API_KEY", "opencode_api_key"),
+    )
+    opencode_base_url: str = Field(
+        default="https://opencode.ai/zen/v1",
+        validation_alias=AliasChoices("OPENCODE_BASE_URL", "opencode_base_url"),
+    )
+
+    # --- Model catalog / gateway ---
+    # The active model the gateway resolves a turn to when no per-call override is
+    # given (a ``provider:model`` id from the catalog). Defaults to a fast,
+    # verified free OpenRouter model.
+    default_model_id: str = "openrouter:google/gemma-4-31b-it:free"
+    # The models the side-by-side compare fans out to. Read from
+    # ``FRIDAY_COMPARE_MODEL_IDS`` as a comma-separated string (same ``NoDecode`` +
+    # before-validator pattern as ``device_allowlist``) so each ``provider:model``
+    # id is kept whole; empty means no compare set.
+    compare_model_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "openrouter:openai/gpt-oss-20b:free",
+            "openrouter:google/gemma-4-31b-it:free",
+            "opencode:mimo-v2.5-free",
+            "nvidia:meta/llama-3.1-8b-instruct",
+        ]
     )
 
     # --- Routing ---
@@ -441,6 +486,47 @@ class Settings(BaseSettings):
     # are pure/deterministic and import no LLM SDK.
     enable_proactive: bool = False
 
+    # --- Per-turn budgeter (Wave 0; cost/latency governor; default OFF) ---
+    # Gates the per-turn cost/latency budgeter. Off by default so the turn loop
+    # keeps no spend tally and never downshifts. When on, the orchestrator caps a
+    # turn's token (and optional dollar) spend and, once a turn runs hot, can
+    # downshift the gateway's active model to a cheaper/smaller tier. The budgeter
+    # itself (:class:`~friday.models.budget.Budgeter`) is pure/offline — it reads
+    # no settings and uses no clock; ``app.py`` injects the caps below.
+    enable_budgeter: bool = False  # flag-gate the per-turn cost/latency budgeter (default OFF)
+    # Hard token ceiling per conversation turn.
+    budget_max_tokens_per_turn: int = 8000
+    # Optional dollar ceiling per turn; None = unpriced (free models).
+    budget_max_usd_per_turn: float | None = None
+    # Catalog id to switch the gateway to when over budget; empty = keep current
+    # active model (the budgeter still surfaces the signal for metrics/HUD).
+    budget_downshift_model_id: str = ""
+    # Fraction of the token cap at/beyond which ``should_downshift`` trips (0.0-1.0).
+    budget_downshift_at: float = 0.8
+
+    # --- Calibrated confidence (Wave 0; default OFF) ---
+    # Gates the calibrated confidence scorer (:mod:`friday.core.confidence`). Off
+    # by default so the orchestrator stamps no confidence and appends no caveat.
+    # When on, after a synthesized reply the orchestrator stamps
+    # ``state.scratchpad["confidence"]`` and, when the blended confidence falls
+    # below ``confidence_note_threshold``, appends a one-line honest caveat. The
+    # scorer is pure/deterministic and reads no settings itself.
+    enable_confidence: bool = False  # gate the calibrated confidence scorer; default OFF
+    # Below this blended confidence (0..1), the orchestrator may append a one-line
+    # confidence caveat to the reply.
+    confidence_note_threshold: float = 0.45
+
+    # --- Custom operators (Wave 0; roster extension; default empty) ---
+    # Extra personas merged into the always-on roster alongside the built-ins.
+    # Read from ``FRIDAY_CUSTOM_OPERATORS`` as comma-separated
+    # ``NAME|Title|tools|namespace|prompt`` entries (each entry itself contains
+    # pipes, so the before-validator below splits ONLY on commas). ``NoDecode``
+    # keeps pydantic-settings from JSON-decoding the raw env value. Empty (default)
+    # adds no extra operator, so the roster is identical to today; a custom whose
+    # name collides with a built-in is dropped (built-ins always win), and a
+    # malformed value is logged and skipped at boot (never crashing).
+    custom_operators: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
     # --- Persona ---
     owner_address: str = "Boss"
 
@@ -578,6 +664,38 @@ class Settings(BaseSettings):
         (whitespace-trimmed, empties dropped) so ``"ls, echo ,cat"`` ->
         ``["ls", "echo", "cat"]`` and ``""`` -> ``[]``; a value that is already a
         list/tuple is passed through unchanged.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("compare_model_ids", mode="before")
+    @classmethod
+    def _split_compare_model_ids(cls, value: object) -> object:
+        """Comma-split a raw ``FRIDAY_COMPARE_MODEL_IDS`` string into a list of ids.
+
+        Mirrors :meth:`_split_device_allowlist`: a plain comma-separated string of
+        ``provider:model`` ids (whitespace-trimmed, empties dropped) so
+        ``"openrouter:a:free, opencode:b"`` -> ``["openrouter:a:free",
+        "opencode:b"]`` and ``""`` -> ``[]``. Each id is kept whole (the ``:`` is
+        not split here); a value that is already a list/tuple is passed through
+        unchanged.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("custom_operators", mode="before")
+    @classmethod
+    def _split_custom_operators(cls, value: object) -> object:
+        """Comma-split a raw ``FRIDAY_CUSTOM_OPERATORS`` string into a list of entries.
+
+        Mirrors :meth:`_split_compare_model_ids`: a plain comma-separated string of
+        ``NAME|Title|tools|namespace|prompt`` entries (whitespace-trimmed, empties
+        dropped) so ``"A|..., B|..."`` -> ``["A|...", "B|..."]`` and ``""`` ->
+        ``[]``. The split is on COMMAS ONLY — each entry keeps its internal pipes,
+        so the roster parser receives whole mini-format entries. A value that is
+        already a list/tuple is passed through unchanged.
         """
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]

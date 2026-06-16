@@ -47,3 +47,7 @@ chroma/
 # Internal planning docs — kept locally, never published
 docs/
 FRIDAY-build-spec.md
+
+# Agent / local working dirs — kept locally, never published
+.claude/
+seo-deliverables/

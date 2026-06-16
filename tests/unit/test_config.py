@@ -107,3 +107,79 @@ def test_llm_fallback_provider_from_prefixed_env(monkeypatch) -> None:  # type: 
     monkeypatch.setenv("FRIDAY_LLM_FALLBACK_PROVIDER", "gemini")
     s = Settings(_env_file=None)
     assert s.llm_fallback_provider == "gemini"
+
+
+# --------------------------------------------------------------------------- #
+# OpenRouter / OpenCode + model catalog config
+# --------------------------------------------------------------------------- #
+def test_openrouter_opencode_defaults() -> None:
+    s = Settings(_env_file=None)
+    assert s.openrouter_api_key is None
+    assert s.opencode_api_key is None
+    assert s.openrouter_base_url == "https://openrouter.ai/api/v1"
+    assert s.opencode_base_url == "https://opencode.ai/zen/v1"
+
+
+def test_openrouter_key_is_secret_and_from_unprefixed_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-from-env")
+    s = Settings(_env_file=None)
+    assert isinstance(s.openrouter_api_key, SecretStr)
+    assert "sk-or-from-env" not in repr(s)
+    assert "sk-or-from-env" not in str(s)
+    assert s.openrouter_api_key.get_secret_value() == "sk-or-from-env"
+
+
+def test_opencode_key_is_secret_and_from_unprefixed_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("OPENCODE_API_KEY", "oc-from-env")
+    s = Settings(_env_file=None)
+    assert isinstance(s.opencode_api_key, SecretStr)
+    assert "oc-from-env" not in repr(s)
+    assert s.opencode_api_key.get_secret_value() == "oc-from-env"
+
+
+def test_default_model_id_default() -> None:
+    s = Settings(_env_file=None)
+    assert s.default_model_id == "openrouter:google/gemma-4-31b-it:free"
+
+
+def test_compare_model_ids_default() -> None:
+    s = Settings(_env_file=None)
+    assert s.compare_model_ids == [
+        "openrouter:openai/gpt-oss-20b:free",
+        "openrouter:google/gemma-4-31b-it:free",
+        "opencode:mimo-v2.5-free",
+        "nvidia:meta/llama-3.1-8b-instruct",
+    ]
+
+
+def test_compare_model_ids_comma_split_from_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv(
+        "FRIDAY_COMPARE_MODEL_IDS",
+        "openrouter:a:free, opencode:b , nvidia:c",
+    )
+    s = Settings(_env_file=None)
+    assert s.compare_model_ids == [
+        "openrouter:a:free",
+        "opencode:b",
+        "nvidia:c",
+    ]
+
+
+def test_compare_model_ids_empty_env_is_empty_list(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("FRIDAY_COMPARE_MODEL_IDS", "")
+    s = Settings(_env_file=None)
+    assert s.compare_model_ids == []
+
+
+def test_llm_provider_accepts_openrouter_opencode_gateway(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    for value in ("openrouter", "opencode", "gateway"):
+        monkeypatch.setenv("FRIDAY_LLM_PROVIDER", value)
+        s = Settings(_env_file=None)
+        assert s.llm_provider == value
+
+
+def test_llm_fallback_provider_accepts_new_values(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    for value in ("openrouter", "opencode", "gateway"):
+        monkeypatch.setenv("FRIDAY_LLM_FALLBACK_PROVIDER", value)
+        s = Settings(_env_file=None)
+        assert s.llm_fallback_provider == value

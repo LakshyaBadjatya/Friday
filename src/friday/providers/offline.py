@@ -45,8 +45,14 @@ class OfflineLLM(LLMProvider):
         self,
         messages: list[Message],
         tools: list[ToolSpec] | None = None,
+        *,
+        model: str | None = None,
     ) -> LLMResponse:
-        """Return the fixed offline notice without touching the network."""
+        """Return the fixed offline notice without touching the network.
+
+        ``model`` is accepted for contract parity but ignored: the offline reply
+        is deliberately fixed and never queries any model.
+        """
         return LLMResponse(text=OFFLINE_MESSAGE, tool_calls=[], usage=Usage())
 
 

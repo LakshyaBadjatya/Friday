@@ -51,6 +51,7 @@ from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
 from friday.api.routes_meetings import router as meetings_router
+from friday.api.routes_models import router as models_router
 from friday.api.routes_n8n import router as n8n_router
 from friday.api.routes_perception import router as perception_router
 from friday.api.routes_plugins import router as plugins_router
@@ -68,6 +69,7 @@ from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
 from friday.broker import Broker, HashChainedAudit
 from friday.config import Settings, get_settings
+from friday.core.confidence import ConfidenceScorer
 from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
 from friday.core.orchestrator import ForgettableVectorStore, Orchestrator
 from friday.desktop import AuditedDesktop, DesktopAction, FakeDesktop
@@ -88,6 +90,9 @@ from friday.memory.long_term import LongTermStore, SQLiteLongTermStore
 from friday.memory.pg import PgVectorStore, PostgresLongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import SQLiteVectorStore
+from friday.models.budget import Budgeter
+from friday.models.catalog import ModelCatalog
+from friday.models.gateway import ModelGateway
 from friday.n8n.client import N8nClient
 from friday.n8n.drafter import WorkflowDrafter
 from friday.n8n.service import N8nService
@@ -117,6 +122,8 @@ from friday.providers.llm import (
     GeminiProvider,
     LLMProvider,
     NvidiaNIMProvider,
+    OpenCodeProvider,
+    OpenRouterProvider,
 )
 from friday.providers.offline import select_llm
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
@@ -125,6 +132,8 @@ from friday.pwa import router as pwa_router
 from friday.rag.ingest import DocumentIngestor
 from friday.reminders.store import SQLiteReminderStore
 from friday.roster import ROSTER, RosterRegistry
+from friday.roster.custom import merge_personas, parse_custom_operators
+from friday.roster.definitions import ROSTER_PERSONAS
 from friday.scheduler.engine import Scheduler
 from friday.scheduler.store import SQLiteTriggerStore, Trigger
 from friday.secrets import (
@@ -162,6 +171,7 @@ from friday.tools.reminders import (
     ListRemindersTool,
 )
 from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
+from friday.tools.weather import WeatherTool
 from friday.tools.web_search import WebSearchTool
 from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity
 
@@ -221,6 +231,104 @@ def _build_llm(settings: Settings) -> LLMProvider:
         return primary
     logger.info("using FakeLLM provider (no network)")
     return FakeLLM(responses=[])
+
+
+# The reliable gateway fallback model id (a free-tier NVIDIA model). When a
+# primary model raises, the gateway retries this once — so a flaky free model
+# never sinks a turn.
+_GATEWAY_FALLBACK_MODEL_ID = "nvidia:meta/llama-3.1-8b-instruct"
+
+
+def _build_providers(settings: Settings) -> dict[str, LLMProvider]:
+    """Construct the per-provider LLM clients from whichever keys are set.
+
+    Builds one :class:`~friday.providers.llm.LLMProvider` per provider that has a
+    usable credential — OpenRouter / OpenCode from their own keys, NVIDIA from the
+    NVIDIA key, Gemini from the Gemini key. Provider clients are lazy (the
+    ``openai`` :class:`~openai.AsyncOpenAI` client performs no I/O at
+    construction), so this is side-effect-free. The keys are unwrapped from their
+    :class:`~pydantic.SecretStr` only here, into the provider clients — never
+    logged. Providers without a key are simply absent, so the catalog only offers
+    models the build can actually serve.
+    """
+    providers: dict[str, LLMProvider] = {}
+    if settings.openrouter_api_key is not None:
+        providers["openrouter"] = OpenRouterProvider(
+            api_key=settings.openrouter_api_key.get_secret_value(),
+            base_url=settings.openrouter_base_url,
+            timeout=settings.llm_timeout_seconds,
+        )
+    if settings.opencode_api_key is not None:
+        providers["opencode"] = OpenCodeProvider(
+            api_key=settings.opencode_api_key.get_secret_value(),
+            base_url=settings.opencode_base_url,
+            timeout=settings.llm_timeout_seconds,
+        )
+    if settings.nvidia_api_key is not None:
+        providers["nvidia"] = NvidiaNIMProvider(
+            api_key=settings.nvidia_api_key.get_secret_value(),
+            base_url=settings.nvidia_base_url,
+            model=settings.nvidia_model,
+            timeout=settings.llm_timeout_seconds,
+        )
+    if settings.gemini_api_key is not None:
+        providers["gemini"] = GeminiProvider(
+            api_key=settings.gemini_api_key.get_secret_value(),
+            base_url=settings.gemini_base_url,
+            model=settings.gemini_model,
+            timeout=settings.llm_timeout_seconds,
+        )
+    return providers
+
+
+def _use_gateway(settings: Settings, providers: dict[str, LLMProvider]) -> bool:
+    """Whether the multi-model gateway should back the orchestrator's LLM.
+
+    The gateway is selected when ``FRIDAY_LLM_PROVIDER == "gateway"`` (explicit
+    opt-in), OR — for convenience — when an OpenRouter/OpenCode key is present and
+    the provider is not the offline ``fake`` (so a build with a multi-model key
+    gets the gateway without extra config). The ``fake`` build never selects the
+    gateway, so the offline default keeps its scripted single-provider path and
+    every ``/models`` route stays ``404``.
+    """
+    if settings.llm_provider == "fake":
+        return False
+    if settings.llm_provider == "gateway":
+        return True
+    return "openrouter" in providers or "opencode" in providers
+
+
+def _build_gateway(
+    settings: Settings, providers: dict[str, LLMProvider]
+) -> tuple[ModelGateway, ModelCatalog] | None:
+    """Build the model catalog + gateway, or ``None`` when no gateway is wired.
+
+    Returns ``None`` (no gateway) on the offline ``fake`` build or when no
+    multi-model provider key is present (:func:`_use_gateway`), so the
+    single-provider/fake paths — and their tests — are untouched and ``/models``
+    routes ``404``. Otherwise a :class:`ModelCatalog` scoped to the available
+    providers is built and fronted by a :class:`ModelGateway` over the same
+    providers dict, with the configured ``default_model_id`` active and the
+    reliable NVIDIA model as the single retry fallback. Construction performs no
+    network I/O.
+    """
+    if not _use_gateway(settings, providers) or not providers:
+        return None
+    catalog = ModelCatalog(available_providers=set(providers))
+    gateway = ModelGateway(
+        providers,
+        catalog,
+        default_model_id=settings.default_model_id,
+        fallback_model_id=_GATEWAY_FALLBACK_MODEL_ID,
+    )
+    logger.info(
+        "using multi-model gateway as the LLM",
+        extra={
+            "providers": sorted(providers),
+            "active": settings.default_model_id,
+        },
+    )
+    return gateway, catalog
 
 
 def _build_embedder(settings: Settings) -> EmbeddingProvider:
@@ -1015,6 +1123,45 @@ def _build_foresight(settings: Settings) -> Foresight | None:
     return Foresight()
 
 
+def _build_budgeter(settings: Settings) -> Budgeter | None:
+    """Build the per-turn cost/latency budgeter, or ``None`` when it is off.
+
+    Returns a pure, offline :class:`~friday.models.budget.Budgeter` ONLY when
+    ``enable_budgeter`` is set; off by default it returns ``None`` so the turn loop
+    keeps no spend tally and never downshifts. When built, the caps are injected
+    here (dependency injection — the budgeter reads no settings itself): the hard
+    per-turn token ceiling, an optional dollar ceiling, and the fraction of the
+    token cap at/beyond which a downshift trips. The orchestrator records each
+    completion's usage and consults :meth:`Budgeter.should_downshift` to swap the
+    gateway's active model down a tier; the budgeter only has something to downshift
+    when a :class:`~friday.models.gateway.ModelGateway` is wired (the orchestrator
+    guards the ``set_active`` call on the gateway being present).
+    """
+    if not settings.enable_budgeter:
+        return None
+    return Budgeter(
+        max_tokens=settings.budget_max_tokens_per_turn,
+        max_usd=settings.budget_max_usd_per_turn,
+        downshift_at=settings.budget_downshift_at,
+    )
+
+
+def _build_confidence(settings: Settings) -> ConfidenceScorer | None:
+    """Build the calibrated confidence scorer, or ``None`` when it is off.
+
+    Returns a pure, deterministic :class:`~friday.core.confidence.ConfidenceScorer`
+    ONLY when ``enable_confidence`` is set; off by default it returns ``None`` so the
+    orchestrator stamps no confidence and appends no caveat (existing behaviour
+    unchanged). The scorer takes no constructor args and reads no settings — the
+    flag and ``confidence_note_threshold`` are read by the orchestrator, which
+    stamps ``state.scratchpad["confidence"]`` after a synthesized reply and appends
+    a one-line honest caveat when the blended confidence falls below the threshold.
+    """
+    if not settings.enable_confidence:
+        return None
+    return ConfidenceScorer()
+
+
 class _BrokerSecretAdapter:
     """Adapt a :class:`~friday.secrets.SecretVault` to the broker's resolver shape.
 
@@ -1207,10 +1354,13 @@ def _build_registry(
 # The read-only idea-batch tool names, by which agent they are added to. The
 # Capabilities + AskUser tools reach EVERY agent (planning + clarification are
 # universal); the dossier reaches the Knowledge agent (it stitches graph + memory);
-# infofeed + browser reach the Research (analysis) agent (read-only web reach).
+# infofeed + browser + weather reach the Research (analysis) agent (read-only web
+# reach — weather is the keyless wttr.in current-conditions lookup).
 _EXTRA_TOOLS_FOR_ALL: frozenset[str] = frozenset({"capabilities", "ask_user"})
 _EXTRA_TOOLS_FOR_KNOWLEDGE: frozenset[str] = frozenset({"entity_dossier"})
-_EXTRA_TOOLS_FOR_RESEARCH: frozenset[str] = frozenset({"infofeed", "browser"})
+_EXTRA_TOOLS_FOR_RESEARCH: frozenset[str] = frozenset(
+    {"infofeed", "browser", "weather"}
+)
 
 
 def _register_extra_tools(
@@ -1223,8 +1373,9 @@ def _register_extra_tools(
 
     Registered only when ``enable_extra_tools`` is set (default ON) — they are all
     read-only (``side_effecting=False``), so they add no real-world action, only a
-    capability map, a clarification pause, an entity dossier, an RSS/Atom read, and
-    a keyless page read. The capabilities tool reflects over the SAME shared
+    capability map, a clarification pause, an entity dossier, an RSS/Atom read, a
+    keyless page read, and a keyless current-weather lookup (wttr.in). The
+    capabilities tool reflects over the SAME shared
     registry (so its map always matches what is registered), and the dossier reads
     the shared knowledge graph + long-term store with the registered ``web_search``
     as its optional, best-effort fallback (consulted only when the local graph /
@@ -1246,6 +1397,7 @@ def _register_extra_tools(
     )
     registry.register(cast(Tool, InfofeedTool()))
     registry.register(cast(Tool, BrowserTool()))
+    registry.register(cast(Tool, WeatherTool()))
 
 
 def _register_side_effecting_extra_tools(
@@ -1270,8 +1422,9 @@ def _extend_agent_extra_tools(settings: Settings, agents: AgentRegistry) -> None
     """Add the read-only idea-batch tools to the fitting agents' allow-lists (flag ON).
 
     Mirrors :func:`_register_extra_tools`: capabilities + ask_user reach EVERY
-    registered agent; the dossier reaches the Knowledge agent; infofeed + browser
-    reach the Research (analysis) agent. Off (``enable_extra_tools`` unset) the
+    registered agent; the dossier reaches the Knowledge agent; infofeed + browser +
+    weather reach the Research (analysis) agent. Off (``enable_extra_tools`` unset)
+    the
     allow-lists are the class defaults, so the offline build is unchanged. The
     registry still enforces each allow-list, so an agent can reach only the tools
     added here.
@@ -1463,6 +1616,22 @@ class AppRuntime:
     #: The proactive, rule-based foresight engine surfaced for suggestions, or
     #: ``None`` when ``enable_proactive`` is off.
     foresight: Foresight | None
+    #: The multi-model gateway fronting the configured providers as one
+    #: :class:`~friday.providers.llm.LLMProvider`, or ``None`` on the
+    #: single-provider/fake builds. When present it IS the orchestrator's ``llm``
+    #: and backs the ``/models`` control surface (list / switch / compare).
+    gateway: ModelGateway | None
+    #: The model catalog scoped to the available providers, or ``None`` when no
+    #: gateway is wired. The ``/models`` routes list + validate ids against it.
+    model_catalog: ModelCatalog | None
+    #: The per-turn cost/latency budgeter wired into the orchestrator's turn loop,
+    #: or ``None`` when ``enable_budgeter`` is off. When present (and a gateway is
+    #: wired) a hot turn downshifts the gateway's active model.
+    budgeter: Budgeter | None
+    #: The calibrated confidence scorer wired into the orchestrator, or ``None``
+    #: when ``enable_confidence`` is off. When present the orchestrator stamps
+    #: ``scratchpad["confidence"]`` after synthesis and caveats below threshold.
+    confidence: ConfidenceScorer | None
 
 
 def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
@@ -1510,12 +1679,28 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     broker = Broker(
         registry, hash_audit, secret_provider=_BrokerSecretAdapter(secret_vault)
     )
-    # Select the live LLM, then engage strict offline mode when configured:
-    # ``select_llm`` swaps in the network-free OfflineLLM when
-    # ``enable_offline_mode`` is on, so every consumer (orchestrator, agents,
-    # briefing/journal/studio/meeting/n8n) shares one provider and no outbound
-    # LLM call is ever attempted. Off by default, ``primary`` passes through.
-    llm = select_llm(settings, _build_llm(settings))
+    # The multi-model gateway: built from whichever provider keys are set when a
+    # gateway is selected (``FRIDAY_LLM_PROVIDER == "gateway"`` or an
+    # OpenRouter/OpenCode key on a non-fake build), else ``None``. When present it
+    # IS the live LLM (a drop-in ``LLMProvider`` that resolves a turn to the active
+    # model and falls back on error); otherwise the existing single-provider /
+    # fallback / fake selection stands, exactly as before. The gateway + catalog
+    # are also surfaced for the ``/models`` control surface.
+    providers = _build_providers(settings)
+    gateway_pair = _build_gateway(settings, providers)
+    if gateway_pair is not None:
+        gateway, model_catalog = gateway_pair
+        primary_llm: LLMProvider = gateway
+    else:
+        gateway = None
+        model_catalog = None
+        primary_llm = _build_llm(settings)
+    # Then engage strict offline mode when configured: ``select_llm`` swaps in the
+    # network-free OfflineLLM when ``enable_offline_mode`` is on, so every consumer
+    # (orchestrator, agents, briefing/journal/studio/meeting/n8n) shares one
+    # provider and no outbound LLM call is ever attempted. Off by default,
+    # ``primary_llm`` (the gateway or the single provider) passes through.
+    llm = select_llm(settings, primary_llm)
     embedder = _build_embedder(settings)
     # Postgres-or-SQLite store selection (lazy; the PG adapters only import the
     # driver / validate the DSN when ``enable_postgres`` is on).
@@ -1576,7 +1761,29 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     # The persona roster (FRIDAY + eight least-privilege specialists). Always built
     # (no flag); the canonical pre-built ROSTER is reused so the registry instance
     # is shared with ``GET /roster`` and the orchestrator's address-by-name hook.
-    roster = ROSTER
+    # When ``custom_operators`` are configured, the canonical built-ins are merged
+    # with the parsed customs into a fresh registry (built-ins win any name
+    # collision). Parsing is wrapped so a malformed value never crashes boot: any
+    # error is logged and the unmodified ROSTER stands.
+    roster: RosterRegistry = ROSTER
+    if settings.custom_operators:
+        try:
+            customs = parse_custom_operators(settings.custom_operators)
+            merged = merge_personas(ROSTER_PERSONAS, customs)
+            roster = RosterRegistry(merged)
+            logger.info(
+                "merged custom operators into the roster",
+                extra={"count": len(merged) - len(ROSTER_PERSONAS)},
+            )
+        except Exception as exc:  # noqa: BLE001 - malformed config must not crash boot
+            logger.warning("skipping invalid FRIDAY_CUSTOM_OPERATORS: %s", exc)
+            roster = ROSTER
+    # The per-turn budgeter + calibrated confidence scorer (Wave 0). Each is
+    # ``None`` unless its own flag is set, so the offline default constructs
+    # neither seam. The budgeter governs gateway downshift; the confidence scorer
+    # is injected into the orchestrator, which stamps + caveats post-synthesis.
+    budgeter = _build_budgeter(settings)
+    confidence = _build_confidence(settings)
     short_term = ShortTermMemory()
     orchestrator = Orchestrator(
         llm=llm,
@@ -1593,6 +1800,10 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         critic=critic,
         n8n_service=n8n_service,
         roster=roster,
+        confidence=confidence,
+        budgeter=budgeter,
+        gateway=gateway,
+        budget_downshift_model_id=settings.budget_downshift_model_id,
     )
     return AppRuntime(
         orchestrator=orchestrator,
@@ -1628,6 +1839,10 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         owner_identity=owner_identity,
         anomaly_detector=anomaly_detector,
         foresight=foresight,
+        gateway=gateway,
+        model_catalog=model_catalog,
+        budgeter=budgeter,
+        confidence=confidence,
     )
 
 
@@ -1992,6 +2207,11 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.owner_identity = runtime.owner_identity
     app.state.anomaly_detector = runtime.anomaly_detector
     app.state.foresight = runtime.foresight
+    # The multi-model gateway + catalog back the ``/models`` control surface (and
+    # the per-turn ``model`` override in ``/chat``). Both are ``None`` on the
+    # single-provider/fake builds, so those routes self-guard to 404.
+    app.state.gateway = runtime.gateway
+    app.state.model_catalog = runtime.model_catalog
     _wire_studio(app, settings, runtime.llm)
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
@@ -2087,6 +2307,11 @@ def create_app() -> FastAPI:
 
     app.include_router(chat_router)
     app.include_router(health_router)
+    # Multi-model gateway control surface — always registered but self-guards on
+    # the presence of a gateway (built only when OpenRouter/OpenCode keys exist or
+    # FRIDAY_LLM_PROVIDER == "gateway"); with no gateway every /models route is
+    # 404, so the offline fake build exposes no model surface.
+    app.include_router(models_router)
     # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE
     # (404 / socket refusal when off), so the offline default exposes no voice UX.
     app.include_router(voice_router)

@@ -14,7 +14,11 @@ call an LLM. The rule set is intentionally small, ordered, and documented:
    ALERTING at high confidence.
 5. **Automation** phrasing (``task`` / ``schedule`` / ``remind`` / ``automate``)
    -> AUTOMATION at high confidence.
-6. **Research / analysis / compare** phrasing -> RESEARCH at high confidence.
+6. **Live-data / factual-lookup** phrasing (``weather`` / ``news`` / ``price
+   of`` / "how hot" / a time-marker + topic) -> RESEARCH at high confidence,
+   evaluated *before* the conversation rule so a conversational opener like
+   "whats the weather in kota" is overridden; then **research / analysis /
+   compare** phrasing -> RESEARCH at high confidence.
 7. **General / chit-chat / simple question** signals -> CONVERSATION at high
    confidence.
 8. Anything left genuinely ambiguous -> low confidence -> CLARIFY.
@@ -71,6 +75,68 @@ _RESEARCH_PHRASES: tuple[str, ...] = (
     "dig into",
     "deep dive",
     "what is the latest",
+)
+
+# --- Live-data / factual-lookup vocabulary (evaluated inside Rule 6) -------- #
+#
+# Strong signals that the user wants a LIVE external lookup (weather, news, a
+# price, a quote) rather than chit-chat. These route to RESEARCH (which runs a
+# tool loop) at high confidence and are checked BEFORE the conversation rule, so
+# a conversational opener like "whats the weather in kota" — whose "whats" is a
+# CONVERSATION keyword — is overridden and routed to the research agent (which can
+# call the weather tool). Each is a whole-word keyword or a multi-word phrase.
+#
+# CRITICAL: every signal here must be unambiguously a live lookup so genuine
+# chit-chat ("what's up", "whats your name", "how are you", "hello", "thanks")
+# stays CONVERSATION. The time-sensitive words ("right now"/"today"/"current"/
+# "latest"/"this week") are intentionally NOT in this set on their own — they only
+# imply a live lookup WHEN combined with a question/topic, which is handled by the
+# combined check below.
+_LIVE_DATA_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "weather",
+        "forecast",
+        "temperature",
+        "news",
+        "headlines",
+    }
+)
+_LIVE_DATA_PHRASES: tuple[str, ...] = (
+    "how hot",
+    "how cold",
+    "look up",
+    "search for",
+    "price of",
+    "stock price",
+    "exchange rate",
+)
+
+# Time-sensitivity markers. On their own these are too weak (a bare "today" is
+# fine in chit-chat), so they only signal a live lookup when paired with a
+# topic/question marker — see :data:`_LIVE_DATA_TOPIC_MARKERS`.
+_LIVE_DATA_TIME_MARKERS: tuple[str, ...] = (
+    "right now",
+    "today",
+    "current",
+    "latest",
+    "this week",
+)
+# Topic markers that, together with a time marker, indicate a live factual lookup
+# ("current price", "latest score", "news today"). These are deliberately about
+# external facts (price/score/rate/news/weather/stock/market), never the
+# conversational "you"/"your name", so chit-chat such as "how are you today" is
+# NOT swept in.
+_LIVE_DATA_TOPIC_MARKERS: tuple[str, ...] = (
+    "price",
+    "score",
+    "scores",
+    "rate",
+    "news",
+    "weather",
+    "stock",
+    "market",
+    "headlines",
+    "forecast",
 )
 
 # --- Specialist-agent vocabulary (evaluated before research/conversation) --- #
@@ -208,6 +274,34 @@ def _looks_like_language(tokens: list[str]) -> bool:
     return False
 
 
+def _live_data_signal(token_set: set[str], lowered: str) -> str | None:
+    """Return the matched live-data signal, or ``None`` when there is none.
+
+    A live-data lookup is signalled by (in priority order): a whole-word keyword
+    (``weather`` / ``news`` / ...), a multi-word phrase (``how hot`` / ``price
+    of`` / ...), or a time-sensitivity marker (``today`` / ``current`` / ...)
+    paired with an external-fact topic marker (``price`` / ``news`` / ...). The
+    last clause is deliberately conjunctive so a bare ``today`` in chit-chat does
+    not trip the rule; the whole set is curated so genuine chit-chat ("what's up",
+    "whats your name", "how are you") carries none of these signals and stays
+    CONVERSATION.
+    """
+    matched_keyword = sorted(token_set & _LIVE_DATA_KEYWORDS)
+    if matched_keyword:
+        return ", ".join(matched_keyword)
+    matched_phrase = next((p for p in _LIVE_DATA_PHRASES if p in lowered), None)
+    if matched_phrase is not None:
+        return matched_phrase
+    time_marker = next((m for m in _LIVE_DATA_TIME_MARKERS if m in lowered), None)
+    if time_marker is not None:
+        topic_marker = next(
+            (t for t in _LIVE_DATA_TOPIC_MARKERS if t in token_set), None
+        )
+        if topic_marker is not None:
+            return f"{topic_marker} {time_marker}"
+    return None
+
+
 def _classify(text: str) -> RouteDecision:
     """Apply the ordered rule set; return a pre-threshold :class:`RouteDecision`."""
     normalized = text.strip()
@@ -289,6 +383,21 @@ def _classify(text: str) -> RouteDecision:
             mode=Mode.AUTOMATION,
             agent="automation",
             rationale=f"automation phrasing: {', '.join(matched_automation)}",
+            confidence=_HIGH_CONFIDENCE,
+        )
+
+    # Rule 6a: live-data / factual-lookup phrasing -> RESEARCH (high). Checked
+    # BEFORE the conversation rule so a conversational opener like "whats the
+    # weather in kota" (whose "whats" is a CONVERSATION keyword) is overridden and
+    # routed to the research agent, which can call the live-data tools (weather /
+    # web search). Genuine chit-chat carries none of these signals, so it falls
+    # through to Rule 7 and stays CONVERSATION.
+    live_signal = _live_data_signal(token_set, lowered)
+    if live_signal is not None:
+        return RouteDecision(
+            mode=Mode.RESEARCH,
+            agent="research",
+            rationale=f"live-data lookup: {live_signal}",
             confidence=_HIGH_CONFIDENCE,
         )
 

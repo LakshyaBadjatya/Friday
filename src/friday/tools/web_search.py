@@ -52,8 +52,11 @@ _RETRIABLE_EXCEPTIONS = (
     httpx.PoolTimeout,
     httpx.RemoteProtocolError,
 )
-# HTTP statuses we treat as transient (worth surfacing as retriable=True).
-_TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+# HTTP statuses we treat as transient (worth surfacing as retriable=True). 202 is
+# included because the search backend currently answers some queries with a
+# "still processing" 202 that a retry can resolve — so it must surface as a
+# retriable failure, not a hard one.
+_TRANSIENT_STATUSES = frozenset({202, 429, 500, 502, 503, 504})
 
 
 class WebSearchArgs(BaseModel):
@@ -170,7 +173,9 @@ class WebSearchTool:
             args = WebSearchArgs.model_validate(args)
 
         last_exc: Exception | None = None
-        # Two attempts total: initial call + one bounded retry on a retriable error.
+        last_status: int | None = None
+        # Two attempts total: initial call + one bounded retry on a retriable
+        # error or a transient HTTP status (e.g. a "still processing" 202).
         for attempt in range(2):
             try:
                 response = await self._fetch(args)
@@ -188,6 +193,11 @@ class WebSearchTool:
                     response.status_code,
                     args.query,
                 )
+                # A transient status (5xx / 429 / a still-processing 202) is worth
+                # one bounded retry; a hard status (e.g. 404) is returned at once.
+                if retriable and attempt == 0:
+                    last_status = response.status_code
+                    continue
                 return ToolResult(
                     ok=False,
                     data={"results": []},
@@ -207,13 +217,18 @@ class WebSearchTool:
                 error=None,
             )
 
-        # Both attempts hit a retriable network error.
+        # Both attempts hit a retriable network error or transient status.
+        message = (
+            f"search backend returned HTTP {last_status} after retry"
+            if last_status is not None
+            else f"search request failed after retry: {last_exc}"
+        )
         return ToolResult(
             ok=False,
             data={"results": []},
             error=ToolError(
                 code="search_failed",
-                message=f"search request failed after retry: {last_exc}",
+                message=message,
                 retriable=True,
             ),
         )

@@ -26,6 +26,7 @@ from friday.core.orchestrator import Orchestrator
 from friday.core.state import GraphState
 from friday.errors import FridayError, PermissionError, ProviderError
 from friday.logging import bind_correlation_id, get_logger
+from friday.models.gateway import ModelGateway
 
 logger = get_logger("friday.api.routes_chat")
 
@@ -42,6 +43,12 @@ class ChatRequest(BaseModel):
 
     session_id: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=8000)
+    #: Optional per-turn model override (a ``provider:model`` catalog id). When
+    #: set AND a :class:`~friday.models.gateway.ModelGateway` is the active LLM,
+    #: this single turn is routed through the chosen model (the gateway's active
+    #: model is restored afterwards). Omitted (``None``) keeps the default path
+    #: exactly unchanged, so the single-provider/fake builds are untouched.
+    model: str | None = Field(default=None, max_length=200)
 
 
 class RouteView(BaseModel):
@@ -86,6 +93,43 @@ def _get_orchestrator(request: Request) -> Orchestrator:
     return orchestrator
 
 
+def _get_gateway(request: Request) -> ModelGateway | None:
+    """Return the process-wide :class:`ModelGateway`, or ``None`` when absent.
+
+    A gateway is present only when ``app.py`` built one (OpenRouter/OpenCode keys
+    or ``FRIDAY_LLM_PROVIDER == "gateway"``); on the single-provider/fake builds
+    this is ``None`` and a ``model`` override is silently a no-op.
+    """
+    gateway = getattr(request.app.state, "gateway", None)
+    return gateway if isinstance(gateway, ModelGateway) else None
+
+
+async def _handle_with_model(
+    request: Request,
+    orchestrator: Orchestrator,
+    state: GraphState,
+    model: str | None,
+) -> Any:
+    """Drive the orchestrator, routing this one turn through ``model`` when set.
+
+    When ``model`` is given AND a :class:`ModelGateway` backs the orchestrator's
+    LLM, the gateway's active model is swapped to ``model`` for the duration of
+    the turn and restored afterwards (try/finally), so the whole turn resolves to
+    the chosen model without threading an override through the orchestrator. When
+    ``model`` is ``None`` (the default) — or no gateway is wired — the orchestrator
+    runs exactly as before, so the default path is unchanged.
+    """
+    gateway = _get_gateway(request)
+    if model is None or gateway is None:
+        return await orchestrator.handle(state)
+    previous = gateway.active_model_id
+    gateway.set_active(model)
+    try:
+        return await orchestrator.handle(state)
+    finally:
+        gateway.set_active(previous)
+
+
 @router.post("/chat", response_model=None)
 async def chat(request: Request, body: ChatRequest) -> JSONResponse:
     """Handle one chat turn end-to-end."""
@@ -100,7 +144,7 @@ async def chat(request: Request, body: ChatRequest) -> JSONResponse:
     state = GraphState(session_id=body.session_id, user_input=body.text)
 
     try:
-        result = await orchestrator.handle(state)
+        result = await _handle_with_model(request, orchestrator, state, body.model)
     except FridayError as exc:
         status = _status_for(exc)
         logger.warning(

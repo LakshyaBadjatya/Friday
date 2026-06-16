@@ -91,8 +91,17 @@ class LLMProvider(ABC):
         self,
         messages: list[Message],
         tools: list[ToolSpec] | None = None,
+        *,
+        model: str | None = None,
     ) -> LLMResponse:
-        """Return a completion for ``messages``, optionally exposing ``tools``."""
+        """Return a completion for ``messages``, optionally exposing ``tools``.
+
+        The optional keyword-only ``model`` overrides the provider's
+        construction-time model for this one call (used by the model catalog /
+        gateway so a single constructed provider can service many models).
+        Implementations that pin a single model may ignore it. Callers that pass
+        no ``model`` keep the pre-existing behaviour unchanged.
+        """
         raise NotImplementedError
 
 
@@ -113,7 +122,11 @@ class FakeLLM(LLMProvider):
         self,
         messages: list[Message],
         tools: list[ToolSpec] | None = None,
+        *,
+        model: str | None = None,
     ) -> LLMResponse:
+        # ``model`` is accepted for contract parity but ignored: a scripted
+        # provider pops the next canned response regardless of model.
         if not self._responses:
             raise ProviderError("FakeLLM: no scripted responses remaining")
         return self._responses.pop(0)
@@ -136,16 +149,24 @@ class FallbackLLM(LLMProvider):
         self,
         messages: list[Message],
         tools: list[ToolSpec] | None = None,
+        *,
+        model: str | None = None,
     ) -> LLMResponse:
+        # Forward ``model`` only when an override is actually requested, so
+        # secondaries whose ``complete`` predates the keyword (e.g. a minimal
+        # custom :class:`LLMProvider`) keep working on the default path.
+        primary_kwargs = {"model": model} if model is not None else {}
         try:
-            return await self._primary.complete(messages, tools)
+            return await self._primary.complete(messages, tools, **primary_kwargs)
         except (ProviderError, TimeoutError) as exc:
             logger.warning(
                 "LLM primary failed, switching to fallback secondary: %s",
                 exc,
             )
             try:
-                return await self._secondary.complete(messages, tools)
+                return await self._secondary.complete(
+                    messages, tools, **primary_kwargs
+                )
             except (ProviderError, TimeoutError) as secondary_exc:
                 raise ProviderError(
                     f"both LLM providers failed; secondary error: {secondary_exc}"
@@ -241,10 +262,15 @@ class _OpenAICompatProvider(LLMProvider):
         self,
         messages: list[Message],
         tools: list[ToolSpec] | None = None,
+        *,
+        model: str | None = None,
     ) -> LLMResponse:
         name = self._provider_name
+        # A per-call ``model`` overrides the construction model for this request
+        # only; it never mutates ``self._model`` (so subsequent default calls are
+        # unaffected). Absent it, the construction model is used as before.
         kwargs: dict[str, Any] = {
-            "model": self._model,
+            "model": model if model is not None else self._model,
             "messages": self._to_openai_messages(messages),
         }
         wire_tools = self._to_openai_tools(tools)
@@ -308,3 +334,57 @@ class GeminiProvider(_OpenAICompatProvider):
     """
 
     _provider_name = "Gemini"
+
+
+# --------------------------------------------------------------------------- #
+# OpenRouter adapter (OpenAI-compatible)
+# --------------------------------------------------------------------------- #
+class OpenRouterProvider(_OpenAICompatProvider):
+    """Real :class:`LLMProvider` over OpenRouter's OpenAI-compatible endpoint.
+
+    A thin specialization of :class:`_OpenAICompatProvider`: it points the
+    ``openai`` :class:`AsyncOpenAI` client at OpenRouter's
+    ``https://openrouter.ai/api/v1`` base URL and inherits all
+    mapping/parsing/error-wrapping unchanged, only relabeling its errors.
+    OpenRouter brokers many upstream models (including a roster of free ones), so
+    it is the natural home for the per-call ``model`` override.
+    """
+
+    _provider_name = "OpenRouter"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://openrouter.ai/api/v1",
+        model: str = "google/gemma-4-31b-it:free",
+        timeout: float = 60.0,
+    ) -> None:
+        super().__init__(
+            api_key=api_key, base_url=base_url, model=model, timeout=timeout
+        )
+
+
+# --------------------------------------------------------------------------- #
+# OpenCode adapter (OpenAI-compatible)
+# --------------------------------------------------------------------------- #
+class OpenCodeProvider(_OpenAICompatProvider):
+    """Real :class:`LLMProvider` over OpenCode Zen's OpenAI-compatible endpoint.
+
+    Structurally identical to :class:`OpenRouterProvider`: it points the
+    ``openai`` :class:`AsyncOpenAI` client at OpenCode's
+    ``https://opencode.ai/zen/v1`` base URL and inherits all
+    mapping/parsing/error-wrapping unchanged, only relabeling its errors.
+    """
+
+    _provider_name = "OpenCode"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://opencode.ai/zen/v1",
+        model: str = "mimo-v2.5-free",
+        timeout: float = 60.0,
+    ) -> None:
+        super().__init__(
+            api_key=api_key, base_url=base_url, model=model, timeout=timeout
+        )

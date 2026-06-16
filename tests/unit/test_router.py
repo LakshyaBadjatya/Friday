@@ -29,6 +29,20 @@ ROUTER_TABLE: list[tuple[str, Mode]] = [
     ("find sources on the history of the transistor", Mode.RESEARCH),
     ("investigate why our latency regressed", Mode.RESEARCH),
     ("look up the latest benchmarks for llama models", Mode.RESEARCH),
+    # --- Live-data / factual lookup: routes to RESEARCH (overrides "whats") ---
+    ("what's the weather in kota", Mode.RESEARCH),
+    ("whats the weather in kota", Mode.RESEARCH),
+    ("any news on the budget", Mode.RESEARCH),
+    ("look up the price of gold", Mode.RESEARCH),
+    ("how hot is it in delhi", Mode.RESEARCH),
+    ("what is the current price of bitcoin", Mode.RESEARCH),
+    # --- Chit-chat regression guard: the live-data rule must NOT swallow these ---
+    ("what's up", Mode.CONVERSATION),
+    ("whats up", Mode.CONVERSATION),
+    ("whats your name", Mode.CONVERSATION),
+    ("how are you", Mode.CONVERSATION),
+    ("how are you today", Mode.CONVERSATION),
+    ("thanks", Mode.CONVERSATION),
     # --- Automation: task / schedule / remind phrasing ---
     ("schedule a backup job for tonight", Mode.AUTOMATION),
     ("remind me to call the vendor at noon", Mode.AUTOMATION),
@@ -83,6 +97,27 @@ async def test_research_high_confidence() -> None:
     assert decision.mode is Mode.RESEARCH
     assert decision.agent == "research"
     assert decision.confidence >= 0.55
+
+
+async def test_weather_routes_to_research_agent() -> None:
+    # The live-data rule must route a weather question to the research agent
+    # (which runs a tool loop and can call the weather tool), overriding the
+    # conversational "whats" opener.
+    decision = await route(_state("what's the weather in kota"))
+    assert decision.mode is Mode.RESEARCH
+    assert decision.agent == "research"
+    assert decision.confidence >= 0.55
+    assert "weather" in decision.rationale
+
+
+async def test_chit_chat_stays_conversation_not_research() -> None:
+    # Regression guard: a conversational opener that happens to share the "whats"
+    # token must NOT be swept into the live-data lookup rule.
+    for utterance in ("what's up", "whats your name", "how are you"):
+        decision = await route(_state(utterance))
+        assert decision.mode is Mode.CONVERSATION, (
+            f"{utterance!r} routed to {decision.mode} (expected CONVERSATION)"
+        )
 
 
 async def test_conversation_high_confidence() -> None:

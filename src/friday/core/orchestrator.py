@@ -51,6 +51,7 @@ from pydantic import BaseModel
 
 from friday.agents.base import AgentRegistry, AgentResult
 from friday.config import get_settings
+from friday.core.confidence import ConfidenceScorer, signals_from_state
 from friday.core.critic import SelfCritic
 from friday.core.router import route
 from friday.core.security import run_lockdown
@@ -59,11 +60,13 @@ from friday.errors import FridayError, PermissionError, ProviderError
 from friday.memory.long_term import LongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import Chunk
+from friday.models.budget import Budgeter
+from friday.models.gateway import ModelGateway
 from friday.observability.metrics import Metrics
 from friday.observability.tracing import Tracer
 from friday.protocols.runner import ProtocolResult, ProtocolRunner
 from friday.protocols.store import Protocol as ProtocolModel
-from friday.providers.llm import LLMProvider, Message
+from friday.providers.llm import LLMProvider, LLMResponse, Message
 from friday.roster import Persona, RosterRegistry
 from friday.tools.registry import ToolRegistry
 from friday.tools.security import AuditRecord
@@ -158,7 +161,38 @@ class MemoryWrite(BaseModel):
     sensitive: bool = False
 
 # Tools the minimal Research path is allowed to reach this phase.
-_RESEARCH_ALLOWED_TOOLS: frozenset[str] = frozenset({"web_search"})
+_RESEARCH_ALLOWED_TOOLS: frozenset[str] = frozenset({"web_search", "weather"})
+
+# Live-data retrieval on the research path is tool-aware: a weather/temperature
+# question is answered from the keyless ``weather`` tool (wttr.in) instead of the
+# flaky search backend — a model shouldn't have to pick the right tool. The
+# detector is deliberately narrow so ordinary research ("research the best vector
+# database") still goes through web_search.
+_WEATHER_RE = re.compile(
+    r"\b(?:weather|forecast|temperature|how\s+hot|how\s+cold)\b", re.IGNORECASE
+)
+_LOCATION_AFTER_RE = re.compile(
+    r"\b(?:in|at|for|near|around)\b\s+(.+)$", re.IGNORECASE
+)
+_WEATHER_NOISE_RE = re.compile(
+    r"\b(?:what'?s?|what\s+is|how'?s?|how\s+is|the|a|current|currently|"
+    r"right\s+now|now|today|tonight|tomorrow|this\s+week|weather|forecast|"
+    r"temperature|temp|like|outside|in|at|for|of|please|tell\s+me)\b",
+    re.IGNORECASE,
+)
+
+
+def _weather_location(query: str) -> str:
+    """Best-effort place name from a weather question, or ``""`` if none found.
+
+    Prefers the text after "in/at/for <place>"; otherwise strips the weather and
+    time noise words. Offline and deterministic — no model call.
+    """
+    cleaned = query.strip().rstrip("?.! ").strip()
+    after = _LOCATION_AFTER_RE.search(cleaned)
+    candidate = after.group(1) if after else cleaned
+    loc = _WEATHER_NOISE_RE.sub(" ", candidate)
+    return re.sub(r"\s{2,}", " ", loc).strip(" ,.-")
 
 # The specialist modes that dispatch to an :class:`Agent` in the registry, and
 # the tool whose side-effecting/idempotent metadata gates the confirm-step for
@@ -444,6 +478,27 @@ class Orchestrator:
             scratchpad as ``persona`` / ``persona_scope`` / ``persona_namespace``)
             before normal routing. An un-addressed turn (or an unknown name) leaves
             the hook inert, so existing orchestrator behaviour is unchanged.
+        confidence: Optional :class:`~friday.core.confidence.ConfidenceScorer`. When
+            wired *and* ``FRIDAY_ENABLE_CONFIDENCE`` is set, the orchestrator stamps
+            ``state.scratchpad["confidence"]`` after a synthesized reply and, when
+            the blended confidence falls below ``confidence_note_threshold``, appends
+            a one-line honest caveat (skipped for CLARIFY — a question carries no
+            answer to score). When absent or the flag is off the hook is inert, so
+            existing orchestrator behaviour is unchanged.
+        budgeter: Optional :class:`~friday.models.budget.Budgeter`. When wired *and*
+            ``FRIDAY_ENABLE_BUDGETER`` is set, each completion's token (and any
+            priced dollar) usage is recorded per session and, once the turn crosses
+            the downshift threshold, the gateway's active model is switched to
+            ``budget_downshift_model_id`` (only when a ``gateway`` is wired and the
+            id is non-empty — otherwise the signal is surfaced but no swap happens).
+            When absent or the flag is off the hook is inert.
+        gateway: Optional :class:`~friday.models.gateway.ModelGateway` — the thing
+            whose active model the budgeter downshifts. ``None`` on the
+            fake/single-provider build, in which case the budgeter still tallies but
+            has nothing to swap.
+        budget_downshift_model_id: The catalog id the budgeter downshifts the
+            gateway to when a turn runs hot; empty (the default) keeps the current
+            active model (the budgeter still surfaces the signal).
     """
 
     def __init__(
@@ -462,6 +517,10 @@ class Orchestrator:
         critic: SelfCritic | None = None,
         n8n_service: N8nServiceProtocol | None = None,
         roster: RosterRegistry | None = None,
+        confidence: ConfidenceScorer | None = None,
+        budgeter: Budgeter | None = None,
+        gateway: ModelGateway | None = None,
+        budget_downshift_model_id: str = "",
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -477,6 +536,15 @@ class Orchestrator:
         self._critic = critic
         self._n8n_service = n8n_service
         self._roster = roster
+        self._confidence = confidence
+        # The per-turn budgeter (Wave 0): records each completion's usage and
+        # surfaces ``should_downshift``. It only has something to downshift when a
+        # :class:`~friday.models.gateway.ModelGateway` is wired (the thing whose
+        # active model it swaps); on the fake/single-provider build ``gateway`` is
+        # ``None`` so the downshift is a no-op and only the signal is stamped.
+        self._budgeter = budgeter
+        self._gateway = gateway
+        self._budget_downshift_model_id = budget_downshift_model_id
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
@@ -535,11 +603,16 @@ class Orchestrator:
         return f"Can't do that one, {owner} — {reason}."
 
     # -- synthesis --------------------------------------------------------- #
-    async def _synthesize(self, history: list[Message], task: Message) -> str:
+    async def _synthesize(
+        self, history: list[Message], task: Message, session_id: str | None = None
+    ) -> str:
         """Call the LLM with persona + history + the turn's task message.
 
         Wraps provider failures in an honest, in-character message rather than
-        leaking a traceback or faking a success.
+        leaking a traceback or faking a success. When a budgeter is wired and
+        ``session_id`` is given, the completion's token usage is recorded against
+        the session's turn budget and a hot turn downshifts the gateway's active
+        model (see :meth:`_record_budget`).
         """
         messages = [self._system_prompt(), *history, task]
         try:
@@ -552,11 +625,62 @@ class Orchestrator:
                 f"{owner}. That's a real outage, not me stalling — try again in "
                 f"a moment."
             )
+        if session_id is not None:
+            self._record_budget(session_id, response)
         text = response.text
         if not text or not text.strip():
             owner = get_settings().owner_address
             return f"I came back empty on that one, {owner}. Mind rephrasing?"
         return text.strip()
+
+    # -- per-turn budgeter (Wave 0) ---------------------------------------- #
+    def _start_budget_turn(self, session_id: str) -> None:
+        """Zero the session's per-turn spend tally at the start of a turn.
+
+        Inert unless ``FRIDAY_ENABLE_BUDGETER`` is set *and* a budgeter is wired.
+        Resetting per turn keeps spend from leaking across turns; the budgeter also
+        lazy-starts on first record, so this is the explicit reset, not a hard
+        requirement.
+        """
+        if self._budgeter is None or not get_settings().enable_budgeter:
+            return
+        self._budgeter.start_turn(session_id)
+
+    def _record_budget(self, session_id: str, response: LLMResponse) -> None:
+        """Tally a completion's usage and downshift the gateway when a turn is hot.
+
+        Inert unless ``FRIDAY_ENABLE_BUDGETER`` is set *and* a
+        :class:`~friday.models.budget.Budgeter` is wired — so the flag-off /
+        un-wired path keeps no tally and never swaps models. When active, the
+        completion's total tokens are recorded against the session's turn budget
+        (free models stay at ``usd=0.0`` — only the token cap governs), and once
+        :meth:`Budgeter.should_downshift` trips AND a non-empty
+        ``budget_downshift_model_id`` is configured, the gateway's active model is
+        switched down a tier. The ``set_active`` call is guarded on a gateway being
+        wired (the fake/single-provider build has none — the budgeter still tallies
+        but has nothing to swap). Non-fatal by construction: it never raises into
+        the turn.
+        """
+        if self._budgeter is None or not get_settings().enable_budgeter:
+            return
+        usage = response.usage
+        total_tokens = usage.prompt_tokens + usage.completion_tokens
+        self._budgeter.record(session_id, tokens=total_tokens, usd=0.0)
+        if (
+            self._gateway is not None
+            and self._budget_downshift_model_id
+            and self._budgeter.should_downshift(session_id)
+        ):
+            current = self._gateway.active_model_id
+            target = self._budget_downshift_model_id
+            if current != target:
+                logger.info(
+                    "budget downshift: session %s over budget, switching %s -> %s",
+                    session_id,
+                    current,
+                    target,
+                )
+                self._gateway.set_active(target)
 
     # -- self-critique (Tier 2; build-spec post-spec) ---------------------- #
     async def _maybe_critique(self, state: GraphState) -> None:
@@ -592,10 +716,40 @@ class Orchestrator:
         if revised is not None:
             state.response = revised
 
+    # -- calibrated confidence (Wave 0) ------------------------------------ #
+    def _maybe_stamp_confidence(self, state: GraphState) -> None:
+        """Optionally stamp a calibrated confidence score; caveat below threshold.
+
+        Inert unless ``FRIDAY_ENABLE_CONFIDENCE`` is set *and* a
+        :class:`~friday.core.confidence.ConfidenceScorer` is wired — so the flag-off
+        / un-wired path stamps nothing and appends no caveat (existing behaviour
+        unchanged). When active it blends the turn's signals (router confidence, any
+        agent confidence, grounding, a web-search hit) into one
+        :class:`~friday.core.confidence.ConfidenceScore`, stamps it onto
+        ``state.scratchpad["confidence"]`` (model-dumped for the trace/HUD), and —
+        only when the blended value falls below ``confidence_note_threshold`` AND a
+        real reply is present — appends a one-line honest caveat.
+
+        Called only after a real synthesized reply (CLARIFY is skipped, like
+        critique, since a clarifying question carries no answer to score). Pure and
+        deterministic: the scorer reads no settings and uses no clock.
+        """
+        if self._confidence is None or not get_settings().enable_confidence:
+            return
+        score = self._confidence.score(signals_from_state(state))
+        state.scratchpad["confidence"] = score.model_dump()
+        threshold = get_settings().confidence_note_threshold
+        if score.value < threshold and state.response is not None:
+            owner = get_settings().owner_address
+            state.response = (
+                f"{state.response}\n\n(Confidence is on the low side here, "
+                f"{owner} — {score.rationale} Worth a second check.)"
+            )
+
     # -- conversation ------------------------------------------------------ #
     async def _converse(self, state: GraphState, history: list[Message]) -> str:
         task = Message(role="user", content=state.user_input)
-        return await self._synthesize(history, task)
+        return await self._synthesize(history, task, state.session_id)
 
     # -- research ---------------------------------------------------------- #
     async def _research(self, state: GraphState, history: list[Message]) -> str:
@@ -606,24 +760,49 @@ class Orchestrator:
         a handled failure) is reported truthfully — no fabricated findings.
         """
         findings_block = ""
+        # Tool-aware retrieval: a weather question uses the keyless wttr.in
+        # ``weather`` tool (the search backend is unreliable); everything else
+        # uses ``web_search`` exactly as before.
+        location = (
+            _weather_location(state.user_input)
+            if _WEATHER_RE.search(state.user_input)
+            else ""
+        )
+        if location and "weather" in _RESEARCH_ALLOWED_TOOLS:
+            tool_name = "weather"
+            tool_args: dict[str, object] = {"location": location}
+        else:
+            tool_name = "web_search"
+            tool_args = {"query": state.user_input, "max_results": 5}
         try:
             result = await self._registry.execute(
-                "web_search",
-                {"query": state.user_input, "max_results": 5},
+                tool_name,
+                tool_args,
                 allowed_tools=_RESEARCH_ALLOWED_TOOLS,
             )
-            state.scratchpad["web_search_invoked"] = True
+            state.scratchpad["web_search_invoked"] = tool_name == "web_search"
         except PermissionError as exc:
-            # The research agent should always be allowed web_search; if not,
-            # report honestly rather than guess.
-            logger.warning("research path denied web_search: %s", exc)
+            # The research path should always be allowed its retrieval tool; if
+            # not, report honestly rather than guess.
+            logger.warning("research path denied %s: %s", tool_name, exc)
             state.scratchpad["web_search_invoked"] = False
             findings_block = (
-                "NOTE TO SELF: web search was not permitted, so you have no "
+                "NOTE TO SELF: retrieval was not permitted, so you have no "
                 "retrieved sources. Say so plainly; do not invent findings."
             )
         else:
-            if result.ok:
+            if result.ok and tool_name == "weather":
+                summary = str(result.data.get("summary", "")).strip()
+                state.scratchpad["weather_result"] = result.data
+                findings_block = (
+                    "RETRIEVED WEATHER (live, from wttr.in):\n" + summary
+                    if summary
+                    else (
+                        "NOTE TO SELF: the weather lookup returned nothing "
+                        "usable. Say so plainly; do not invent a forecast."
+                    )
+                )
+            elif result.ok:
                 rows = result.data.get("results", [])
                 state.scratchpad["web_search_results"] = rows
                 if rows:
@@ -641,9 +820,10 @@ class Orchestrator:
             else:
                 err = result.error
                 detail = err.message if err is not None else "unknown error"
-                logger.warning("research web_search failed: %s", detail)
+                label = "weather lookup" if tool_name == "weather" else "web search"
+                logger.warning("research %s failed: %s", tool_name, detail)
                 findings_block = (
-                    "NOTE TO SELF: the web search failed "
+                    f"NOTE TO SELF: the {label} failed "
                     f"({detail}). Report that you couldn't retrieve sources; do "
                     "not fabricate findings."
                 )
@@ -656,7 +836,7 @@ class Orchestrator:
             "to dig further — do not invent facts or citations."
         )
         task = Message(role="user", content=task_content)
-        return await self._synthesize(history, task)
+        return await self._synthesize(history, task, state.session_id)
 
     # -- clarify ----------------------------------------------------------- #
     def _clarify(self, state: GraphState) -> str:
@@ -1195,6 +1375,11 @@ class Orchestrator:
         # 1. Load short-term history for the session.
         history = self._memory.history(state.session_id)
 
+        # 1.0 Zero this session's per-turn spend tally (Wave 0). Inert unless the
+        # budgeter is wired + the flag is on; the budgeter also lazy-starts, so a
+        # skipped call is harmless — this is the explicit per-turn reset.
+        self._start_budget_turn(state.session_id)
+
         # 1a. Address-by-name (Stage 2 roster): a turn that opens with a persona
         # code-name ("GECKO, ..." / "ask VISION to ...") routes under that named
         # persona's least-privilege tool scope + memory namespace. Recorded on the
@@ -1302,6 +1487,12 @@ class Orchestrator:
         if state.mode is not Mode.CLARIFY:
             await self._maybe_critique(state)
 
+        # 4b. Optionally stamp a calibrated confidence score (Wave 0) and append a
+        # one-line caveat below threshold. Skipped for CLARIFY (no answer to score),
+        # exactly like critique; inert unless the flag is on AND a scorer is wired.
+        if state.mode is not Mode.CLARIFY:
+            self._maybe_stamp_confidence(state)
+
         # 5. Persist the turn (timed as the "synth" span — the final assembly +
         # short-term-memory write that completes the synthesized reply).
         with self._span("synth"):
@@ -1357,6 +1548,7 @@ class Orchestrator:
             history = self._memory.history(state.session_id)
             state.response = await self._converse(state, history)
             await self._maybe_critique(state)
+            self._maybe_stamp_confidence(state)
         self._record(state)
         return state
 
@@ -1366,6 +1558,7 @@ class Orchestrator:
             history = self._memory.history(state.session_id)
             state.response = await self._research(state, history)
             await self._maybe_critique(state)
+            self._maybe_stamp_confidence(state)
         self._record(state)
         return state
 
@@ -1395,6 +1588,7 @@ class Orchestrator:
             state.mode = mode
             state.response = await self._handle_agent_mode(mode, state, history)
             await self._maybe_critique(state)
+            self._maybe_stamp_confidence(state)
         self._record(state)
         return state
 

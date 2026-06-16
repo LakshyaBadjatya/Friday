@@ -150,3 +150,23 @@ async def test_web_search_empty_results_does_not_fabricate() -> None:
     result = await tool(WebSearchArgs(query="nothing here"))
     assert result.ok is True
     assert result.data["results"] == []
+
+
+@respx.mock
+async def test_web_search_202_is_retried_and_retriable() -> None:
+    # The backend currently answers some queries with a "still processing" 202;
+    # it must be retried once and surfaced as a RETRIABLE failure (not a hard one).
+    route = respx.post(DDG_ENDPOINT).mock(
+        return_value=httpx.Response(202, text="processing")
+    )
+    tool = WebSearchTool()
+    result = await tool(WebSearchArgs(query="slow backend"))
+
+    # Exactly two attempts: the initial 202 plus one bounded retry.
+    assert route.call_count == 2
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "search_failed"
+    assert result.error.retriable is True
+    # Never fabricate results on failure.
+    assert result.data.get("results", []) == []

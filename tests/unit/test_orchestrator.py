@@ -25,6 +25,7 @@ from friday.core.state import GraphState, Mode
 from friday.memory.short_term import ShortTermMemory
 from friday.providers.llm import FakeLLM, LLMResponse, Usage
 from friday.tools.registry import ToolRegistry
+from friday.tools.weather import WeatherTool
 from friday.tools.web_search import WebSearchTool
 
 PERSONA_PATH = (
@@ -45,12 +46,16 @@ _BANNED_MARKERS: tuple[str, ...] = (
 )
 
 
-def _make_orchestrator(llm: FakeLLM, *, search_base: str | None = None) -> Orchestrator:
+def _make_orchestrator(
+    llm: FakeLLM, *, search_base: str | None = None, with_weather: bool = False
+) -> Orchestrator:
     registry = ToolRegistry()
     if search_base is not None:
         registry.register(WebSearchTool(base_url=search_base))
     else:
         registry.register(WebSearchTool())
+    if with_weather:
+        registry.register(WeatherTool())
     memory = ShortTermMemory()
     return Orchestrator(
         llm=llm,
@@ -154,6 +159,42 @@ async def test_research_path_invokes_web_search_then_synthesizes() -> None:
     assert "Boss" in out.response
     # The web_search tool was actually invoked (recorded in scratchpad).
     assert out.scratchpad.get("web_search_invoked") is True
+
+
+@respx.mock
+async def test_research_path_uses_weather_tool_for_weather_query() -> None:
+    # A weather question routes to RESEARCH and retrieves from the keyless
+    # ``weather`` tool (wttr.in) rather than the flaky search backend.
+    j1 = {
+        "current_condition": [
+            {
+                "temp_C": "30",
+                "FeelsLikeC": "32",
+                "humidity": "40",
+                "windspeedKmph": "8",
+                "weatherDesc": [{"value": "Sunny"}],
+                "observation_time": "12:00 PM",
+            }
+        ],
+        "nearest_area": [{"areaName": [{"value": "Kota"}]}],
+    }
+    weather_route = respx.get(url__regex=r"https://wttr\.in/.*").mock(
+        return_value=httpx.Response(200, json=j1)
+    )
+    llm = FakeLLM(responses=[_resp("It's sunny in Kota at 30°C, Boss.")])
+    orch = _make_orchestrator(llm, with_weather=True)
+    state = GraphState(session_id="w1", user_input="whats the weather in kota")
+
+    out = await orch.handle(state)
+
+    assert out.mode is Mode.RESEARCH
+    assert out.response is not None
+    # The weather tool ran — NOT web_search.
+    assert weather_route.called
+    assert out.scratchpad.get("web_search_invoked") is False
+    weather_result = out.scratchpad.get("weather_result")
+    assert weather_result is not None
+    assert "Kota" in str(weather_result.get("location", ""))
 
 
 # --- graph assembly (core/graph.py + core/modes.py) ----------------------- #

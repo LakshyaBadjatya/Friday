@@ -52,6 +52,7 @@ from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
 from friday.api.routes_meetings import router as meetings_router
+from friday.api.routes_memory import router as memory_router
 from friday.api.routes_models import router as models_router
 from friday.api.routes_n8n import router as n8n_router
 from friday.api.routes_perception import router as perception_router
@@ -91,6 +92,7 @@ from friday.market import router as market_router
 from friday.meetings.capture import MeetingCapture
 from friday.meetings.store import SQLiteMeetingStore
 from friday.memory.compaction import Compactor
+from friday.memory.contradiction import ContradictionDetector
 from friday.memory.long_term import LongTermStore, SQLiteLongTermStore
 from friday.memory.pg import PgVectorStore, PostgresLongTermStore
 from friday.memory.short_term import ShortTermMemory
@@ -2007,6 +2009,18 @@ def _wire_planner(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     app.state.planner = Planner(llm)
 
 
+def _wire_contradiction(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
+    """Stash a :class:`ContradictionDetector` on ``app.state`` when enabled.
+
+    The ``/memory/contradiction`` route reads ``app.state.contradiction_detector``
+    and 404s when absent. Built over the same LLM; off by default so the offline
+    build constructs no detector.
+    """
+    if not settings.enable_contradiction:
+        return
+    app.state.contradiction_detector = ContradictionDetector(llm)
+
+
 def _wire_rag(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Stash a :class:`DocumentIngestor` on ``app.state`` when RAG is enabled.
 
@@ -2284,6 +2298,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_studio(app, settings, runtime.llm)
     _wire_ensemble(app, settings, runtime.llm)
     _wire_planner(app, settings, runtime.llm)
+    _wire_contradiction(app, settings, runtime.llm)
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
     _wire_scheduler(app, settings, runtime)
@@ -2385,6 +2400,7 @@ def create_app() -> FastAPI:
     app.include_router(models_router)
     app.include_router(ensemble_router)
     app.include_router(planner_router)
+    app.include_router(memory_router)
     # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE
     # (404 / socket refusal when off), so the offline default exposes no voice UX.
     app.include_router(voice_router)

@@ -644,6 +644,11 @@ class Settings(BaseSettings):
     # and keeps a recent tail (one bounded, non-fatal LLM pass). Off by default so
     # the turn loop makes no extra call and the buffer is never rewritten.
     enable_compaction: bool = False
+    # Gates the contradiction-check surface (``POST /memory/contradiction``):
+    # check whether a candidate fact conflicts with stored memory (one bounded,
+    # non-fatal LLM pass over the relevant long-term facts). Off by default so the
+    # route 404s.
+    enable_contradiction: bool = False
 
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +

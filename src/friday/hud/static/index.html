@@ -1,190 +1,353 @@
 <!DOCTYPE html>
+<!-- © Lakshya Badjatya — Author -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
-  <title>FRIDAY · Command Centre</title>
+  <title>FRIDAY</title>
   <link rel="stylesheet" href="/hud/static/hud.css" />
 
   <!--
-    No-build, no-bundler cockpit. Everything here is plain ES2022 the browser runs
-    directly: no Node step, no webpack, no CDN modules. hud.js draws the particle
-    field, runs the arc-reactor boot sequence, and wires every live panel to the
-    EXISTING same-origin endpoints (/roster, /chat, /rag/ingest, /admin/*, /maps).
+    FRIDAY HUD — a no-build, no-bundler "viewing space" cockpit. Everything here is
+    plain ES2022 the browser runs directly: no Node step, no webpack, no CDN, no
+    external fonts. The page NEVER eval()s anything from the server — every panel
+    renders endpoint data as TEXT nodes only, so a surprising payload can paint
+    text but can never execute. No secret is baked in; auth is the gateway's job.
 
-    SAFETY: this page NEVER eval()s anything from the server. Panels call JSON
-    endpoints and render their data as TEXT nodes — no server-sourced string is
-    ever executed or injected as HTML. No secret is baked into the page; auth (if
-    any) is the gateway's job. Every endpoint degrades gracefully: a panel whose
-    endpoint is off (404/disabled) shows a quiet "offline" state, never crashes.
+    Shell: a slim LEFT RAIL (brand + nav + active-brain pill + connection dot) and
+    ONE large MAIN CANVAS that shows exactly one view at a time (Command, Arena,
+    Agents, Memory, System). Switching is instant and sets the URL hash for
+    deep-linking. Every optional endpoint degrades gracefully (404 -> quiet empty
+    state, never a crash).
 
-    The API base is configurable: append ?api=https://host:port to the URL (or set
-    window.FRIDAY_API_BASE before this script) to point the cockpit at a remote
-    backend; it defaults to same-origin.
+    The API base is configurable: append ?api=https://host:port (or set
+    window.FRIDAY_API_BASE before this script) to drive a remote backend; it
+    defaults to same-origin.
   -->
 </head>
 <body>
-  <!-- Drifting particle field, painted by hud.js behind the cockpit. -->
+  <!-- Light drifting particle field, painted by hud.js behind the shell. -->
   <canvas id="particles" aria-hidden="true"></canvas>
 
-  <!-- Arc-reactor boot sequence; hud.js fades it out once "online". -->
+  <!-- Brief arc-reactor boot sequence; hud.js fades it out once "online". -->
   <div id="boot" aria-hidden="true">
     <div class="boot-reactor">
-      <div class="ring r1"></div>
-      <div class="ring r2"></div>
-      <div class="ring r3"></div>
-      <div class="ring r4"></div>
-      <div class="core"></div>
+      <span class="boot-ring br1"></span>
+      <span class="boot-ring br2"></span>
+      <span class="boot-core"></span>
     </div>
     <div class="boot-text" id="boot-text">initializing reactor…</div>
     <div class="boot-bar"><i id="boot-bar"></i></div>
   </div>
 
   <div id="app">
-    <header id="topbar">
-      <div class="brand">
-        <span class="brand-mark">FRIDAY</span>
-        <span class="brand-sub">COMMAND CENTRE</span>
-      </div>
-      <div class="topbar-actions">
-        <button type="button" id="btn-globe" class="ctl" title="Open the 3D globe (/maps)">
-          <span class="ctl-glyph">◍</span> GLOBE
-        </button>
-        <button type="button" id="btn-mic" class="ctl" title="Voice — speak to FRIDAY (Web Speech)">
-          <span class="ctl-glyph">🎙</span> VOICE
-        </button>
-        <span class="kbd-hint">
-          <kbd>⌘</kbd><kbd>K</kbd> / <kbd>Ctrl</kbd><kbd>K</kbd> — palette
+    <!-- ====================================================== LEFT RAIL ===== -->
+    <nav id="rail" aria-label="Primary navigation">
+      <div class="rail-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <span class="bm-ring"></span><span class="bm-core"></span>
         </span>
-        <div id="conn-status" class="pill" title="Backend connection">
-          <span class="dot"></span><span class="conn-label">linking…</span>
+        <span class="brand-word">FRIDAY</span>
+      </div>
+
+      <ul class="rail-nav" role="tablist" aria-label="Views">
+        <li>
+          <button type="button" class="rail-item" data-view="command" role="tab"
+            aria-selected="true" id="nav-command">
+            <span class="ri-glyph" aria-hidden="true">◉</span>
+            <span class="ri-label">Command</span>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="rail-item" data-view="arena" role="tab"
+            aria-selected="false" id="nav-arena">
+            <span class="ri-glyph" aria-hidden="true">⚔</span>
+            <span class="ri-label">Arena</span>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="rail-item" data-view="agents" role="tab"
+            aria-selected="false" id="nav-agents">
+            <span class="ri-glyph" aria-hidden="true">❖</span>
+            <span class="ri-label">Agents</span>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="rail-item" data-view="memory" role="tab"
+            aria-selected="false" id="nav-memory">
+            <span class="ri-glyph" aria-hidden="true">▤</span>
+            <span class="ri-label">Memory</span>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="rail-item" data-view="system" role="tab"
+            aria-selected="false" id="nav-system">
+            <span class="ri-glyph" aria-hidden="true">⌁</span>
+            <span class="ri-label">System</span>
+          </button>
+        </li>
+      </ul>
+
+      <div class="rail-foot">
+        <button type="button" id="brain-pill" class="brain-pill"
+          title="Active model — click to choose" aria-label="Active model">
+          <span class="bp-glyph" aria-hidden="true">✺</span>
+          <span class="bp-label" id="brain-label">brain</span>
+        </button>
+        <div id="conn-status" class="conn" title="Backend connection">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="conn-label">linking…</span>
         </div>
       </div>
-    </header>
+    </nav>
 
-    <main id="stage">
-      <!-- LEFT RAIL: reactor + roster ------------------------------------- -->
-      <section id="left-rail" aria-label="Reactor and roster">
-        <div id="reactor-wrap" aria-label="Arc reactor">
-          <div id="reactor">
-            <div class="ring r1"></div>
-            <div class="ring r2"></div>
-            <div class="ring r3"></div>
-            <div class="ring r4"></div>
-            <div class="core"></div>
+    <!-- ===================================================== MAIN CANVAS ==== -->
+    <main id="canvas">
+
+      <!-- ----------------------------------------------------- COMMAND ----- -->
+      <section class="view is-active" id="view-command" data-view="command"
+        role="tabpanel" aria-label="Command">
+        <header class="view-head">
+          <div class="vh-titles">
+            <h1 class="vh-title">Command</h1>
+            <p class="vh-sub">Talk to FRIDAY. She routes you to the right specialist.</p>
           </div>
-          <div class="reactor-caption">
-            REACTOR <strong id="reactor-state">ONLINE</strong>
+          <div class="vh-actions">
+            <span class="kbd-hint"><kbd>⌘</kbd><kbd>K</kbd> palette</span>
+            <button type="button" id="btn-globe" class="icon-btn"
+              title="Open the 3D globe (/maps)" aria-label="Open globe">◍</button>
           </div>
-        </div>
+        </header>
 
-        <section id="roster-panel" class="panel" aria-label="Persona roster">
-          <h2>Roster <span class="panel-tag" id="roster-count"></span></h2>
-          <div id="roster-grid" class="roster-grid" aria-live="polite"></div>
-        </section>
-      </section>
+        <div class="command-col">
+          <div id="chat-log" class="chat-log" aria-label="Conversation" aria-live="polite"></div>
 
-      <!-- CENTRE: chat / dossier / approvals / trace flow ----------------- -->
-      <section id="centre" aria-label="Command surface">
-        <div id="address-bar" class="address-bar" hidden>
-          addressing <strong id="address-target">FRIDAY</strong>
-          <button type="button" id="address-clear" class="link-btn">clear</button>
-        </div>
-
-        <section id="dossier-panel" class="panel" aria-label="Dossier search">
-          <h2>Dossier</h2>
-          <form id="dossier-form" class="searchbox">
-            <input id="dossier-input" type="text" autocomplete="off" spellcheck="false"
-              placeholder="Ask about a person or project…" aria-label="Dossier query" />
-            <button type="button" id="dossier-go" class="ctl">QUERY</button>
-          </form>
-          <div id="dossier-cards" class="card-stack" aria-live="polite"></div>
-        </section>
-
-        <section id="approvals-panel" class="panel" aria-label="Approvals" hidden>
-          <h2>Approvals</h2>
-          <div id="approval-cards" class="card-stack" aria-live="polite"></div>
-        </section>
-
-        <section id="flow-panel" class="panel" aria-label="Trace flow">
-          <h2>Trace Flow <span class="panel-tag" id="flow-tag">live</span></h2>
-          <div id="flow-list" class="flow-list" aria-live="polite"></div>
-          <div id="replay" class="replay" hidden>
-            <div class="replay-head">
-              <span>Replay <strong id="replay-id"></strong></span>
-              <button type="button" id="replay-close" class="link-btn">close</button>
+          <form id="composer" class="composer" aria-label="Message composer">
+            <div id="address-chip" class="address-chip" hidden>
+              <span class="ac-arrow" aria-hidden="true">→</span>
+              <span id="address-target">FRIDAY</span>
+              <button type="button" id="address-clear" class="ac-clear"
+                aria-label="Clear addressing">✕</button>
             </div>
-            <div id="replay-spans" class="replay-spans"></div>
-            <h3 class="replay-sub">matching audit rows</h3>
-            <div id="replay-audit" class="replay-audit"></div>
-          </div>
-        </section>
+            <div class="composer-row">
+              <textarea id="composer-input" class="composer-input" rows="1"
+                placeholder="Message FRIDAY…  (Enter to send, Shift+Enter for newline)"
+                autocomplete="off" spellcheck="false" aria-label="Message"></textarea>
+              <button type="button" id="btn-mic" class="icon-btn mic"
+                title="Voice — speak to FRIDAY" aria-label="Voice input">🎙</button>
+              <button type="submit" id="composer-send" class="send-btn"
+                aria-label="Send message">Send</button>
+            </div>
+          </form>
+        </div>
       </section>
 
-      <!-- RIGHT RAIL: telemetry / metrics / audit ------------------------- -->
-      <aside id="telemetry" aria-label="Telemetry">
-        <h2>Telemetry</h2>
-        <div class="metric">
-          <span class="label">requests</span>
-          <span class="value" id="m-requests">—</span>
-        </div>
-        <div class="metric">
-          <span class="label">tool calls</span>
-          <span class="value" id="m-tools">—</span>
-        </div>
-        <div class="metric">
-          <span class="label">errors</span>
-          <span class="value" id="m-errors">—</span>
-        </div>
-        <div class="metric">
-          <span class="label">sessions</span>
-          <span class="value" id="m-sessions">—</span>
-        </div>
+      <!-- ------------------------------------------------------- ARENA ----- -->
+      <section class="view" id="view-arena" data-view="arena"
+        role="tabpanel" aria-label="Arena" hidden>
+        <header class="view-head">
+          <div class="vh-titles">
+            <h1 class="vh-title">Model Arena</h1>
+            <p class="vh-sub">Pit models against one prompt and let a judge pick a winner.</p>
+          </div>
+        </header>
 
-        <h2>By Mode</h2>
-        <div id="by-mode" class="by-mode"></div>
+        <div class="view-body">
+          <div class="panel arena-setup">
+            <textarea id="arena-prompt" class="arena-prompt" rows="3"
+              placeholder="Prompt for every model…" spellcheck="false"
+              aria-label="Arena prompt"></textarea>
+            <div class="arena-controls">
+              <div id="arena-models" class="arena-models" aria-label="Models to compare"></div>
+              <div class="arena-actions">
+                <label class="toggle">
+                  <input type="checkbox" id="arena-judge" checked />
+                  <span>Judge</span>
+                </label>
+                <button type="button" id="arena-go" class="send-btn">Compete</button>
+              </div>
+            </div>
+          </div>
+          <div id="arena-results" class="arena-results" aria-live="polite"></div>
+        </div>
+      </section>
 
-        <h2>
-          Audit
-          <span id="audit-verify" class="badge" title="Hash-chain integrity">
-            verify…
-          </span>
-        </h2>
-        <div id="audit-list" class="audit-list" aria-live="polite"></div>
+      <!-- ------------------------------------------------------ AGENTS ----- -->
+      <section class="view" id="view-agents" data-view="agents"
+        role="tabpanel" aria-label="Agents" hidden>
+        <header class="view-head">
+          <div class="vh-titles">
+            <h1 class="vh-title">Agents</h1>
+            <p class="vh-sub">FRIDAY and her specialists. Click one to address it in Command.</p>
+          </div>
+          <div class="vh-actions">
+            <input type="text" id="agents-filter" class="filter-input"
+              placeholder="Filter agents…" autocomplete="off" spellcheck="false"
+              aria-label="Filter agents" />
+          </div>
+        </header>
 
-        <h2>Activity</h2>
-        <div id="log" aria-live="polite"></div>
-      </aside>
+        <div class="view-body">
+          <div id="agents-grid" class="agents-grid" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------ MEMORY ----- -->
+      <section class="view" id="view-memory" data-view="memory"
+        role="tabpanel" aria-label="Memory" hidden>
+        <header class="view-head">
+          <div class="vh-titles">
+            <h1 class="vh-title">Memory</h1>
+            <p class="vh-sub">Dossiers, knowledge sources, the graph, and recent recall.</p>
+          </div>
+        </header>
+
+        <div class="view-body">
+          <section class="panel" aria-label="Dossier search">
+            <h2 class="panel-h">Dossier</h2>
+            <form id="dossier-form" class="searchbox">
+              <input id="dossier-input" type="text" autocomplete="off" spellcheck="false"
+                placeholder="Ask about a person or project…" aria-label="Dossier query" />
+              <button type="submit" id="dossier-go" class="send-btn">Query</button>
+            </form>
+            <div id="dossier-cards" class="card-stack" aria-live="polite"></div>
+          </section>
+
+          <section class="panel" id="rag-panel" aria-label="Knowledge sources" hidden>
+            <h2 class="panel-h">Knowledge Sources <span class="panel-tag">RAG</span></h2>
+            <p class="panel-hint">Drop a file anywhere to ingest it into FRIDAY's memory.</p>
+            <div id="rag-sources" class="rag-sources" aria-live="polite"></div>
+          </section>
+
+          <section class="panel" id="graph-panel" aria-label="Knowledge graph" hidden>
+            <h2 class="panel-h">Knowledge Graph</h2>
+            <div id="graph-entities" class="chip-wrap" aria-live="polite"></div>
+          </section>
+
+          <section class="panel" id="briefing-panel" aria-label="Today's briefing" hidden>
+            <h2 class="panel-h">Briefing</h2>
+            <div id="briefing-body" class="panel-body"></div>
+          </section>
+
+          <section class="panel" id="journal-panel" aria-label="Recent journal" hidden>
+            <h2 class="panel-h">Journal</h2>
+            <div id="journal-list" class="journal-list" aria-live="polite"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------ SYSTEM ----- -->
+      <section class="view" id="view-system" data-view="system"
+        role="tabpanel" aria-label="System" hidden>
+        <header class="view-head">
+          <div class="vh-titles">
+            <h1 class="vh-title">System</h1>
+            <p class="vh-sub">Telemetry, traces, audit chain and live activity.</p>
+          </div>
+        </header>
+
+        <div class="view-body">
+          <div class="metric-grid">
+            <div class="metric-card">
+              <span class="mc-label">requests</span>
+              <span class="mc-value" id="m-requests">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="mc-label">tool calls</span>
+              <span class="mc-value" id="m-tools">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="mc-label">errors</span>
+              <span class="mc-value" id="m-errors">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="mc-label">sessions</span>
+              <span class="mc-value" id="m-sessions">—</span>
+            </div>
+          </div>
+
+          <div class="sys-cols">
+            <section class="panel" aria-label="Activity by mode">
+              <h2 class="panel-h">By Mode</h2>
+              <div id="by-mode" class="by-mode"></div>
+            </section>
+
+            <section class="panel" id="sysstats-panel" aria-label="System stats" hidden>
+              <h2 class="panel-h">Host</h2>
+              <div id="sysstats" class="sysstats"></div>
+              <div id="sysalerts" class="sysalerts" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <section class="panel" aria-label="Audit">
+            <h2 class="panel-h">
+              Audit
+              <span id="audit-verify" class="badge" title="Hash-chain integrity">verify…</span>
+            </h2>
+            <div id="audit-list" class="audit-list" aria-live="polite"></div>
+          </section>
+
+          <section class="panel" aria-label="Trace flow">
+            <h2 class="panel-h">Traces <span class="panel-tag" id="flow-tag">live</span></h2>
+            <div id="flow-list" class="flow-list" aria-live="polite"></div>
+          </section>
+
+          <section class="panel" aria-label="Activity log">
+            <h2 class="panel-h">Activity</h2>
+            <div id="log" aria-live="polite"></div>
+          </section>
+        </div>
+      </section>
     </main>
+  </div>
+
+  <!-- Trace REPLAY modal (spans + matching audit rows). -->
+  <div id="replay-overlay" role="dialog" aria-modal="true" aria-label="Trace replay" hidden>
+    <div id="replay" class="replay">
+      <div class="replay-head">
+        <span>Replay <strong id="replay-id"></strong></span>
+        <button type="button" id="replay-close" class="icon-btn" aria-label="Close replay">✕</button>
+      </div>
+      <div id="replay-spans" class="replay-spans"></div>
+      <h3 class="replay-sub">matching audit rows</h3>
+      <div id="replay-audit" class="replay-audit"></div>
+    </div>
+  </div>
+
+  <!-- Brain (model picker) modal. -->
+  <div id="brain-overlay" role="dialog" aria-modal="true" aria-label="Choose model" hidden>
+    <div id="brain-modal" class="brain-modal">
+      <div class="brain-head">
+        <span>Choose FRIDAY's brain</span>
+        <button type="button" id="brain-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="brain-list" class="brain-list" aria-live="polite"></div>
+    </div>
   </div>
 
   <!-- Drop overlay for drag-drop RAG ingest (shown only while dragging). -->
   <div id="drop-overlay" aria-hidden="true">
     <div class="drop-card">
-      <div class="drop-glyph">⬇</div>
+      <div class="drop-glyph" aria-hidden="true">⬇</div>
       <div class="drop-text">Drop a file to ingest into RAG</div>
       <div class="drop-sub">POST /rag/ingest — then it's askable</div>
     </div>
   </div>
 
-  <!-- Command palette (Cmd/Ctrl-K): talks to /chat + /admin. -->
+  <!-- Command palette (Cmd/Ctrl-K): talks to /chat + /admin + switches views. -->
   <div id="palette-overlay" role="dialog" aria-modal="true" aria-label="Command palette">
     <div id="palette">
-      <input
-        id="palette-input"
-        type="text"
-        autocomplete="off"
-        spellcheck="false"
+      <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
         placeholder="Type a command, or ask FRIDAY anything…"
         aria-label="Command palette input" />
-      <ul id="palette-list"></ul>
+      <ul id="palette-list" role="listbox" aria-label="Commands"></ul>
       <div id="palette-result" aria-live="polite"></div>
     </div>
   </div>
 
-  <!-- Toast for transient status (voice, ingest, errors). -->
-  <div id="toast" hidden></div>
+  <!-- Toast for transient status (voice, ingest, approvals, errors). -->
+  <div id="toast" role="status" hidden></div>
 
   <script src="/hud/static/hud.js"></script>
 </body>

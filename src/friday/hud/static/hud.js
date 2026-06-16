@@ -1,36 +1,18 @@
+// © Lakshya Badjatya — Author
 /*
-  FRIDAY HUD — Command Centre cockpit controller (no-build, vanilla ES2022).
+  FRIDAY HUD — "viewing space" cockpit controller (no-build, vanilla ES2022).
 
-  A live, single-page cockpit over the EXISTING same-origin FRIDAY endpoints. No
-  bundler, no framework, no CDN: every line here is plain ES2022 the browser runs
+  A live single-page cockpit over the EXISTING same-origin FRIDAY endpoints. No
+  bundler, no framework, no CDN: every line is plain ES2022 the browser runs
   directly. The page NEVER eval()s server output — endpoint data is rendered as
-  TEXT nodes only, so a compromised or surprising payload can paint text but can
-  never execute.
+  TEXT nodes only, so a surprising payload can paint text but can never execute.
 
-  Systems, each consuming an existing endpoint and degrading gracefully if it is
-  off (404 / disabled / unreachable):
-
-    1. ROSTER       GET /roster        — a card per persona; a card lights up when
-                                         a recent trace used its mode (poll
-                                         /admin/traces). Click to address it.
-    2. TRACE FLOW   GET /admin/traces  — recent turns as animated route->dispatch
-       + REPLAY     GET /admin/audit     ->synth flows; click to replay spans +
-                                         matching audit rows.
-    3. APPROVALS    POST /chat         — when a reply needs confirmation, a rich
-                                         card with Approve/Deny re-sends the turn
-                                         with confirmed:true.
-    4. DOSSIER      POST /chat         — a search box that asks FRIDAY about a
-                                         person/project and renders the dossier.
-    5. DRAG-DROP    POST /rag/ingest   — drop a file onto the HUD to ingest it;
-       RAG                               afterwards it's askable via /chat.
-    6. GLOBE        GET /maps          — a button that opens the 3D globe.
-    7. VOICE        Web Speech + /chat — a mic that dictates a turn to FRIDAY.
-    8. METRICS      GET /admin/metrics — telemetry, per-mode counts, and an audit
-       + AUDIT      GET /admin/audit     panel with a verify badge from
-                    GET /admin/audit/verify.
-
-  Plus the arc-reactor BOOT SEQUENCE and the Cmd/Ctrl-K command palette retained
-  from the original cockpit.
+  The shell is a slim left rail + one large main canvas. Exactly one view is
+  visible at a time (Command, Arena, Agents, Memory, System); switching is instant
+  and sets the URL hash for deep-linking + back-button. Heavy polling (metrics,
+  traces, audit) runs ONLY while System is the active view; a slow /health
+  heartbeat keeps the connection pill honest everywhere. Every optional endpoint
+  degrades gracefully — a 404 quietly hides its panel instead of crashing.
 
   API BASE is configurable: ?api=<url> in the page URL (or window.FRIDAY_API_BASE)
   points every fetch at a remote backend; default is same-origin ("").
@@ -89,7 +71,7 @@
     row.appendChild(mk("span", "t", "[" + stamp() + "] "));
     row.appendChild(document.createTextNode(String(message)));
     log.insertBefore(row, log.firstChild);
-    while (log.childNodes.length > 40) {
+    while (log.childNodes.length > 60) {
       log.removeChild(log.lastChild);
     }
   }
@@ -112,8 +94,6 @@
   }
 
   // --- API base (configurable) ----------------------------------------------
-  // Same-origin by default. ?api=<url> or window.FRIDAY_API_BASE overrides it so
-  // a locally-served HUD can drive a remote FRIDAY. A trailing slash is trimmed.
   function resolveApiBase() {
     var base = "";
     try {
@@ -132,17 +112,16 @@
   }
 
   // --- backend client (no key baked in) -------------------------------------
-  // Auth (if the gateway requires it) is the browser/gateway's concern; the HUD
-  // ships no credentials of its own.
-
-  /** GET a JSON endpoint; resolves to parsed JSON or throws. */
+  /** GET a JSON endpoint; resolves to parsed JSON or throws (status on .status). */
   async function getJSON(path) {
     var resp = await fetch(url(path), {
       method: "GET",
       headers: { Accept: "application/json" },
     });
     if (!resp.ok) {
-      throw new Error("GET " + path + " -> HTTP " + resp.status);
+      var e = new Error("GET " + path + " -> HTTP " + resp.status);
+      e.status = resp.status;
+      throw e;
     }
     return resp.json();
   }
@@ -158,7 +137,9 @@
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
-      throw new Error("POST " + path + " -> HTTP " + resp.status);
+      var e = new Error("POST " + path + " -> HTTP " + resp.status);
+      e.status = resp.status;
+      throw e;
     }
     return resp.json();
   }
@@ -169,10 +150,25 @@
   // Who the next free-form question is addressed to (a persona name or null).
   var addressTarget = null;
 
-  // --- particle field --------------------------------------------------------
+  // The active model id (POST /chat passes it so a turn uses the chosen brain).
+  var activeModel = null;
+
+  // --- prefers-reduced-motion ------------------------------------------------
+  function reducedMotion() {
+    try {
+      return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // --- particle field (light; disabled on small screens / reduced motion) ----
   function startParticles() {
     var canvas = el("particles");
     if (!canvas || !canvas.getContext) {
+      return;
+    }
+    if (reducedMotion() || window.innerWidth < 900) {
       return;
     }
     var ctx = canvas.getContext("2d");
@@ -188,15 +184,15 @@
     resize();
     window.addEventListener("resize", resize);
 
-    var COUNT = 70;
+    var COUNT = 34;
     for (var i = 0; i < COUNT; i++) {
       particles.push({
         x: Math.random() * canvas.width,
         y: Math.random() * canvas.height,
-        vx: (Math.random() - 0.5) * 0.35,
-        vy: (Math.random() - 0.5) * 0.35,
-        r: Math.random() * 1.8 + 0.4,
-        a: Math.random() * 0.5 + 0.2,
+        vx: (Math.random() - 0.5) * 0.22,
+        vy: (Math.random() - 0.5) * 0.22,
+        r: Math.random() * 1.4 + 0.4,
+        a: Math.random() * 0.35 + 0.12,
       });
     }
 
@@ -212,12 +208,9 @@
         if (p.y > canvas.height) p.y = 0;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(65, 230, 255, " + p.a + ")";
-        ctx.shadowColor = "rgba(65, 230, 255, 0.8)";
-        ctx.shadowBlur = 8;
+        ctx.fillStyle = "rgba(79, 227, 255, " + p.a + ")";
         ctx.fill();
       }
-      ctx.shadowBlur = 0;
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
@@ -226,7 +219,6 @@
   // --- connection pill -------------------------------------------------------
   function setOnline(online) {
     var pill = el("conn-status");
-    var reactor = el("reactor-state");
     if (pill) {
       pill.classList.toggle("is-online", online);
       pill.classList.toggle("is-offline", !online);
@@ -235,25 +227,37 @@
         label.textContent = online ? "online" : "offline";
       }
     }
-    if (reactor) {
-      reactor.textContent = online ? "ONLINE" : "STANDBY";
+  }
+
+  /** Slow global heartbeat: a cheap /health ping drives the connection pill. */
+  async function heartbeat() {
+    try {
+      var resp = await fetch(url("/health"), { method: "GET" });
+      setOnline(resp.ok);
+    } catch (err) {
+      setOnline(false);
     }
   }
 
-  // --- arc-reactor boot sequence ---------------------------------------------
+  // --- arc-reactor boot sequence (brief) ------------------------------------
   function runBootSequence() {
     var boot = el("boot");
     var text = el("boot-text");
     var bar = el("boot-bar");
+    if (reducedMotion()) {
+      if (boot) {
+        boot.classList.add("is-done");
+      }
+      logLine("reactor online", "ok");
+      return;
+    }
     var steps = [
       "initializing reactor…",
-      "spinning up containment rings…",
-      "mustering persona roster…",
+      "mustering roster…",
       "linking command bus…",
       "reactor online.",
     ];
     var i = 0;
-
     function tick() {
       if (text) {
         text.textContent = steps[i];
@@ -263,24 +267,103 @@
       }
       i++;
       if (i < steps.length) {
-        window.setTimeout(tick, 480);
+        window.setTimeout(tick, 380);
       } else {
         window.setTimeout(function () {
           if (boot) {
             boot.classList.add("is-done");
           }
           logLine("reactor online", "ok");
-        }, 520);
+        }, 420);
       }
     }
     tick();
   }
 
-  // --- chat helper (shared by dossier, voice, palette, approvals) -----------
-  // The HTTP /chat contract is {session_id, text} -> {text, mode, route, audio}.
-  // We additionally send confirmed:true on an approval re-send; the backend
-  // ignores unknown body fields, and a confirming follow-up turn proceeds.
+  // ==========================================================================
+  // VIEW ROUTER — one view visible at a time, hash-deep-linked.
+  // ==========================================================================
+  var VIEWS = ["command", "arena", "agents", "memory", "system"];
+  var currentView = "command";
+  var loadedOnce = {};
 
+  function showView(name, opts) {
+    if (VIEWS.indexOf(name) === -1) {
+      name = "command";
+    }
+    currentView = name;
+    VIEWS.forEach(function (v) {
+      var section = el("view-" + v);
+      if (section) {
+        var on = v === name;
+        section.classList.toggle("is-active", on);
+        section.hidden = !on;
+      }
+      var nav = el("nav-" + v);
+      if (nav) {
+        nav.setAttribute("aria-selected", v === name ? "true" : "false");
+      }
+    });
+    // Keep the hash in sync for deep-linking + back-button (no reload).
+    if (!opts || !opts.fromHash) {
+      var want = "#" + name;
+      if (window.location.hash !== want) {
+        window.location.hash = want;
+      }
+    }
+    // Lazy first-load for the heavier views.
+    onViewEnter(name);
+    // System is the only polling view; start/stop accordingly.
+    syncSystemPolling();
+  }
+
+  function onViewEnter(name) {
+    if (name === "agents" && !loadedOnce.agents) {
+      loadedOnce.agents = true;
+      loadRoster();
+    }
+    if (name === "arena" && !loadedOnce.arena) {
+      loadedOnce.arena = true;
+      loadModels();
+    }
+    if (name === "memory" && !loadedOnce.memory) {
+      loadedOnce.memory = true;
+      loadMemoryExtras();
+    }
+    if (name === "system" && !loadedOnce.system) {
+      loadedOnce.system = true;
+      refreshTelemetry();
+      refreshTraces();
+      refreshAudit();
+    }
+    if (name === "command") {
+      var input = el("composer-input");
+      if (input) {
+        window.setTimeout(function () {
+          input.focus();
+        }, 0);
+      }
+    }
+  }
+
+  function wireRail() {
+    VIEWS.forEach(function (v) {
+      var nav = el("nav-" + v);
+      if (nav) {
+        nav.addEventListener("click", function () {
+          showView(v);
+        });
+      }
+    });
+    window.addEventListener("hashchange", function () {
+      var name = (window.location.hash || "").replace(/^#/, "") || "command";
+      if (name !== currentView) {
+        showView(name, { fromHash: true });
+      }
+    });
+  }
+
+  // --- chat helpers ----------------------------------------------------------
   /** Prefix a free-form question with the addressed persona, if any. */
   function withAddress(text) {
     if (addressTarget) {
@@ -295,14 +378,15 @@
     if (opts && opts.confirmed) {
       body.confirmed = true;
     }
+    if (activeModel) {
+      body.model = activeModel;
+    }
     return postJSON("/chat", body);
   }
 
   // A reply "needs confirmation" when the backend says so explicitly
-  // (data.needs_confirmation), or — since the documented /chat body is
-  // {text, mode, route, audio} with no such field — when the in-character reply
-  // is the orchestrator's confirm question. We match the stable confirm phrasing
-  // ("confirm before I act" / "Reply to confirm") rather than guessing.
+  // (data.needs_confirmation), or when the in-character reply is the
+  // orchestrator's confirm question (stable phrasing).
   function replyNeedsConfirmation(data) {
     if (!data) {
       return false;
@@ -318,12 +402,198 @@
     );
   }
 
-  // --- ROSTER panel ----------------------------------------------------------
-  // GET /roster lists FRIDAY + 8 specialists. Each card lights up when a recent
-  // trace's mode maps to that persona; clicking a card addresses that persona.
+  // ==========================================================================
+  // COMMAND — centered conversation column + composer.
+  // ==========================================================================
+  function chatEmptyState() {
+    var logNode = el("chat-log");
+    if (!logNode || logNode.childNodes.length) {
+      return;
+    }
+    var empty = mk("div", "chat-empty");
+    empty.appendChild(mk("strong", null, "Good to see you."));
+    empty.appendChild(
+      document.createTextNode(
+        "Ask anything, or address a specialist from the Agents view. Press ⌘K for the command palette."
+      )
+    );
+    logNode.appendChild(empty);
+  }
+
+  function clearChatEmpty() {
+    var logNode = el("chat-log");
+    if (!logNode) {
+      return;
+    }
+    var empty = logNode.querySelector(".chat-empty");
+    if (empty) {
+      logNode.removeChild(empty);
+    }
+  }
+
+  function scrollChat() {
+    var logNode = el("chat-log");
+    if (logNode) {
+      logNode.scrollTop = logNode.scrollHeight;
+    }
+  }
+
+  function addUserTurn(text) {
+    var logNode = el("chat-log");
+    if (!logNode) {
+      return null;
+    }
+    clearChatEmpty();
+    var turn = mk("div", "turn user");
+    turn.appendChild(mk("div", "turn-bubble", text));
+    logNode.appendChild(turn);
+    scrollChat();
+    return turn;
+  }
+
+  /** Create a pending FRIDAY turn; returns it for later fill-in. */
+  function addFridayPending() {
+    var logNode = el("chat-log");
+    if (!logNode) {
+      return null;
+    }
+    var turn = mk("div", "turn friday pending");
+    turn.appendChild(mk("div", "turn-bubble", "…"));
+    logNode.appendChild(turn);
+    scrollChat();
+    return turn;
+  }
+
+  /** Fill a pending FRIDAY turn with its reply text + a route chip. */
+  function fillFridayTurn(turn, data, isErr) {
+    if (!turn) {
+      return;
+    }
+    turn.classList.remove("pending");
+    if (isErr) {
+      turn.classList.add("err");
+    }
+    var bubble = turn.querySelector(".turn-bubble");
+    if (bubble) {
+      bubble.textContent = (data && data.text) || "(no reply)";
+    }
+    var route = data && data.route;
+    if (route && !isErr) {
+      var chip = mk("div", "route-chip");
+      chip.appendChild(document.createTextNode((route.mode || data.mode || "—") + " · "));
+      var agent = mk("b", null, route.agent || "FRIDAY");
+      chip.appendChild(agent);
+      if (route.confidence != null) {
+        var pct = Math.round(Number(route.confidence) * 100);
+        if (!isNaN(pct)) {
+          chip.appendChild(document.createTextNode(" · "));
+          chip.appendChild(mk("span", "rc-conf", pct + "%"));
+        }
+      }
+      turn.appendChild(chip);
+    }
+    scrollChat();
+  }
+
+  /** A full chat round-trip from the composer/voice/palette. */
+  async function submitChat(rawText) {
+    var text = (rawText || "").trim();
+    if (!text) {
+      return;
+    }
+    var addressed = withAddress(text);
+    addUserTurn(addressTarget ? "→ " + addressTarget + ": " + text : text);
+    var pending = addFridayPending();
+    try {
+      var data = await sendChat(addressed);
+      fillFridayTurn(pending, data, false);
+      logLine("chat: " + text, "ok");
+      maybeApproval(data, addressed);
+    } catch (err) {
+      fillFridayTurn(
+        pending,
+        { text: "Failed: " + (err && err.message ? err.message : err) },
+        true
+      );
+      logLine("chat failed: " + text, "err");
+    }
+  }
+
+  function autoGrow(area) {
+    area.style.height = "auto";
+    area.style.height = Math.min(area.scrollHeight, 200) + "px";
+  }
+
+  function wireComposer() {
+    var form = el("composer");
+    var input = el("composer-input");
+    if (!form || !input) {
+      return;
+    }
+    input.addEventListener("input", function () {
+      autoGrow(input);
+    });
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        var text = input.value;
+        input.value = "";
+        autoGrow(input);
+        submitChat(text);
+      }
+    });
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var text = input.value;
+      input.value = "";
+      autoGrow(input);
+      submitChat(text);
+    });
+    chatEmptyState();
+  }
+
+  // --- persona addressing ----------------------------------------------------
+  function setAddress(name) {
+    addressTarget = name && name !== "FRIDAY" ? name : null;
+    var chip = el("address-chip");
+    var target = el("address-target");
+    if (target) {
+      target.textContent = addressTarget || "FRIDAY";
+    }
+    if (chip) {
+      chip.hidden = !addressTarget;
+    }
+    // Reflect selection on the agent cards.
+    var grid = el("agents-grid");
+    if (grid) {
+      var cards = grid.querySelectorAll(".agent-card");
+      for (var i = 0; i < cards.length; i++) {
+        cards[i].classList.toggle(
+          "is-selected",
+          cards[i].getAttribute("data-name") === addressTarget
+        );
+      }
+    }
+    if (addressTarget) {
+      toast("Addressing " + addressTarget + " — type your message");
+    }
+  }
+
+  function wireAddressClear() {
+    var btn = el("address-clear");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        setAddress(null);
+      });
+    }
+  }
+
+  // ==========================================================================
+  // AGENTS — roster cards (FRIDAY + specialists); click to address + jump.
+  // ==========================================================================
   var rosterByName = {};
-  // Coarse trace-mode -> persona mapping, mirroring the roster's intent map so a
-  // recent trace lights up the persona that would have handled it.
+  var lastPersonas = [];
+
   var MODE_TO_PERSONA = {
     security: "EDITH",
     lockdown: "EDITH",
@@ -353,7 +623,6 @@
     system: "FORGE",
   };
 
-  /** Resolve a trace mode string to a persona name (FRIDAY when unknown). */
   function personaForMode(mode) {
     if (!mode) {
       return "FRIDAY";
@@ -362,7 +631,6 @@
     if (MODE_TO_PERSONA[key]) {
       return MODE_TO_PERSONA[key];
     }
-    // Substring fallback: e.g. "finance_query" -> GECKO.
     for (var token in MODE_TO_PERSONA) {
       if (Object.prototype.hasOwnProperty.call(MODE_TO_PERSONA, token)) {
         if (key.indexOf(token) !== -1) {
@@ -373,102 +641,669 @@
     return "FRIDAY";
   }
 
-  function setAddress(name) {
-    addressTarget = name && name !== "FRIDAY" ? name : null;
-    var bar = el("address-bar");
-    var target = el("address-target");
-    if (target) {
-      target.textContent = name || "FRIDAY";
-    }
-    if (bar) {
-      bar.hidden = !addressTarget;
-    }
-    // Reflect selection on the roster cards.
-    var grid = el("roster-grid");
-    if (grid) {
-      var cards = grid.querySelectorAll(".persona");
-      for (var i = 0; i < cards.length; i++) {
-        cards[i].classList.toggle(
-          "is-selected",
-          cards[i].getAttribute("data-name") === name
-        );
-      }
-    }
-    if (addressTarget) {
-      toast("Addressing " + addressTarget + " — type your message");
-    }
-  }
-
-  async function loadRoster() {
-    var grid = el("roster-grid");
+  function renderAgents() {
+    var grid = el("agents-grid");
     if (!grid) {
       return;
     }
+    var filterNode = el("agents-filter");
+    var q = filterNode ? filterNode.value.trim().toLowerCase() : "";
+    clear(grid);
+    var shown = lastPersonas.filter(function (p) {
+      if (!q) {
+        return true;
+      }
+      return (
+        String(p.name || "").toLowerCase().indexOf(q) !== -1 ||
+        String(p.title || "").toLowerCase().indexOf(q) !== -1
+      );
+    });
+    if (!shown.length) {
+      grid.appendChild(mk("div", "panel-empty", q ? "no agents match" : "roster unavailable"));
+      return;
+    }
+    shown.forEach(function (p) {
+      var card = mk("button", "agent-card");
+      card.type = "button";
+      card.setAttribute("data-name", p.name);
+      if (p.name === addressTarget) {
+        card.classList.add("is-selected");
+      }
+      var head = mk("div", "agent-head");
+      head.appendChild(mk("span", "agent-dot"));
+      head.appendChild(mk("span", "agent-name", p.name));
+      card.appendChild(head);
+      card.appendChild(mk("div", "agent-title", p.title || ""));
+      var scope = mk("div", "agent-scope");
+      (p.scope || []).slice(0, 5).forEach(function (s) {
+        scope.appendChild(mk("span", "scope-tag", s));
+      });
+      card.appendChild(scope);
+      card.addEventListener("click", function () {
+        setAddress(addressTarget === p.name ? null : p.name);
+        if (addressTarget) {
+          showView("command");
+        }
+      });
+      grid.appendChild(card);
+    });
+    lightAgents(lastTraces);
+  }
+
+  async function loadRoster() {
     var data;
     try {
       data = await getJSON("/roster");
     } catch (err) {
-      // Roster is always-available server-side; a failure means offline.
-      clear(grid);
-      grid.appendChild(mk("div", "panel-empty", "roster unavailable"));
+      lastPersonas = [];
+      renderAgents();
       return;
     }
-    var personas = (data && data.personas) || [];
-    var count = el("roster-count");
-    if (count) {
-      count.textContent = personas.length ? String(personas.length) : "";
-    }
+    lastPersonas = (data && data.personas) || [];
     rosterByName = {};
-    clear(grid);
-    personas.forEach(function (p) {
+    lastPersonas.forEach(function (p) {
       rosterByName[p.name] = p;
-      var card = mk("button", "persona");
-      card.type = "button";
-      card.setAttribute("data-name", p.name);
-      card.title = (p.title || "") + " — click to address";
-      var dot = mk("span", "persona-dot");
-      var body = mk("span", "persona-body");
-      body.appendChild(mk("span", "persona-name", p.name));
-      body.appendChild(mk("span", "persona-title", p.title || ""));
-      var scope = (p.scope || []).slice(0, 4).join(" · ");
-      if ((p.scope || []).length > 4) {
-        scope += " · …";
-      }
-      body.appendChild(mk("span", "persona-scope", scope));
-      card.appendChild(dot);
-      card.appendChild(body);
-      card.addEventListener("click", function () {
-        // Toggle: clicking the addressed persona clears the address.
-        setAddress(addressTarget === p.name ? null : p.name);
-      });
-      grid.appendChild(card);
     });
-    logLine("roster: " + personas.length + " personas", "ok");
+    renderAgents();
+    logLine("roster: " + lastPersonas.length + " personas", "ok");
   }
 
-  /** Light up persona cards that a recent trace used; fade the rest. */
-  function lightRoster(traces) {
-    var grid = el("roster-grid");
+  /** Light agent cards whose mode a recent trace used; fade the rest. */
+  function lightAgents(traces) {
+    var grid = el("agents-grid");
     if (!grid) {
       return;
     }
-    // Mark a persona "warm" when any of the most-recent traces resolves to it.
-    // /admin/traces returns the recent window already (oldest-first), so we take
-    // the newest few as the active set; a longer-idle persona simply fades out.
     var active = {};
     (traces || []).slice(-6).forEach(function (t) {
       active[personaForMode(t.mode)] = true;
     });
-    var cards = grid.querySelectorAll(".persona");
+    var cards = grid.querySelectorAll(".agent-card");
     for (var i = 0; i < cards.length; i++) {
       var name = cards[i].getAttribute("data-name");
       cards[i].classList.toggle("is-active", !!active[name]);
     }
   }
 
-  // --- TRACE FLOW + REPLAY ---------------------------------------------------
-  // Render recent /admin/traces as route->dispatch->synth flows. Clicking a flow
-  // replays its spans and the matching /admin/audit rows (same correlation id).
+  function wireAgentsFilter() {
+    var filterNode = el("agents-filter");
+    if (filterNode) {
+      filterNode.addEventListener("input", renderAgents);
+    }
+  }
+
+  // ==========================================================================
+  // BRAIN model picker — GET /models, POST /models/active. Graceful on 404.
+  // ==========================================================================
+  var lastModels = [];
+
+  function setBrainLabel(text) {
+    var label = el("brain-label");
+    if (label) {
+      label.textContent = text || "brain";
+    }
+  }
+
+  async function loadModels() {
+    var data;
+    try {
+      data = await getJSON("/models");
+    } catch (err) {
+      // 404 (no gateway) or unreachable: keep the pill quiet, arena shows empty.
+      setBrainLabel("no gateway");
+      lastModels = [];
+      renderArenaModels();
+      return;
+    }
+    lastModels = (data && data.models) || [];
+    activeModel = (data && data.active) || activeModel;
+    var act = lastModels.filter(function (m) {
+      return m.id === activeModel;
+    })[0];
+    setBrainLabel(act ? act.label || act.model || act.id : activeModel || "brain");
+    renderArenaModels();
+  }
+
+  function renderBrainList() {
+    var listNode = el("brain-list");
+    if (!listNode) {
+      return;
+    }
+    clear(listNode);
+    if (!lastModels.length) {
+      listNode.appendChild(
+        mk("div", "panel-empty", "No model gateway available on this backend.")
+      );
+      return;
+    }
+    lastModels.forEach(function (m) {
+      var row = mk("button", "brain-row");
+      row.type = "button";
+      if (m.id === activeModel) {
+        row.classList.add("is-active");
+      }
+      var left = mk("div");
+      left.appendChild(mk("div", "br-label", m.label || m.model || m.id));
+      left.appendChild(mk("div", "br-prov", (m.provider || "") + " · " + (m.model || m.id)));
+      row.appendChild(left);
+      var right = mk("div");
+      if (m.free) {
+        right.appendChild(mk("span", "br-free", "free"));
+      }
+      if (m.id === activeModel) {
+        right.appendChild(mk("span", "br-active-tag", " active"));
+      }
+      row.appendChild(right);
+      row.addEventListener("click", function () {
+        chooseModel(m);
+      });
+      listNode.appendChild(row);
+    });
+  }
+
+  async function chooseModel(m) {
+    try {
+      var resp = await postJSON("/models/active", { model_id: m.id });
+      activeModel = (resp && resp.active) || m.id;
+      setBrainLabel(m.label || m.model || m.id);
+      renderBrainList();
+      toast("Brain set to " + (m.label || m.id));
+      logLine("brain: " + (m.label || m.id), "ok");
+      closeBrain();
+    } catch (err) {
+      toast("Could not switch model: " + (err && err.message ? err.message : err));
+    }
+  }
+
+  function openBrain() {
+    var overlay = el("brain-overlay");
+    if (!overlay) {
+      return;
+    }
+    renderBrainList();
+    overlay.hidden = false;
+  }
+  function closeBrain() {
+    var overlay = el("brain-overlay");
+    if (overlay) {
+      overlay.hidden = true;
+    }
+  }
+  function wireBrain() {
+    var pill = el("brain-pill");
+    if (pill) {
+      pill.addEventListener("click", openBrain);
+    }
+    var close = el("brain-close");
+    if (close) {
+      close.addEventListener("click", closeBrain);
+    }
+    var overlay = el("brain-overlay");
+    if (overlay) {
+      overlay.addEventListener("click", function (ev) {
+        if (ev.target === overlay) {
+          closeBrain();
+        }
+      });
+    }
+  }
+
+  // ==========================================================================
+  // ARENA — POST /models/compare. Multi-select, judge toggle, result grid.
+  // ==========================================================================
+  function renderArenaModels() {
+    var host = el("arena-models");
+    if (!host) {
+      return;
+    }
+    clear(host);
+    if (!lastModels.length) {
+      host.appendChild(
+        mk("div", "panel-empty", "No models to compare — model gateway is off.")
+      );
+      return;
+    }
+    lastModels.forEach(function (m, idx) {
+      var chip = mk("label", "model-chip");
+      var box = mk("input");
+      box.type = "checkbox";
+      box.value = m.id;
+      box.checked = idx < 4; // first ~4 checked by default
+      if (box.checked) {
+        chip.classList.add("is-on");
+      }
+      box.addEventListener("change", function () {
+        chip.classList.toggle("is-on", box.checked);
+      });
+      chip.appendChild(box);
+      chip.appendChild(mk("span", null, m.label || m.model || m.id));
+      if (m.free) {
+        chip.appendChild(mk("span", "mc-free", "free"));
+      }
+      host.appendChild(chip);
+    });
+  }
+
+  function selectedArenaModels() {
+    var host = el("arena-models");
+    if (!host) {
+      return [];
+    }
+    var boxes = host.querySelectorAll('input[type="checkbox"]');
+    var ids = [];
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i].checked) {
+        ids.push(boxes[i].value);
+      }
+    }
+    return ids;
+  }
+
+  function labelForModel(id) {
+    var m = lastModels.filter(function (x) {
+      return x.id === id;
+    })[0];
+    return m ? m.label || m.model || m.id : id;
+  }
+  function isFreeModel(id) {
+    var m = lastModels.filter(function (x) {
+      return x.id === id;
+    })[0];
+    return !!(m && m.free);
+  }
+
+  function renderArenaLoading(ids) {
+    var results = el("arena-results");
+    if (!results) {
+      return;
+    }
+    clear(results);
+    ids.forEach(function (id) {
+      var card = mk("div", "arena-card loading");
+      card.setAttribute("data-model", id);
+      var head = mk("div", "arena-card-head");
+      head.appendChild(mk("span", "ac-label", labelForModel(id)));
+      if (isFreeModel(id)) {
+        head.appendChild(mk("span", "ac-free", "free"));
+      }
+      card.appendChild(head);
+      card.appendChild(mk("div", "ac-text", "thinking…"));
+      results.appendChild(card);
+    });
+  }
+
+  function renderArenaResults(payload) {
+    var results = el("arena-results");
+    if (!results) {
+      return;
+    }
+    clear(results);
+    var rows = (payload && payload.results) || [];
+    var best = payload && payload.best;
+    if (!rows.length) {
+      results.appendChild(mk("div", "panel-empty", "no results"));
+      return;
+    }
+    rows.forEach(function (r) {
+      var card = mk("div", "arena-card");
+      if (r.model_id === best) {
+        card.classList.add("winner");
+      }
+      if (r.ok === false) {
+        card.classList.add("err");
+      }
+      var head = mk("div", "arena-card-head");
+      head.appendChild(mk("span", "ac-label", r.label || labelForModel(r.model_id)));
+      if (isFreeModel(r.model_id)) {
+        head.appendChild(mk("span", "ac-free", "free"));
+      }
+      if (r.model_id === best) {
+        head.appendChild(mk("span", "ac-best", "🏆 BEST"));
+      }
+      card.appendChild(head);
+      var text =
+        r.ok === false
+          ? "error: " + (r.error || "failed")
+          : r.text || "(empty)";
+      card.appendChild(mk("div", "ac-text", text));
+      var foot = mk("div", "ac-foot");
+      foot.appendChild(mk("span", null, r.ok === false ? "failed" : "ok"));
+      var lat = r.latency_ms != null ? (r.latency_ms / 1000).toFixed(1) + "s" : "—";
+      foot.appendChild(mk("span", "ac-lat", lat));
+      card.appendChild(foot);
+      results.appendChild(card);
+    });
+  }
+
+  async function runArena() {
+    var promptNode = el("arena-prompt");
+    var judgeNode = el("arena-judge");
+    var go = el("arena-go");
+    var prompt = promptNode ? promptNode.value.trim() : "";
+    if (!prompt) {
+      toast("Type a prompt for the arena first");
+      return;
+    }
+    var ids = selectedArenaModels();
+    if (!ids.length) {
+      toast("Pick at least one model");
+      return;
+    }
+    if (go) {
+      go.disabled = true;
+    }
+    renderArenaLoading(ids);
+    try {
+      var payload = await postJSON("/models/compare", {
+        prompt: prompt,
+        models: ids,
+        judge: judgeNode ? !!judgeNode.checked : true,
+      });
+      renderArenaResults(payload);
+      logLine("arena: " + ids.length + " models", "ok");
+    } catch (err) {
+      var results = el("arena-results");
+      if (results) {
+        clear(results);
+        results.appendChild(
+          mk("div", "panel-empty", "Arena failed: " + (err && err.message ? err.message : err))
+        );
+      }
+      logLine("arena failed", "err");
+    } finally {
+      if (go) {
+        go.disabled = false;
+      }
+    }
+  }
+
+  function wireArena() {
+    var go = el("arena-go");
+    if (go) {
+      go.addEventListener("click", runArena);
+    }
+  }
+
+  // ==========================================================================
+  // MEMORY — dossier search + optional RAG/graph/briefing/journal subsections.
+  // ==========================================================================
+  async function runDossier(query) {
+    var q = (query || "").trim();
+    var cards = el("dossier-cards");
+    if (!q || !cards) {
+      return;
+    }
+    var card = mk("div", "card dossier loading");
+    var head = mk("div", "card-head");
+    head.appendChild(mk("span", "card-title", q));
+    head.appendChild(mk("span", "card-meta", "querying…"));
+    card.appendChild(head);
+    var bodyNode = mk("div", "card-body", "FRIDAY is compiling the dossier…");
+    card.appendChild(bodyNode);
+    cards.insertBefore(card, cards.firstChild);
+    while (cards.childNodes.length > 6) {
+      cards.removeChild(cards.lastChild);
+    }
+    try {
+      var data = await sendChat(withAddress("Give me a dossier on " + q));
+      card.classList.remove("loading");
+      var meta = card.querySelector(".card-meta");
+      if (meta) {
+        meta.textContent = data && data.mode ? data.mode : "ready";
+      }
+      bodyNode.textContent = (data && data.text) || "(no dossier returned)";
+      maybeApproval(data, "Give me a dossier on " + q);
+      logLine("dossier: " + q, "ok");
+    } catch (err) {
+      card.classList.remove("loading");
+      card.classList.add("err");
+      var meta2 = card.querySelector(".card-meta");
+      if (meta2) {
+        meta2.textContent = "error";
+      }
+      bodyNode.textContent =
+        "Dossier failed: " + (err && err.message ? err.message : err);
+    }
+  }
+
+  function wireDossier() {
+    var form = el("dossier-form");
+    var input = el("dossier-input");
+    if (!form || !input) {
+      return;
+    }
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      runDossier(input.value);
+      input.value = "";
+    });
+  }
+
+  /** Load the optional Memory subsections; each hides gracefully on error. */
+  function loadMemoryExtras() {
+    loadRagSources();
+    loadGraphEntities();
+    loadBriefing();
+    loadJournal();
+  }
+
+  async function loadRagSources() {
+    var panel = el("rag-panel");
+    var host = el("rag-sources");
+    if (!panel || !host) {
+      return;
+    }
+    var data;
+    try {
+      data = await getJSON("/rag/sources");
+    } catch (err) {
+      panel.hidden = true; // 404 => RAG off
+      return;
+    }
+    panel.hidden = false;
+    var sources = (data && data.sources) || [];
+    clear(host);
+    if (!sources.length) {
+      host.appendChild(mk("div", "panel-empty", "No sources yet — drop a file to ingest."));
+      return;
+    }
+    sources.forEach(function (id) {
+      var row = mk("div", "rag-row");
+      row.appendChild(mk("span", "rag-id", id));
+      var del = mk("button", "rag-del", "delete");
+      del.type = "button";
+      del.addEventListener("click", function () {
+        deleteRagSource(id, row);
+      });
+      row.appendChild(del);
+      host.appendChild(row);
+    });
+  }
+
+  async function deleteRagSource(id, row) {
+    try {
+      var resp = await fetch(url("/rag/sources/" + encodeURIComponent(id)), {
+        method: "DELETE",
+      });
+      if (!resp.ok) {
+        throw new Error("HTTP " + resp.status);
+      }
+      if (row && row.parentNode) {
+        row.parentNode.removeChild(row);
+      }
+      toast("Removed " + id);
+      logLine("rag source removed: " + id, "ok");
+    } catch (err) {
+      toast("Delete failed: " + (err && err.message ? err.message : err));
+    }
+  }
+
+  async function loadGraphEntities() {
+    var panel = el("graph-panel");
+    var host = el("graph-entities");
+    if (!panel || !host) {
+      return;
+    }
+    var data;
+    try {
+      data = await getJSON("/graph/entities");
+    } catch (err) {
+      panel.hidden = true;
+      return;
+    }
+    var entities = (data && data.entities) || [];
+    if (!entities.length) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    clear(host);
+    entities.slice(0, 60).forEach(function (e) {
+      var name = typeof e === "string" ? e : e.name || e.id || JSON.stringify(e);
+      host.appendChild(mk("span", "entity-chip", name));
+    });
+  }
+
+  async function loadBriefing() {
+    var panel = el("briefing-panel");
+    var body = el("briefing-body");
+    if (!panel || !body) {
+      return;
+    }
+    var data;
+    try {
+      data = await getJSON("/briefing");
+    } catch (err) {
+      panel.hidden = true;
+      return;
+    }
+    var text =
+      data && typeof data === "object"
+        ? data.text || data.summary || JSON.stringify(data, null, 2)
+        : String(data);
+    if (!text || !text.trim()) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    body.textContent = text;
+  }
+
+  async function loadJournal() {
+    var panel = el("journal-panel");
+    var host = el("journal-list");
+    if (!panel || !host) {
+      return;
+    }
+    var data;
+    try {
+      data = await getJSON("/journal");
+    } catch (err) {
+      panel.hidden = true;
+      return;
+    }
+    var entries = (data && data.entries) || [];
+    if (!entries.length) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    clear(host);
+    entries.slice(0, 12).forEach(function (e) {
+      var text =
+        typeof e === "string" ? e : e.text || e.summary || JSON.stringify(e);
+      host.appendChild(mk("div", "journal-row", text));
+    });
+  }
+
+  // ==========================================================================
+  // APPROVALS — inline in the chat log + a toast. Approve re-sends confirmed.
+  // ==========================================================================
+  function maybeApproval(data, originalText) {
+    if (!replyNeedsConfirmation(data)) {
+      return false;
+    }
+    var logNode = el("chat-log");
+    if (!logNode) {
+      return false;
+    }
+    clearChatEmpty();
+
+    var card = mk("div", "approval");
+    card.appendChild(mk("div", "ap-title", "Confirmation required"));
+    card.appendChild(mk("div", "ap-body", (data && data.text) || ""));
+
+    var detail = data && (data.confirmation || data.pending || data.tool);
+    if (detail && typeof detail === "object") {
+      var pre = mk("div", "ap-detail");
+      if (detail.tool) {
+        pre.appendChild(mk("div", "kv", "tool: " + detail.tool));
+      }
+      var args = detail.args || detail.arguments;
+      if (args && typeof args === "object") {
+        Object.keys(args).forEach(function (k) {
+          pre.appendChild(mk("div", "kv", k + ": " + String(args[k])));
+        });
+      }
+      card.appendChild(pre);
+    }
+
+    var actions = mk("div", "ap-actions");
+    var approve = mk("button", "btn approve", "Approve");
+    approve.type = "button";
+    var deny = mk("button", "btn deny", "Deny");
+    deny.type = "button";
+
+    approve.addEventListener("click", async function () {
+      approve.disabled = true;
+      deny.disabled = true;
+      try {
+        var confirmed = await sendChat(originalText, { confirmed: true });
+        card.classList.add("resolved");
+        var body = card.querySelector(".ap-body");
+        if (body) {
+          body.textContent = (confirmed && confirmed.text) || "Done.";
+        }
+        logLine("approved: " + originalText, "ok");
+        // Chained confirmation: re-card if the confirmed turn still needs it.
+        maybeApproval(confirmed, originalText);
+      } catch (err) {
+        approve.disabled = false;
+        deny.disabled = false;
+        toast("Approve failed: " + (err && err.message ? err.message : err));
+      }
+    });
+
+    deny.addEventListener("click", function () {
+      card.classList.add("denied");
+      approve.disabled = true;
+      deny.disabled = true;
+      logLine("denied: " + originalText);
+      // Recoverable: offer an undo that re-opens the same approval.
+      var undo = mk("button", "btn undo", "Undo");
+      undo.type = "button";
+      undo.addEventListener("click", function () {
+        if (card.parentNode) {
+          card.parentNode.removeChild(card);
+        }
+        maybeApproval(data, originalText);
+      });
+      actions.appendChild(undo);
+    });
+
+    actions.appendChild(approve);
+    actions.appendChild(deny);
+    card.appendChild(actions);
+
+    logNode.appendChild(card);
+    scrollChat();
+    toast("FRIDAY needs your confirmation");
+    return true;
+  }
+
+  // ==========================================================================
+  // SYSTEM — telemetry / by-mode / audit / traces / replay / log / host stats.
+  // ==========================================================================
   var lastTraces = [];
   var lastAudit = { tool_calls: [], security: [] };
 
@@ -477,202 +1312,12 @@
       var ms = (span.end - span.start) * 1000;
       return ms >= 0 ? ms : 0;
     }
+    if (span && typeof span.ms === "number") {
+      return span.ms;
+    }
     return null;
   }
 
-  function renderFlows() {
-    var list = el("flow-list");
-    if (!list) {
-      return;
-    }
-    clear(list);
-    if (!lastTraces.length) {
-      list.appendChild(mk("div", "panel-empty", "no traces yet"));
-      return;
-    }
-    // Newest first for readability.
-    var traces = lastTraces.slice().reverse();
-    traces.forEach(function (t) {
-      var row = mk("button", "flow");
-      row.type = "button";
-      row.title = "Replay " + t.correlation_id;
-      var head = mk("span", "flow-head");
-      head.appendChild(mk("span", "flow-mode", t.mode || "—"));
-      head.appendChild(
-        mk("span", "flow-cid", String(t.correlation_id).slice(0, 8))
-      );
-      row.appendChild(head);
-
-      var pipe = mk("span", "flow-pipe");
-      var spans = t.spans || [];
-      if (!spans.length) {
-        pipe.appendChild(mk("span", "flow-step empty", "—"));
-      }
-      spans.forEach(function (s, idx) {
-        if (idx > 0) {
-          pipe.appendChild(mk("span", "flow-arrow", "→"));
-        }
-        var step = mk("span", "flow-step", s.name || "span");
-        var ms = spanDurationMs(s);
-        if (ms != null) {
-          step.appendChild(mk("span", "flow-ms", " " + Math.round(ms) + "ms"));
-        }
-        // Stagger the entrance so the pipe "flows" left-to-right.
-        step.style.animationDelay = idx * 90 + "ms";
-        pipe.appendChild(step);
-      });
-      row.appendChild(pipe);
-      row.addEventListener("click", function () {
-        openReplay(t);
-      });
-      list.appendChild(row);
-    });
-  }
-
-  function openReplay(trace) {
-    var box = el("replay");
-    var idNode = el("replay-id");
-    var spansNode = el("replay-spans");
-    var auditNode = el("replay-audit");
-    if (!box || !spansNode || !auditNode) {
-      return;
-    }
-    box.hidden = false;
-    if (idNode) {
-      idNode.textContent = String(trace.correlation_id).slice(0, 12);
-    }
-    // Replay the spans with a staggered reveal so it "plays back".
-    clear(spansNode);
-    (trace.spans || []).forEach(function (s, idx) {
-      var item = mk("div", "rspan");
-      item.style.animationDelay = idx * 140 + "ms";
-      item.appendChild(mk("span", "rspan-name", s.name || "span"));
-      var ms = spanDurationMs(s);
-      item.appendChild(
-        mk("span", "rspan-ms", ms != null ? Math.round(ms) + "ms" : "open")
-      );
-      var attrs = s.attrs || {};
-      var keys = Object.keys(attrs);
-      if (keys.length) {
-        var meta = keys
-          .slice(0, 4)
-          .map(function (k) {
-            return k + "=" + String(attrs[k]);
-          })
-          .join("  ");
-        item.appendChild(mk("span", "rspan-attrs", meta));
-      }
-      spansNode.appendChild(item);
-    });
-    // Matching audit rows share the correlation id.
-    clear(auditNode);
-    var rows = (lastAudit.tool_calls || []).filter(function (r) {
-      return r.correlation_id === trace.correlation_id;
-    });
-    if (!rows.length) {
-      auditNode.appendChild(mk("div", "panel-empty", "no matching audit rows"));
-    } else {
-      rows.forEach(function (r) {
-        var item = mk("div", "arow " + (r.ok ? "ok" : "err"));
-        item.appendChild(mk("span", "arow-tool", r.tool));
-        var args = r.args_redacted || {};
-        var argStr = Object.keys(args)
-          .map(function (k) {
-            return k + "=" + String(args[k]);
-          })
-          .join(" ");
-        item.appendChild(mk("span", "arow-args", argStr || "(no args)"));
-        item.appendChild(
-          mk("span", "arow-ok", r.ok ? "ok" : "fail:" + (r.error_code || "?"))
-        );
-        auditNode.appendChild(item);
-      });
-    }
-    logLine("replay " + String(trace.correlation_id).slice(0, 8));
-  }
-
-  function wireReplayClose() {
-    var btn = el("replay-close");
-    if (btn) {
-      btn.addEventListener("click", function () {
-        var box = el("replay");
-        if (box) {
-          box.hidden = true;
-        }
-      });
-    }
-  }
-
-  async function refreshTraces() {
-    try {
-      var data = await getJSON("/admin/traces");
-      lastTraces = (data && data.traces) || [];
-      var tag = el("flow-tag");
-      if (tag) {
-        tag.textContent = lastTraces.length ? "live" : "idle";
-      }
-      renderFlows();
-      lightRoster(lastTraces);
-    } catch (err) {
-      // Traces are flagged behind the tracer; quietly skip when absent.
-      var tag2 = el("flow-tag");
-      if (tag2) {
-        tag2.textContent = "offline";
-      }
-    }
-  }
-
-  // --- AUDIT panel + verify badge -------------------------------------------
-  function renderAudit() {
-    var list = el("audit-list");
-    if (!list) {
-      return;
-    }
-    clear(list);
-    var rows = (lastAudit.tool_calls || []).slice(-8).reverse();
-    if (!rows.length) {
-      list.appendChild(mk("div", "panel-empty", "no tool calls yet"));
-      return;
-    }
-    rows.forEach(function (r) {
-      var item = mk("div", "audit-row " + (r.ok ? "ok" : "err"));
-      item.appendChild(mk("span", "audit-tool", r.tool));
-      item.appendChild(
-        mk("span", "audit-ok", r.ok ? "✓" : "✕ " + (r.error_code || ""))
-      );
-      list.appendChild(item);
-    });
-  }
-
-  async function refreshAudit() {
-    try {
-      var data = await getJSON("/admin/audit");
-      lastAudit = {
-        tool_calls: (data && data.tool_calls) || [],
-        security: (data && data.security) || [],
-      };
-      renderAudit();
-    } catch (err) {
-      /* audit best-effort; metrics drives the pill. */
-    }
-    // Verify badge — independent of the audit list (separate endpoint).
-    var badge = el("audit-verify");
-    if (!badge) {
-      return;
-    }
-    try {
-      var v = await getJSON("/admin/audit/verify");
-      var ok = v && v.ok !== false;
-      badge.textContent = ok ? "verified" : "TAMPERED";
-      badge.classList.toggle("is-ok", ok);
-      badge.classList.toggle("is-bad", !ok);
-    } catch (err) {
-      badge.textContent = "n/a";
-      badge.classList.remove("is-ok", "is-bad");
-    }
-  }
-
-  // --- METRICS / telemetry ---------------------------------------------------
   function renderByMode(byMode) {
     var host = el("by-mode");
     if (!host) {
@@ -722,7 +1367,6 @@
       renderByMode(metrics.by_mode || {});
       setOnline(true);
     } catch (err) {
-      setOnline(false);
       return;
     }
     try {
@@ -733,259 +1377,289 @@
         node.textContent = String(sessions);
       }
     } catch (err) {
-      /* state is best-effort; metrics already drove the pill. */
+      /* state best-effort */
     }
+    loadSystemStats();
   }
 
-  // --- DOSSIER cards ---------------------------------------------------------
-  // A search box that asks FRIDAY about a person/project; the reply renders as a
-  // dossier card. Goes through /chat (same as any question), addressed to the
-  // currently-selected persona if one is active.
-  async function runDossier(query) {
-    var q = (query || "").trim();
-    var cards = el("dossier-cards");
-    if (!q || !cards) {
+  async function loadSystemStats() {
+    var panel = el("sysstats-panel");
+    var host = el("sysstats");
+    var alerts = el("sysalerts");
+    if (!panel || !host) {
       return;
     }
-    var card = mk("div", "card dossier loading");
-    var head = mk("div", "card-head");
-    head.appendChild(mk("span", "card-title", q));
-    head.appendChild(mk("span", "card-meta", "querying…"));
-    card.appendChild(head);
-    var bodyNode = mk("div", "card-body", "FRIDAY is compiling the dossier…");
-    card.appendChild(bodyNode);
-    cards.insertBefore(card, cards.firstChild);
-    while (cards.childNodes.length > 6) {
-      cards.removeChild(cards.lastChild);
+    var stats;
+    try {
+      stats = await getJSON("/system/stats");
+    } catch (err) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    clear(host);
+    ["cpu", "mem", "disk"].forEach(function (key) {
+      if (stats[key] == null) {
+        return;
+      }
+      var raw = Number(stats[key]);
+      var pct = isNaN(raw) ? 0 : raw <= 1 ? raw * 100 : raw;
+      pct = Math.max(0, Math.min(100, Math.round(pct)));
+      var row = mk("div", "sys-row");
+      row.appendChild(mk("span", "sys-name", key));
+      var bar = mk("span", "sys-bar");
+      var fill = mk("i");
+      fill.style.width = pct + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      row.appendChild(mk("span", "sys-val", pct + "%"));
+      host.appendChild(row);
+    });
+    if (alerts) {
+      clear(alerts);
     }
     try {
-      var data = await sendChat(withAddress("Give me a dossier on " + q));
-      card.classList.remove("loading");
-      var meta = card.querySelector(".card-meta");
-      if (meta) {
-        meta.textContent = data && data.mode ? data.mode : "ready";
+      var check = await getJSON("/system/check");
+      var list = (check && check.alerts) || [];
+      if (alerts) {
+        list.slice(0, 6).forEach(function (a) {
+          var text = typeof a === "string" ? a : a.message || JSON.stringify(a);
+          alerts.appendChild(mk("div", "sys-alert", text));
+        });
       }
-      bodyNode.textContent = (data && data.text) || "(no dossier returned)";
-      // A dossier reply can itself be a confirm question; surface it.
-      maybeApproval(data, "Give me a dossier on " + q);
-      logLine("dossier: " + q, "ok");
     } catch (err) {
-      card.classList.remove("loading");
-      card.classList.add("err");
-      var meta2 = card.querySelector(".card-meta");
-      if (meta2) {
-        meta2.textContent = "error";
-      }
-      bodyNode.textContent =
-        "Dossier failed: " + (err && err.message ? err.message : err);
-      setOnline(false);
+      /* alerts optional */
     }
   }
 
-  function wireDossier() {
-    var form = el("dossier-form");
-    var input = el("dossier-input");
-    var go = el("dossier-go");
-    if (!form || !input) {
+  function renderAudit() {
+    var list = el("audit-list");
+    if (!list) {
       return;
     }
-    form.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      runDossier(input.value);
-      input.value = "";
+    clear(list);
+    var rows = (lastAudit.tool_calls || []).slice(-10).reverse();
+    if (!rows.length) {
+      list.appendChild(mk("div", "panel-empty", "no tool calls yet"));
+      return;
+    }
+    rows.forEach(function (r) {
+      var item = mk("div", "audit-row " + (r.ok ? "ok" : "err"));
+      item.appendChild(mk("span", "audit-tool", r.tool));
+      item.appendChild(
+        mk("span", "audit-ok", r.ok ? "✓" : "✕ " + (r.error_code || ""))
+      );
+      list.appendChild(item);
     });
-    if (go) {
-      go.addEventListener("click", function () {
-        runDossier(input.value);
-        input.value = "";
+  }
+
+  async function refreshAudit() {
+    try {
+      var data = await getJSON("/admin/audit");
+      lastAudit = {
+        tool_calls: (data && data.tool_calls) || [],
+        security: (data && data.security) || [],
+      };
+      renderAudit();
+    } catch (err) {
+      /* audit best-effort */
+    }
+    var badge = el("audit-verify");
+    if (!badge) {
+      return;
+    }
+    try {
+      var v = await getJSON("/admin/audit/verify");
+      var ok = v && v.ok !== false;
+      badge.textContent = ok ? "verified" : "TAMPERED";
+      badge.classList.toggle("is-ok", ok);
+      badge.classList.toggle("is-bad", !ok);
+    } catch (err) {
+      badge.textContent = "n/a";
+      badge.classList.remove("is-ok", "is-bad");
+    }
+  }
+
+  function renderFlows() {
+    var list = el("flow-list");
+    if (!list) {
+      return;
+    }
+    clear(list);
+    if (!lastTraces.length) {
+      list.appendChild(mk("div", "panel-empty", "no traces yet"));
+      return;
+    }
+    var traces = lastTraces.slice().reverse(); // newest first
+    traces.forEach(function (t) {
+      var row = mk("button", "flow");
+      row.type = "button";
+      row.title = "Replay " + t.correlation_id;
+      var head = mk("span", "flow-head");
+      head.appendChild(mk("span", "flow-mode", t.mode || "—"));
+      head.appendChild(mk("span", "flow-cid", String(t.correlation_id).slice(0, 8)));
+      row.appendChild(head);
+
+      var pipe = mk("span", "flow-pipe");
+      var spans = t.spans || [];
+      if (!spans.length) {
+        pipe.appendChild(mk("span", "flow-step empty", "—"));
+      }
+      spans.forEach(function (s, idx) {
+        if (idx > 0) {
+          pipe.appendChild(mk("span", "flow-arrow", "→"));
+        }
+        var step = mk("span", "flow-step", s.name || "span");
+        var ms = spanDurationMs(s);
+        if (ms != null) {
+          step.appendChild(mk("span", "flow-ms", " " + Math.round(ms) + "ms"));
+        }
+        pipe.appendChild(step);
+      });
+      row.appendChild(pipe);
+      row.addEventListener("click", function () {
+        openReplay(t);
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function openReplay(trace) {
+    var overlay = el("replay-overlay");
+    var idNode = el("replay-id");
+    var spansNode = el("replay-spans");
+    var auditNode = el("replay-audit");
+    if (!overlay || !spansNode || !auditNode) {
+      return;
+    }
+    overlay.hidden = false;
+    if (idNode) {
+      idNode.textContent = String(trace.correlation_id).slice(0, 12);
+    }
+    clear(spansNode);
+    (trace.spans || []).forEach(function (s) {
+      var item = mk("div", "rspan");
+      item.appendChild(mk("span", "rspan-name", s.name || "span"));
+      var ms = spanDurationMs(s);
+      item.appendChild(
+        mk("span", "rspan-ms", ms != null ? Math.round(ms) + "ms" : (s.ok === false ? "fail" : "open"))
+      );
+      var attrs = s.attrs || {};
+      var keys = Object.keys(attrs);
+      if (keys.length) {
+        var meta = keys
+          .slice(0, 4)
+          .map(function (k) {
+            return k + "=" + String(attrs[k]);
+          })
+          .join("  ");
+        item.appendChild(mk("span", "rspan-attrs", meta));
+      }
+      spansNode.appendChild(item);
+    });
+    clear(auditNode);
+    var rows = (lastAudit.tool_calls || []).filter(function (r) {
+      return r.correlation_id === trace.correlation_id;
+    });
+    if (!rows.length) {
+      auditNode.appendChild(mk("div", "panel-empty", "no matching audit rows"));
+    } else {
+      rows.forEach(function (r) {
+        var item = mk("div", "arow " + (r.ok ? "ok" : "err"));
+        item.appendChild(mk("span", "arow-tool", r.tool));
+        var args = r.args_redacted || {};
+        var argStr = Object.keys(args)
+          .map(function (k) {
+            return k + "=" + String(args[k]);
+          })
+          .join(" ");
+        item.appendChild(mk("span", "arow-args", argStr || "(no args)"));
+        item.appendChild(
+          mk("span", "arow-ok", r.ok ? "ok" : "fail:" + (r.error_code || "?"))
+        );
+        auditNode.appendChild(item);
+      });
+    }
+    logLine("replay " + String(trace.correlation_id).slice(0, 8));
+  }
+
+  function closeReplay() {
+    var overlay = el("replay-overlay");
+    if (overlay) {
+      overlay.hidden = true;
+    }
+  }
+
+  function wireReplay() {
+    var btn = el("replay-close");
+    if (btn) {
+      btn.addEventListener("click", closeReplay);
+    }
+    var overlay = el("replay-overlay");
+    if (overlay) {
+      overlay.addEventListener("click", function (ev) {
+        if (ev.target === overlay) {
+          closeReplay();
+        }
       });
     }
   }
 
-  // --- APPROVAL cards --------------------------------------------------------
-  // When a /chat reply needs confirmation, show a rich card with the pending
-  // action + Approve/Deny. Approve re-sends the SAME turn with confirmed:true.
-  function maybeApproval(data, originalText) {
-    if (!replyNeedsConfirmation(data)) {
-      return false;
-    }
-    var panel = el("approvals-panel");
-    var cards = el("approval-cards");
-    if (!panel || !cards) {
-      return false;
-    }
-    panel.hidden = false;
-
-    var card = mk("div", "card approval");
-    var head = mk("div", "card-head");
-    head.appendChild(mk("span", "card-title", "Confirmation required"));
-    head.appendChild(mk("span", "card-meta", (data && data.mode) || "action"));
-    card.appendChild(head);
-
-    card.appendChild(mk("div", "card-body", (data && data.text) || ""));
-
-    // Surface any structured tool/args the backend included (best-effort: the
-    // documented body has none, but we render them when present).
-    var detail = data && (data.confirmation || data.pending || data.tool);
-    if (detail && typeof detail === "object") {
-      var pre = mk("div", "card-detail");
-      if (detail.tool) {
-        pre.appendChild(mk("div", "kv", "tool: " + detail.tool));
-      }
-      var args = detail.args || detail.arguments;
-      if (args && typeof args === "object") {
-        Object.keys(args).forEach(function (k) {
-          pre.appendChild(mk("div", "kv", k + ": " + String(args[k])));
-        });
-      }
-      card.appendChild(pre);
-    }
-
-    var actions = mk("div", "card-actions");
-    var approve = mk("button", "btn approve", "Approve");
-    approve.type = "button";
-    var deny = mk("button", "btn deny", "Deny");
-    deny.type = "button";
-
-    approve.addEventListener("click", async function () {
-      approve.disabled = true;
-      deny.disabled = true;
-      try {
-        var confirmed = await sendChat(originalText, { confirmed: true });
-        card.classList.add("resolved");
-        var body = card.querySelector(".card-body");
-        if (body) {
-          body.textContent = (confirmed && confirmed.text) || "Done.";
-        }
-        var meta = card.querySelector(".card-meta");
-        if (meta) {
-          meta.textContent = "approved";
-        }
-        logLine("approved: " + originalText, "ok");
-        // If the confirmed turn ALSO needs confirmation (chained), re-card it.
-        maybeApproval(confirmed, originalText);
-      } catch (err) {
-        approve.disabled = false;
-        deny.disabled = false;
-        toast("Approve failed: " + (err && err.message ? err.message : err));
-      }
-    });
-
-    deny.addEventListener("click", function () {
-      card.classList.add("denied");
-      var meta = card.querySelector(".card-meta");
-      if (meta) {
-        meta.textContent = "denied";
-      }
-      approve.disabled = true;
-      deny.disabled = true;
-      logLine("denied: " + originalText);
-    });
-
-    actions.appendChild(approve);
-    actions.appendChild(deny);
-    card.appendChild(actions);
-
-    cards.insertBefore(card, cards.firstChild);
-    while (cards.childNodes.length > 5) {
-      cards.removeChild(cards.lastChild);
-    }
-    toast("FRIDAY needs your confirmation");
-    return true;
-  }
-
-  // --- DRAG-DROP RAG ingest --------------------------------------------------
-  // Dropping a file POSTs it to /rag/ingest as multipart; afterwards it is
-  // askable through the normal /chat path. 404 (RAG disabled) is reported, never
-  // a crash.
-  async function ingestFile(file) {
-    var fd = new FormData();
-    fd.append("file", file, file.name);
-    toast("Ingesting " + file.name + "…");
+  async function refreshTraces() {
     try {
-      var resp = await fetch(url("/rag/ingest"), { method: "POST", body: fd });
-      if (resp.status === 404) {
-        toast("RAG is disabled on this backend");
-        logLine("rag ingest skipped (disabled): " + file.name, "err");
-        return;
+      var data = await getJSON("/admin/traces");
+      lastTraces = (data && data.traces) || [];
+      var tag = el("flow-tag");
+      if (tag) {
+        tag.textContent = lastTraces.length ? "live" : "idle";
       }
-      if (!resp.ok) {
-        throw new Error("HTTP " + resp.status);
-      }
-      var data = await resp.json();
-      var src = (data && data.source_id) || file.name;
-      var chunks = data && data.chunks != null ? data.chunks : "?";
-      toast("Ingested " + src + " (" + chunks + " chunks) — now askable");
-      logLine("ingested " + src + " — " + chunks + " chunks", "ok");
+      renderFlows();
+      lightAgents(lastTraces);
     } catch (err) {
-      toast("Ingest failed: " + (err && err.message ? err.message : err));
-      logLine("ingest failed: " + file.name, "err");
+      var tag2 = el("flow-tag");
+      if (tag2) {
+        tag2.textContent = "offline";
+      }
     }
   }
 
-  function wireDragDrop() {
-    var overlay = el("drop-overlay");
-    var depth = 0;
-
-    window.addEventListener("dragenter", function (ev) {
-      if (ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], "Files") !== -1) {
-        ev.preventDefault();
-        depth++;
-        if (overlay) {
-          overlay.classList.add("is-active");
-        }
-      }
-    });
-    window.addEventListener("dragover", function (ev) {
-      if (ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], "Files") !== -1) {
-        ev.preventDefault();
-        ev.dataTransfer.dropEffect = "copy";
-      }
-    });
-    window.addEventListener("dragleave", function () {
-      depth = Math.max(0, depth - 1);
-      if (depth === 0 && overlay) {
-        overlay.classList.remove("is-active");
-      }
-    });
-    window.addEventListener("drop", function (ev) {
-      depth = 0;
-      if (overlay) {
-        overlay.classList.remove("is-active");
-      }
-      if (!ev.dataTransfer || !ev.dataTransfer.files || !ev.dataTransfer.files.length) {
+  // --- System polling: ONLY while System is the active view -----------------
+  var systemTimers = [];
+  function syncSystemPolling() {
+    if (currentView === "system") {
+      if (systemTimers.length) {
         return;
       }
-      ev.preventDefault();
-      var files = ev.dataTransfer.files;
-      for (var i = 0; i < files.length; i++) {
-        ingestFile(files[i]);
-      }
-    });
+      systemTimers.push(window.setInterval(refreshTelemetry, 5000));
+      systemTimers.push(window.setInterval(refreshTraces, 4000));
+      systemTimers.push(window.setInterval(refreshAudit, 8000));
+    } else {
+      systemTimers.forEach(function (t) {
+        window.clearInterval(t);
+      });
+      systemTimers = [];
+    }
   }
 
-  // --- GLOBE button ----------------------------------------------------------
+  // ==========================================================================
+  // GLOBE / VOICE / DRAG-DROP.
+  // ==========================================================================
   function wireGlobe() {
     var btn = el("btn-globe");
     if (btn) {
       btn.addEventListener("click", function () {
-        // Open the existing /maps surface (honors the configured API base).
         window.open(url("/maps"), "_blank", "noopener");
         logLine("opened /maps");
       });
     }
   }
 
-  // --- VOICE (Web Speech) ----------------------------------------------------
-  // A mic that dictates one turn to FRIDAY. Falls back to a friendly toast when
-  // SpeechRecognition is unavailable (most non-Chromium browsers).
   function wireVoice() {
     var btn = el("btn-mic");
     if (!btn) {
       return;
     }
-    var Rec =
-      window.SpeechRecognition || window.webkitSpeechRecognition || null;
+    var Rec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
     if (!Rec) {
       btn.addEventListener("click", function () {
         toast("Voice not supported in this browser");
@@ -1009,16 +1683,9 @@
       if (!said) {
         return;
       }
-      toast("Heard: " + said);
       logLine("voice: " + said);
-      sendChat(withAddress(said))
-        .then(function (data) {
-          toast("FRIDAY: " + String((data && data.text) || "").slice(0, 90));
-          maybeApproval(data, withAddress(said));
-        })
-        .catch(function (err) {
-          toast("Voice chat failed: " + (err && err.message ? err.message : err));
-        });
+      showView("command");
+      submitChat(said);
     });
     rec.addEventListener("end", function () {
       listening = false;
@@ -1046,16 +1713,83 @@
     });
   }
 
-  function wireAddressClear() {
-    var btn = el("address-clear");
-    if (btn) {
-      btn.addEventListener("click", function () {
-        setAddress(null);
-      });
+  async function ingestFile(file) {
+    var fd = new FormData();
+    fd.append("file", file, file.name);
+    toast("Ingesting " + file.name + "…");
+    try {
+      var resp = await fetch(url("/rag/ingest"), { method: "POST", body: fd });
+      if (resp.status === 404) {
+        toast("RAG is disabled on this backend");
+        logLine("rag ingest skipped (disabled): " + file.name, "err");
+        return;
+      }
+      if (!resp.ok) {
+        throw new Error("HTTP " + resp.status);
+      }
+      var data = await resp.json();
+      var src = (data && data.source_id) || file.name;
+      var chunks = data && data.chunks != null ? data.chunks : "?";
+      toast("Ingested " + src + " (" + chunks + " chunks) — now askable");
+      logLine("ingested " + src + " — " + chunks + " chunks", "ok");
+      loadRagSources();
+    } catch (err) {
+      toast("Ingest failed: " + (err && err.message ? err.message : err));
+      logLine("ingest failed: " + file.name, "err");
     }
   }
 
-  // --- command palette -------------------------------------------------------
+  function wireDragDrop() {
+    var overlay = el("drop-overlay");
+    var depth = 0;
+
+    function hasFiles(ev) {
+      return (
+        ev.dataTransfer &&
+        Array.prototype.indexOf.call(ev.dataTransfer.types || [], "Files") !== -1
+      );
+    }
+
+    window.addEventListener("dragenter", function (ev) {
+      if (hasFiles(ev)) {
+        ev.preventDefault();
+        depth++;
+        if (overlay) {
+          overlay.classList.add("is-active");
+        }
+      }
+    });
+    window.addEventListener("dragover", function (ev) {
+      if (hasFiles(ev)) {
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = "copy";
+      }
+    });
+    window.addEventListener("dragleave", function () {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0 && overlay) {
+        overlay.classList.remove("is-active");
+      }
+    });
+    window.addEventListener("drop", function (ev) {
+      depth = 0;
+      if (overlay) {
+        overlay.classList.remove("is-active");
+      }
+      if (!ev.dataTransfer || !ev.dataTransfer.files || !ev.dataTransfer.files.length) {
+        return;
+      }
+      ev.preventDefault();
+      var files = ev.dataTransfer.files;
+      for (var i = 0; i < files.length; i++) {
+        ingestFile(files[i]);
+      }
+    });
+  }
+
+  // ==========================================================================
+  // COMMAND PALETTE (Cmd/Ctrl-K) — actions + view switches.
+  // ==========================================================================
   var COMMANDS = [
     {
       id: "ask",
@@ -1067,10 +1801,10 @@
         if (!q) {
           return "Type your question after the command, then Enter.";
         }
-        var data = await sendChat(withAddress(q));
-        logLine("chat: " + q, "ok");
-        maybeApproval(data, withAddress(q));
-        return String(data && data.text ? data.text : "(no reply)");
+        showView("command");
+        submitChat(q);
+        closePalette();
+        return "Sent to FRIDAY.";
       },
     },
     {
@@ -1083,10 +1817,17 @@
         if (!q) {
           return "Type a person/project after the command.";
         }
+        showView("memory");
         runDossier(q);
+        closePalette();
         return "Dossier requested for: " + q;
       },
     },
+    { id: "view-command", title: "Go to Command", hint: "view", glyph: "◉", run: async function () { showView("command"); closePalette(); return ""; } },
+    { id: "view-arena", title: "Go to Arena", hint: "view", glyph: "⚔", run: async function () { showView("arena"); closePalette(); return ""; } },
+    { id: "view-agents", title: "Go to Agents", hint: "view", glyph: "❖", run: async function () { showView("agents"); closePalette(); return ""; } },
+    { id: "view-memory", title: "Go to Memory", hint: "view", glyph: "▤", run: async function () { showView("memory"); closePalette(); return ""; } },
+    { id: "view-system", title: "Go to System", hint: "view", glyph: "⌁", run: async function () { showView("system"); closePalette(); return ""; } },
     {
       id: "roster",
       title: "Show roster",
@@ -1233,6 +1974,7 @@
     clear(list);
     paletteState.filtered.forEach(function (cmd, idx) {
       var li = mk("li", idx === paletteState.active ? "is-active" : "");
+      li.setAttribute("role", "option");
       li.appendChild(mk("span", "cmd-glyph", cmd.glyph || "▸"));
       li.appendChild(mk("span", "cmd-title", cmd.title));
       li.appendChild(mk("span", "cmd-hint", cmd.hint || ""));
@@ -1290,8 +2032,6 @@
     var cmd = paletteState.filtered[paletteState.active] || COMMANDS[0];
     showResult("…");
     try {
-      // The free-query path passes the typed text to argument-taking commands
-      // (ask/dossier); fixed commands ignore it.
       var takesArg = cmd.id === "ask" || cmd.id === "dossier";
       var arg = takesArg ? raw : "";
       var out = await cmd.run(arg);
@@ -1302,7 +2042,6 @@
         "Command failed: " + (err && err.message ? err.message : err),
         true
       );
-      setOnline(false);
     }
   }
 
@@ -1312,13 +2051,11 @@
     if (!input || !overlay) {
       return;
     }
-
     input.addEventListener("input", function () {
       paletteState.filtered = filterCommands(input.value);
       paletteState.active = 0;
       renderPaletteList();
     });
-
     input.addEventListener("keydown", function (ev) {
       if (ev.key === "ArrowDown") {
         ev.preventDefault();
@@ -1346,7 +2083,6 @@
         closePalette();
       }
     });
-
     overlay.addEventListener("click", function (ev) {
       if (ev.target === overlay) {
         closePalette();
@@ -1365,36 +2101,55 @@
         } else {
           openPalette();
         }
+        return;
+      }
+      if (ev.key === "Escape") {
+        // Close any open overlay from anywhere (not just when the palette
+        // input is focused), so Escape is always an escape hatch.
+        if (paletteState.open) {
+          closePalette();
+        }
+        closeReplay();
+        closeBrain();
       }
     });
   }
 
-  // --- bootstrap -------------------------------------------------------------
+  // ==========================================================================
+  // BOOTSTRAP.
+  // ==========================================================================
   function init() {
     startParticles();
+    wireRail();
     wirePalette();
     wireGlobalKeys();
+    wireComposer();
     wireDossier();
     wireGlobe();
     wireVoice();
     wireDragDrop();
-    wireReplayClose();
+    wireReplay();
+    wireBrain();
+    wireArena();
     wireAddressClear();
+    wireAgentsFilter();
     runBootSequence();
-    logLine("Command Centre loaded — press Cmd/Ctrl-K");
+
+    logLine("FRIDAY HUD loaded — press Cmd/Ctrl-K");
     if (API_BASE) {
       logLine("API base: " + API_BASE);
     }
 
-    // Initial + periodic data pulls. Each is independent and failure-isolated:
-    // a dead endpoint flips its own panel to "offline" but never throws.
-    loadRoster();
-    refreshTelemetry();
-    refreshTraces();
-    refreshAudit();
-    window.setInterval(refreshTelemetry, 5000);
-    window.setInterval(refreshTraces, 4000);
-    window.setInterval(refreshAudit, 8000);
+    // Models drive both the brain pill and the arena; load once up front.
+    loadModels();
+
+    // Honor a deep-link hash on first paint; default to Command.
+    var initial = (window.location.hash || "").replace(/^#/, "") || "command";
+    showView(initial, { fromHash: true });
+
+    // Slow global heartbeat for the connection pill (independent of polling).
+    heartbeat();
+    window.setInterval(heartbeat, 15000);
   }
 
   if (document.readyState === "loading") {

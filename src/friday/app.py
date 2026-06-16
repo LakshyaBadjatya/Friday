@@ -90,6 +90,7 @@ from friday.maps import router as maps_router
 from friday.market import router as market_router
 from friday.meetings.capture import MeetingCapture
 from friday.meetings.store import SQLiteMeetingStore
+from friday.memory.compaction import Compactor
 from friday.memory.long_term import LongTermStore, SQLiteLongTermStore
 from friday.memory.pg import PgVectorStore, PostgresLongTermStore
 from friday.memory.short_term import ShortTermMemory
@@ -1152,6 +1153,19 @@ def _build_budgeter(settings: Settings) -> Budgeter | None:
     )
 
 
+def _build_compactor(settings: Settings, llm: LLMProvider) -> Compactor | None:
+    """Build the session-compaction helper, or ``None`` when compaction is off.
+
+    Returns a :class:`~friday.memory.compaction.Compactor` over the live LLM ONLY
+    when ``enable_compaction`` is set; off by default it returns ``None`` so the
+    orchestrator's turn loop makes no extra model call and never rewrites the
+    short-term buffer. Uses the Compactor's default thresholds.
+    """
+    if not settings.enable_compaction:
+        return None
+    return Compactor(llm)
+
+
 def _build_confidence(settings: Settings) -> ConfidenceScorer | None:
     """Build the calibrated confidence scorer, or ``None`` when it is off.
 
@@ -1832,6 +1846,7 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         budgeter=budgeter,
         gateway=gateway,
         budget_downshift_model_id=settings.budget_downshift_model_id,
+        compaction=_build_compactor(settings, llm),
     )
     return AppRuntime(
         orchestrator=orchestrator,

@@ -57,6 +57,7 @@ from friday.core.router import route
 from friday.core.security import run_lockdown
 from friday.core.state import GraphState, Mode
 from friday.errors import FridayError, PermissionError, ProviderError
+from friday.memory.compaction import Compactor
 from friday.memory.long_term import LongTermStore
 from friday.memory.short_term import ShortTermMemory
 from friday.memory.vector import Chunk
@@ -521,6 +522,7 @@ class Orchestrator:
         budgeter: Budgeter | None = None,
         gateway: ModelGateway | None = None,
         budget_downshift_model_id: str = "",
+        compaction: Compactor | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -545,6 +547,7 @@ class Orchestrator:
         self._budgeter = budgeter
         self._gateway = gateway
         self._budget_downshift_model_id = budget_downshift_model_id
+        self._compaction = compaction
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
@@ -683,6 +686,35 @@ class Orchestrator:
                 self._gateway.set_active(target)
 
     # -- self-critique (Tier 2; build-spec post-spec) ---------------------- #
+    async def _maybe_compact(self, state: GraphState) -> None:
+        """Optionally fold an over-long session into a summary + recent tail.
+
+        Inert unless ``FRIDAY_ENABLE_COMPACTION`` is set *and* a
+        :class:`~friday.memory.compaction.Compactor` is wired, so the flag-off /
+        un-wired path makes no extra model call. When it fires, the session's
+        short-term buffer is replaced with a single summary message followed by the
+        retained recent turns — the conversation is condensed, never dropped
+        (compaction returns ``None`` — leaving the buffer untouched — when there is
+        too little history or the summary pass fails). Non-fatal by construction.
+        """
+        if self._compaction is None or not get_settings().enable_compaction:
+            return
+        history = self._memory.history(state.session_id)
+        result = await self._compaction.maybe_compact(history)
+        if result is None:
+            return
+        self._memory.clear(state.session_id)
+        self._memory.append(
+            state.session_id,
+            Message(
+                role="system",
+                content=f"[Earlier conversation summarized] {result.summary}",
+            ),
+        )
+        for message in result.kept:
+            self._memory.append(state.session_id, message)
+        state.scratchpad["compaction"] = {"compacted": result.compacted_count}
+
     async def _maybe_critique(self, state: GraphState) -> None:
         """Optionally review the final synthesized reply once; revise if it fails.
 
@@ -1497,6 +1529,10 @@ class Orchestrator:
         # short-term-memory write that completes the synthesized reply).
         with self._span("synth"):
             self._record(state)
+        # Optionally fold an over-long session into a summary + recent tail (Wave
+        # 1). Runs after the turn is recorded so the just-finished turn is part of
+        # what may be summarized; inert unless the flag is on and a Compactor wired.
+        await self._maybe_compact(state)
         return state
 
     def _record(self, state: GraphState) -> None:

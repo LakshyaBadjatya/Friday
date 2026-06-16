@@ -639,6 +639,11 @@ class Settings(BaseSettings):
     # DAG of steps and render it for confirmation (planning only — execution stays
     # a separate, broker-gated action). Off by default so the route 404s.
     enable_planner: bool = False
+    # Gates context compaction: once a session's short-term history grows past a
+    # threshold, the orchestrator folds the older turns into one summary message
+    # and keeps a recent tail (one bounded, non-fatal LLM pass). Off by default so
+    # the turn loop makes no extra call and the buffer is never rewritten.
+    enable_compaction: bool = False
 
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +

@@ -130,6 +130,21 @@ def _handle_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_doctor(args: argparse.Namespace) -> int:
+    """Run the one-shot health self-test; exit non-zero if any check fails."""
+    from friday.broker import HashChainedAudit  # noqa: PLC0415 — local keeps import light
+    from friday.system.doctor import run_doctor  # noqa: PLC0415 — local keeps import light
+
+    settings = get_settings()
+
+    def _verify() -> tuple[bool, int | None]:
+        return HashChainedAudit(settings.audit_ledger_path).verify()
+
+    report = run_doctor(settings, audit_verify=_verify)
+    print(report.render())
+    return 0 if report.ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the ``friday`` argument parser (no side effects).
 
@@ -181,6 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     version = subparsers.add_parser("version", help="print the package version")
     version.set_defaults(func=_handle_version)
+
+    doctor = subparsers.add_parser("doctor", help="one-shot health self-test")
+    doctor.set_defaults(func=_handle_doctor)
 
     return parser
 

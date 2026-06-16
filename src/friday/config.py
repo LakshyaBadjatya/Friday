@@ -649,6 +649,10 @@ class Settings(BaseSettings):
     # non-fatal LLM pass over the relevant long-term facts). Off by default so the
     # route 404s.
     enable_contradiction: bool = False
+    # Gates the auto-tagging surface (``POST /memory/tag``): suggest normalized
+    # topic tags for a piece of text (one bounded, non-fatal LLM pass). Off by
+    # default so the route 404s.
+    enable_autotag: bool = False
 
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +

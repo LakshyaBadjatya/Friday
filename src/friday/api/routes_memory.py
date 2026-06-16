@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from friday.logging import get_logger
+from friday.memory.autotag import AutoTagger
 from friday.memory.citations import Source
 from friday.memory.contradiction import ContradictionDetector
 
@@ -37,6 +38,12 @@ class ContradictionRequest(BaseModel):
     """Inbound body for ``POST /memory/contradiction`` — the fact to check."""
 
     fact: str = Field(min_length=1, max_length=4000)
+
+
+class TagRequest(BaseModel):
+    """Inbound body for ``POST /memory/tag`` — the text to tag."""
+
+    text: str = Field(min_length=1, max_length=8000)
 
 
 def _get_detector(request: Request) -> ContradictionDetector | None:
@@ -72,3 +79,19 @@ async def check_contradiction(request: Request, body: ContradictionRequest) -> J
     result = await detector.check(body.fact, existing)
     logger.info("contradiction check", extra={"candidates": len(existing)})
     return JSONResponse(status_code=200, content=result.model_dump())
+
+
+def _get_tagger(request: Request) -> AutoTagger | None:
+    """The process-wide :class:`AutoTagger`, or ``None`` when auto-tagging is off."""
+    tagger = getattr(request.app.state, "autotagger", None)
+    return tagger if isinstance(tagger, AutoTagger) else None
+
+
+@router.post("/memory/tag", response_model=None)
+async def suggest_tags(request: Request, body: TagRequest) -> JSONResponse:
+    """Suggest normalized topic tags for ``text``; 404 when the feature is off."""
+    tagger = _get_tagger(request)
+    if tagger is None:
+        return JSONResponse(status_code=404, content={"detail": "auto-tagging disabled"})
+    tags = await tagger.tag(body.text)
+    return JSONResponse(status_code=200, content={"tags": tags})

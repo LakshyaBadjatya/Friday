@@ -91,6 +91,7 @@ from friday.maps import router as maps_router
 from friday.market import router as market_router
 from friday.meetings.capture import MeetingCapture
 from friday.meetings.store import SQLiteMeetingStore
+from friday.memory.autotag import AutoTagger
 from friday.memory.compaction import Compactor
 from friday.memory.contradiction import ContradictionDetector
 from friday.memory.long_term import LongTermStore, SQLiteLongTermStore
@@ -2021,6 +2022,17 @@ def _wire_contradiction(app: FastAPI, settings: Settings, llm: LLMProvider) -> N
     app.state.contradiction_detector = ContradictionDetector(llm)
 
 
+def _wire_autotag(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
+    """Stash an :class:`AutoTagger` on ``app.state`` when auto-tagging is enabled.
+
+    The ``/memory/tag`` route reads ``app.state.autotagger`` and 404s when absent.
+    Built over the same LLM; off by default so the offline build builds no tagger.
+    """
+    if not settings.enable_autotag:
+        return
+    app.state.autotagger = AutoTagger(llm)
+
+
 def _wire_rag(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Stash a :class:`DocumentIngestor` on ``app.state`` when RAG is enabled.
 
@@ -2299,6 +2311,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_ensemble(app, settings, runtime.llm)
     _wire_planner(app, settings, runtime.llm)
     _wire_contradiction(app, settings, runtime.llm)
+    _wire_autotag(app, settings, runtime.llm)
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
     _wire_scheduler(app, settings, runtime)

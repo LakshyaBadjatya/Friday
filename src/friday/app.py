@@ -43,6 +43,7 @@ from friday.agents.device import DeviceAgent
 from friday.agents.knowledge import KnowledgeAgent
 from friday.api.middleware import AuthMiddleware, RateLimitMiddleware
 from friday.api.routes_admin import router as admin_router
+from friday.api.routes_approvals import router as approvals_router
 from friday.api.routes_automation import router as automation_router
 from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
@@ -157,6 +158,7 @@ from friday.secrets import (
     SecretVaultError,
     scan_for_plaintext_secrets,
 )
+from friday.security.approvals import ApprovalStore
 from friday.security.egress import EgressPolicy
 from friday.security.rbac import AccessPolicy, Role
 from friday.studio.generator import (
@@ -2061,6 +2063,17 @@ def _wire_autotag(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     app.state.autotagger = AutoTagger(llm)
 
 
+def _wire_approvals(app: FastAPI, settings: Settings) -> None:
+    """Stash an :class:`ApprovalStore` on ``app.state`` when approvals are enabled.
+
+    The ``/approvals`` routes read ``app.state.approval_store`` and 404 when absent.
+    Off by default so the offline build constructs no approval store.
+    """
+    if not settings.enable_approvals:
+        return
+    app.state.approval_store = ApprovalStore()
+
+
 def _wire_rag(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Stash a :class:`DocumentIngestor` on ``app.state`` when RAG is enabled.
 
@@ -2340,6 +2353,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_planner(app, settings, runtime.llm)
     _wire_contradiction(app, settings, runtime.llm)
     _wire_autotag(app, settings, runtime.llm)
+    _wire_approvals(app, settings)
     _wire_rag(app, settings, runtime)
     _wire_reminders(app, settings, runtime)
     _wire_scheduler(app, settings, runtime)
@@ -2448,6 +2462,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router)
     app.include_router(export_router)
     app.include_router(automation_router)
+    app.include_router(approvals_router)
     app.include_router(security_router)
     # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE
     # (404 / socket refusal when off), so the offline default exposes no voice UX.

@@ -683,6 +683,10 @@ class Settings(BaseSettings):
     # File the audit anchor is appended to (one JSON line per anchor) — the
     # out-of-band tamper-evidence sink. ``data/`` is gitignored.
     audit_anchor_path: str = "data/anchors.jsonl"
+    # Gates the approval-workflow surface (``/approvals``): raise an irreversible
+    # action for the owner to approve/deny out-of-band before it proceeds. Off by
+    # default so the routes 404.
+    enable_approvals: bool = False
 
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +

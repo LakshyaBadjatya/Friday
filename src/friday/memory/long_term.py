@@ -122,6 +122,10 @@ class LongTermStore(Protocol):
         """Return up to ``limit`` facts whose text contains ``query`` (CI)."""
         ...
 
+    def all_facts(self, limit: int = DEFAULT_LIMIT) -> list[Fact]:
+        """Return up to ``limit`` facts, newest first (for bulk export)."""
+        ...
+
     def add_task(self, intent: str, summary: str, ok: bool) -> TaskRow:
         """Persist a task record and return the stored row."""
         ...
@@ -241,6 +245,21 @@ class SQLiteLongTermStore:
             "FROM facts WHERE text LIKE ? ESCAPE '\\' "
             "ORDER BY id DESC LIMIT ?",
             (like, limit),
+        ).fetchall()
+        return [self._row_to_fact(row) for row in rows]
+
+    def all_facts(self, limit: int = DEFAULT_LIMIT) -> list[Fact]:
+        """Return up to ``limit`` facts, newest first (a non-positive limit -> []).
+
+        Unfiltered bulk read for second-brain export; results are newest-first to
+        match :meth:`query_facts`.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            "SELECT id, text, source_id, sensitive, created_at "
+            "FROM facts ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [self._row_to_fact(row) for row in rows]
 
@@ -403,6 +422,10 @@ class PostgresLongTermStore:
         raise FridayError(_POSTGRES_PHASE6_NOTE)
 
     def query_facts(self, query: str, limit: int = DEFAULT_LIMIT) -> list[Fact]:
+        self._connect()
+        raise FridayError(_POSTGRES_PHASE6_NOTE)
+
+    def all_facts(self, limit: int = DEFAULT_LIMIT) -> list[Fact]:
         self._connect()
         raise FridayError(_POSTGRES_PHASE6_NOTE)
 

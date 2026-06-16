@@ -48,6 +48,7 @@ from friday.api.routes_chat import router as chat_router
 from friday.api.routes_comms import router as comms_router
 from friday.api.routes_email import router as email_router
 from friday.api.routes_ensemble import router as ensemble_router
+from friday.api.routes_export import router as export_router
 from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
@@ -2414,6 +2415,7 @@ def create_app() -> FastAPI:
     app.include_router(ensemble_router)
     app.include_router(planner_router)
     app.include_router(memory_router)
+    app.include_router(export_router)
     # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE
     # (404 / socket refusal when off), so the offline default exposes no voice UX.
     app.include_router(voice_router)

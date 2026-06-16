@@ -218,6 +218,23 @@ class PostgresLongTermStore:
             rows = cur.fetchall()
         return [self._row_to_fact(row) for row in rows]
 
+    def all_facts(self, limit: int = DEFAULT_LIMIT) -> list[Fact]:
+        """Return up to ``limit`` facts, newest first (a non-positive limit -> []).
+
+        Unfiltered bulk read for second-brain export; newest-first to match
+        :meth:`query_facts`.
+        """
+        if limit <= 0:
+            return []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, text, source_id, sensitive, created_at "
+                "FROM facts ORDER BY id DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_fact(row) for row in rows]
+
     def forget(self, query: str) -> int:
         """Delete every fact whose text contains ``query`` (CI); return count.
 

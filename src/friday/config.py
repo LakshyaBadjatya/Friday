@@ -653,6 +653,10 @@ class Settings(BaseSettings):
     # topic tags for a piece of text (one bounded, non-fatal LLM pass). Off by
     # default so the route 404s.
     enable_autotag: bool = False
+    # Gates the second-brain export surface (``GET /export``): render the
+    # long-term facts as an Obsidian-style Markdown note. Off by default so the
+    # route 404s.
+    enable_kb_export: bool = False
 
     # --- Alerting ---
     # Identical alerts within this window collapse to a single send (dedupe +

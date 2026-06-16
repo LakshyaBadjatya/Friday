@@ -30,6 +30,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from friday.config import Settings
+from friday.security.rbac import AccessPolicy
 
 #: Paths exempt from both auth and rate limiting (liveness must always answer).
 _HEALTH_PATH = "/health"
@@ -58,10 +59,20 @@ def _bearer_key(request: Request) -> str | None:
 class AuthMiddleware:
     """Require a valid bearer key on every non-``/health`` route when enabled."""
 
-    def __init__(self, app: ASGIApp, *, settings: Settings) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        settings: Settings,
+        access_policy: AccessPolicy | None = None,
+    ) -> None:
         self._app = app
         self._settings = settings
         self._keys = frozenset(settings.api_keys)
+        # Optional role policy (RBAC): when wired, a validated key whose role
+        # lacks the "admin" permission is denied the /admin surface. ``None``
+        # (the default / flag off) leaves auth as a plain key check.
+        self._access_policy = access_policy
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not self._settings.require_auth:
@@ -79,6 +90,19 @@ class AuthMiddleware:
                 status_code=401, content={"detail": "unauthorized"}
             )
             await response(scope, receive, send)
+            return
+
+        # RBAC: a validated key whose role lacks the "admin" permission is denied
+        # the /admin surface (deny-by-default — an unmapped key has no role).
+        if (
+            self._access_policy is not None
+            and request.url.path.startswith("/admin")
+            and not self._access_policy.can(key, "admin")
+        ):
+            forbidden: Response = JSONResponse(
+                status_code=403, content={"detail": "forbidden"}
+            )
+            await forbidden(scope, receive, send)
             return
 
         await self._app(scope, receive, send)

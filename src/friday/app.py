@@ -156,6 +156,7 @@ from friday.secrets import (
     scan_for_plaintext_secrets,
 )
 from friday.security.egress import EgressPolicy
+from friday.security.rbac import AccessPolicy, Role
 from friday.studio.generator import (
     MeshyText3D,
     ProceduralGenerator,
@@ -1222,6 +1223,30 @@ def _build_audit_ledger(settings: Settings) -> HashChainedAudit:
     verify), so this is safe to call eagerly at startup.
     """
     return HashChainedAudit(settings.audit_ledger_path)
+
+
+def _build_access_policy(settings: Settings) -> AccessPolicy | None:
+    """Build the RBAC role policy from config, or ``None`` when RBAC is off.
+
+    Returns ``None`` unless ``enable_rbac`` is set, so the default build leaves
+    auth as a plain key check. Two built-in roles — ``owner`` (full access, ``*``)
+    and ``member`` (no admin) — with per-key assignments parsed from ``api_roles``
+    (``key=role`` entries; an unknown role is treated as ``member``, and an
+    unmapped key has no role so it is denied admin by deny-by-default).
+    """
+    if not settings.enable_rbac:
+        return None
+    roles = [
+        Role(name="owner", permissions=frozenset({"*"})),
+        Role(name="member", permissions=frozenset()),
+    ]
+    assignments: dict[str, str] = {}
+    for entry in settings.api_roles:
+        key, sep, role = entry.partition("=")
+        key, role = key.strip(), role.strip()
+        if sep and key:
+            assignments[key] = role if role in {"owner", "member"} else "member"
+    return AccessPolicy(roles, assignments)
 
 
 def _build_egress_policy(settings: Settings) -> EgressPolicy | None:
@@ -2403,7 +2428,11 @@ def create_app() -> FastAPI:
     gateway_settings = get_settings()
     app.state.rate_limit_clock = time.monotonic
     app.add_middleware(RateLimitMiddleware, settings=gateway_settings)
-    app.add_middleware(AuthMiddleware, settings=gateway_settings)
+    app.add_middleware(
+        AuthMiddleware,
+        settings=gateway_settings,
+        access_policy=_build_access_policy(gateway_settings),
+    )
 
     app.include_router(chat_router)
     app.include_router(health_router)

@@ -622,6 +622,16 @@ class Settings(BaseSettings):
     # before-validator pattern as ``device_allowlist``); empty means no key is
     # accepted (so ``require_auth`` with no keys rejects everything).
     api_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Role-based access control (default off). When on AND ``require_auth`` is on,
+    # a validated bearer key whose role is not ``owner`` is denied the ``/admin``
+    # surface (403). Off by default so auth stays a plain key check.
+    enable_rbac: bool = False
+    # Per-key role assignments. Read from ``FRIDAY_API_ROLES`` as comma-separated
+    # ``key=role`` entries (e.g. ``s3cret=owner,guest=member``); the role is one of
+    # ``owner`` (full access) / ``member`` (no admin). An unmapped valid key has no
+    # role and is denied admin (deny-by-default). Same ``NoDecode`` + before-validator
+    # comma-split as ``device_allowlist`` (each entry keeps its ``=``).
+    api_roles: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # Fixed-window rate limit per client (bearer key if present, else client IP):
     # at most ``rate_limit_requests`` requests per ``rate_limit_window_seconds``;
     # over the limit -> 429 with ``Retry-After``. ``/health`` is exempt. Toggle
@@ -767,6 +777,20 @@ class Settings(BaseSettings):
         (whitespace-trimmed, empties dropped) so ``"a.com, b.com"`` ->
         ``["a.com", "b.com"]`` and ``""`` -> ``[]``; a value that is already a
         list/tuple is passed through unchanged.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("api_roles", mode="before")
+    @classmethod
+    def _split_api_roles(cls, value: object) -> object:
+        """Comma-split a raw ``FRIDAY_API_ROLES`` string into ``key=role`` entries.
+
+        Mirrors :meth:`_split_device_allowlist`: split on COMMAS only (each entry
+        keeps its internal ``=``), whitespace-trimmed, empties dropped, so
+        ``"k1=owner, k2=member"`` -> ``["k1=owner", "k2=member"]`` and ``""`` ->
+        ``[]``; a value that is already a list/tuple is passed through unchanged.
         """
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]

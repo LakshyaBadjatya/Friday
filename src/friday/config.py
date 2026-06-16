@@ -598,6 +598,11 @@ class Settings(BaseSettings):
     # ``NoDecode`` + before-validator pattern as ``device_allowlist``); empty
     # (default) blocks every outbound URL when the firewall is on.
     egress_allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # When true, the selected LLM provider is wrapped so high-confidence PII
+    # (emails, payment-card numbers, IPv4 addresses, phone numbers) is scrubbed
+    # from outbound messages before any real provider sees them. Off by default; a
+    # deliberate privacy/utility trade-off (the model also stops seeing the PII).
+    enable_pii_redaction: bool = False
 
     # --- Gateway hardening (Phase 6) ---
     # The uvicorn bind host the CLI ``serve`` default uses *and* the host the

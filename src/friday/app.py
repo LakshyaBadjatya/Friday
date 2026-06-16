@@ -130,6 +130,7 @@ from friday.providers.llm import (
     OpenRouterProvider,
 )
 from friday.providers.offline import select_llm
+from friday.providers.redacting import RedactingLLM
 from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.pwa import router as pwa_router
@@ -1723,6 +1724,11 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     # provider and no outbound LLM call is ever attempted. Off by default,
     # ``primary_llm`` (the gateway or the single provider) passes through.
     llm = select_llm(settings, primary_llm)
+    # PII redaction (security spine): when enabled, wrap the selected provider so
+    # high-confidence PII is scrubbed from outbound messages before any real
+    # provider sees them. Off by default, so the provider passes through unwrapped.
+    if settings.enable_pii_redaction:
+        llm = RedactingLLM(llm)
     embedder = _build_embedder(settings)
     # Postgres-or-SQLite store selection (lazy; the PG adapters only import the
     # driver / validate the DSN when ``enable_postgres`` is on).

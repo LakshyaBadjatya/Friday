@@ -535,6 +535,17 @@ class Settings(BaseSettings):
     enable_home: bool = False
     tts_provider: str = "piper"
     wake_word_engine: str = "openwakeword"
+    # "Hey FRIDAY" wake word (server-side detection). When on, the wake-word engine
+    # scores mic frames for the trained phrase; on a detection the app pushes a
+    # wake/summon event to the HUD over the voice WebSocket. Off by default so the
+    # offline build builds no engine and imports no audio deps.
+    enable_wakeword: bool = False
+    # Path to the trained openWakeWord model (hey_friday.onnx from the Colab
+    # notebook). Empty -> the deterministic FakeWakeWordEngine (no real detection),
+    # so the seam is exercised without the optional openwakeword dependency.
+    wakeword_model: str = ""
+    # Detection threshold in [0, 1]; a frame scoring at/above this is a wake.
+    wake_threshold: float = 0.5
 
     # --- 3D Studio (Phase 7; default off) ---
     # The whole studio feature (router + static UI) is gated behind this flag; off

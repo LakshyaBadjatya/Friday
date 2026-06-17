@@ -203,7 +203,8 @@ from friday.providers.emotion import (
     FakeEmotion,
     LiteEmotion,
 )
-from friday.voice.emotion_stream import EmotionStreamAnalyzer
+from friday.voice.capture import MicCapture
+from friday.voice.emotion_stream import EmotionStreamAnalyzer, feed_analyzer
 from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity
 from friday.voice.wake_service import WakeService
 
@@ -2505,6 +2506,30 @@ async def _stop_scheduler_loop(task: asyncio.Task[None] | None) -> None:
         pass
 
 
+def _start_emotion_capture(
+    app: FastAPI, settings: Settings
+) -> asyncio.Task[None] | None:
+    """Feed the microphone into the emotion analyzer as a background task.
+
+    Returns the task (so the lifespan can cancel it on shutdown) or ``None`` when
+    mic capture is off, no analyzer is wired, or the ``sounddevice`` backend/mic
+    is unavailable — a graceful no-op that never blocks startup. Reuses the
+    generic :func:`_stop_scheduler_loop` for cancellation.
+    """
+    if not settings.emotion_mic:
+        return None
+    analyzer = getattr(app.state, "emotion_analyzer", None)
+    if not isinstance(analyzer, EmotionStreamAnalyzer):
+        return None
+    try:
+        capture = MicCapture()
+    except ProviderError as exc:
+        logger.warning("emotion mic capture disabled: %s", exc)
+        return None
+    logger.info("starting emotion mic capture loop")
+    return asyncio.create_task(feed_analyzer(capture, analyzer))
+
+
 def create_app() -> FastAPI:
     """Construct the FRIDAY FastAPI application.
 
@@ -2524,10 +2549,12 @@ def create_app() -> FastAPI:
         _wire_wake(app, settings)
         _wire_emotion(app, settings)
         scheduler_task = _start_scheduler_loop(app, settings)
+        emotion_capture_task = _start_emotion_capture(app, settings)
         try:
             yield
         finally:
             await _stop_scheduler_loop(scheduler_task)
+            await _stop_scheduler_loop(emotion_capture_task)
             logger.info("FRIDAY shutting down")
 
     app = FastAPI(title="FRIDAY", version="0.1.0", lifespan=lifespan)

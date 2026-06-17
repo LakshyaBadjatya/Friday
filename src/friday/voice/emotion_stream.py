@@ -15,9 +15,24 @@ from typing import TYPE_CHECKING
 from friday.providers.emotion import Emotion, EmotionProvider, derive_label
 
 if TYPE_CHECKING:
+    from friday.voice.capture import AudioCapture
     from friday.voice.voiceprint import OwnerIdentity
 
 EmotionListener = Callable[[Emotion], None]
+
+
+async def feed_analyzer(
+    capture: "AudioCapture", analyzer: "EmotionStreamAnalyzer"
+) -> None:
+    """Pump frames from ``capture`` into ``analyzer`` until the stream ends.
+
+    The continuous-sensing loop: each captured PCM frame is pushed to the
+    analyzer, which emits smoothed Emotions to its listeners (e.g. a ``/ws/emotion``
+    broadcast). Runs until the capture stream is exhausted or the task is
+    cancelled (cooperatively, at the next ``await``).
+    """
+    async for frame in capture.frames():
+        await analyzer.push(frame)
 
 
 class EmotionStreamAnalyzer:

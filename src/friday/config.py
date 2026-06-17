@@ -581,6 +581,10 @@ class Settings(BaseSettings):
     emotion_tts: bool = False
     # P3: gate emotion on the voiceprint matching the owner.
     emotion_owner_only: bool = False
+    # Continuously read the microphone into the emotion analyzer (live mood on the
+    # HUD) without the full wake/STT loop. Needs the optional `sounddevice` backend;
+    # off by default and a graceful no-op when the mic/backend is absent.
+    emotion_mic: bool = False
     # P3: path to a saved EmotionCalibration JSON (owner V/A/D recentring). Empty
     # -> no personalization; the raw model output is used.
     emotion_calibration: str = ""

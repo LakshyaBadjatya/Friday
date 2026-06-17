@@ -35,3 +35,18 @@ def test_analyzer_emits_smoothed_emotions_to_listener() -> None:
 def test_analyzer_no_emotion_before_first_window() -> None:
     an = EmotionStreamAnalyzer(FakeEmotion(), sr=16000, window_s=1.0, hop_s=0.5)
     assert an.last() is None
+
+
+def test_feed_analyzer_pumps_capture_into_analyzer() -> None:
+    from friday.voice.capture import FakeAudioCapture
+    from friday.voice.emotion_stream import feed_analyzer
+
+    frame = b"\x00\x01" * 8000  # 0.5s
+    seen: list[Emotion] = []
+    an = EmotionStreamAnalyzer(
+        FakeEmotion(valence=0.2, arousal=0.3, dominance=0.4), window_s=0.5, hop_s=0.25
+    )
+    an.on_emotion(seen.append)
+    cap = FakeAudioCapture([frame, frame, frame])
+    asyncio.run(feed_analyzer(cap, an))   # drains the finite fake stream, then returns
+    assert len(seen) >= 1 and an.last() is not None

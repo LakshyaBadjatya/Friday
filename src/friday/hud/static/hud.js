@@ -1794,6 +1794,12 @@
     });
   }
 
+  // Hands-free wake: the mic listens CONTINUOUSLY for "hey friday" (Web Speech,
+  // keyless). While armed we only act on a wake phrase — ambient speech is
+  // ignored so we never spam chat. "hey friday <command>" in one breath sends the
+  // trailing command; a bare "hey friday" arms a short window where the next
+  // phrase is taken as the command. The mic button toggles listening on/off
+  // (privacy), and is armed on load so it's truly hands-free.
   function wireVoice() {
     var btn = el("btn-mic");
     if (!btn) {
@@ -1802,21 +1808,57 @@
     var Rec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
     if (!Rec) {
       btn.addEventListener("click", function () {
-        toast("Voice not supported in this browser");
+        toast("Voice not supported (use Chrome/Edge over https or localhost)");
       });
       btn.classList.add("is-disabled");
       return;
     }
+
     var rec = new Rec();
     rec.lang = "en-US";
+    rec.continuous = true; // keep listening across pauses
     rec.interimResults = false;
     rec.maxAlternatives = 1;
-    var listening = false;
+
+    var armed = false; // always-on wake listening
+    var commandUntil = 0; // ms timestamp: until when a phrase counts as a command
+
+    // Strip a leading "hey/ok friday" so "hey friday what's the weather" yields
+    // just the trailing command.
+    function wakeRemainder(text) {
+      return (text || "")
+        .replace(/^\s*(?:hey|hi|ok|okay)?\s*,?\s*frid?ay\b[\s,]*/i, "")
+        .trim();
+    }
+
+    function arm() {
+      armed = true;
+      btn.classList.add("is-listening");
+      btn.setAttribute("aria-pressed", "true");
+      try {
+        rec.start();
+      } catch (err) {
+        /* already running — Web Speech throws if start() is called while active */
+      }
+    }
+
+    function disarm() {
+      armed = false;
+      commandUntil = 0;
+      btn.classList.remove("is-listening");
+      btn.setAttribute("aria-pressed", "false");
+      try {
+        rec.stop();
+      } catch (err) {
+        /* not running */
+      }
+    }
 
     rec.addEventListener("result", function (ev) {
       var said = "";
       try {
-        said = ev.results[0][0].transcript;
+        var last = ev.results[ev.results.length - 1];
+        said = (last && last[0] && last[0].transcript ? last[0].transcript : "").trim();
       } catch (err) {
         said = "";
       }
@@ -1826,36 +1868,66 @@
       logLine("voice: " + said);
       var wake = parseWake(said);
       if (wake) {
-        handleWake(wake);
-      } else {
+        handleWake(wake); // reveal the cockpit
+        if (wake.type === "wake") {
+          var rest = wakeRemainder(said);
+          if (rest) {
+            submitChat(rest); // "hey friday <command>" spoken in one breath
+          } else {
+            commandUntil = Date.now() + 10000; // arm: next phrase is the command
+          }
+        }
+        return;
+      }
+      if (Date.now() < commandUntil) {
+        commandUntil = 0;
         showView("command");
-        submitChat(said);
+        submitChat(said); // the follow-up command after a wake
+        return;
+      }
+      // Otherwise: just always-on wake listening — ignore ambient speech.
+    });
+
+    rec.addEventListener("end", function () {
+      // Web Speech stops itself periodically; restart (slightly delayed to avoid
+      // a hot loop) so listening stays continuous while armed.
+      if (armed) {
+        setTimeout(function () {
+          if (armed) {
+            try {
+              rec.start();
+            } catch (err) {
+              /* a restart raced an active session — ignore */
+            }
+          }
+        }, 350);
       }
     });
-    rec.addEventListener("end", function () {
-      listening = false;
-      btn.classList.remove("is-listening");
-    });
+
     rec.addEventListener("error", function (ev) {
-      listening = false;
-      btn.classList.remove("is-listening");
-      toast("Voice error: " + (ev && ev.error ? ev.error : "unknown"));
+      var err = ev && ev.error ? ev.error : "unknown";
+      // Permission / hardware failures can't be recovered by restarting — stop
+      // and let the user re-arm. Transient errors (no-speech, aborted, network)
+      // fall through to the 'end' handler, which restarts.
+      if (err === "not-allowed" || err === "service-not-allowed" || err === "audio-capture") {
+        disarm();
+        toast("Microphone unavailable — allow mic access, then tap the mic to retry");
+      }
     });
 
     btn.addEventListener("click", function () {
-      if (listening) {
-        rec.stop();
-        return;
-      }
-      try {
-        rec.start();
-        listening = true;
-        btn.classList.add("is-listening");
-        toast("Listening…");
-      } catch (err) {
-        toast("Could not start voice: " + (err && err.message ? err.message : err));
+      if (armed) {
+        disarm();
+        toast("Wake listening off");
+      } else {
+        arm();
+        toast("Listening for “hey friday”…");
       }
     });
+
+    // Hands-free by default: arm on load (prompts for mic permission once). If the
+    // browser blocks it, the error handler disarms and the button re-arms on tap.
+    arm();
   }
 
   async function ingestFile(file) {

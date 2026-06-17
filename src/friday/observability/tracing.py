@@ -16,13 +16,19 @@ The data classes are pydantic models so a trace round-trips to JSON for the
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from friday.observability.otel import TraceExporter
+
+logger = logging.getLogger("friday.observability.tracing")
 
 # Default ring-buffer depth: enough to inspect recent activity from the
 # dashboard without growing without bound in a long-lived process.
@@ -75,10 +81,14 @@ class Tracer:
         self,
         clock: Callable[[], float] = time.monotonic,
         capacity: int = _DEFAULT_CAPACITY,
+        exporter: TraceExporter | None = None,
     ) -> None:
         self._clock = clock
         self._traces: deque[Trace] = deque(maxlen=capacity)
         self._active: Trace | None = None
+        # Optional OTLP export seam: when wired (``enable_otel``), each finished
+        # trace is also forwarded to a collector. ``None`` = in-process only.
+        self._exporter = exporter
 
     def start_trace(self, correlation_id: str) -> Trace:
         """Open a new active trace stamped with the current clock reading."""
@@ -116,6 +126,11 @@ class Tracer:
             raise RuntimeError("finish() called with no active trace")
         self._traces.append(active)
         self._active = None
+        if self._exporter is not None:
+            try:
+                self._exporter.export(active)
+            except Exception as exc:  # noqa: BLE001 - export must never break a turn
+                logger.warning("trace export failed (continuing): %s", exc)
         return active
 
     def recent(self, limit: int = 50) -> list[Trace]:

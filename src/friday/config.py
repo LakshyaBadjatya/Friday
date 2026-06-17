@@ -468,6 +468,16 @@ class Settings(BaseSettings):
     # real ``pyautogui`` backend stays OPTIONAL/LAZY (excluded from the uv lock).
     enable_desktop: bool = False
 
+    # --- System tray surface (Wave G; default off) ---
+    # Gates a desktop system-tray icon (open the HUD, quick-notify, quit) over the
+    # OPTIONAL/LAZY ``pystray`` backend (a deterministic :class:`FakeTray` is used
+    # in tests / when unavailable). Off by default so the offline/headless build
+    # constructs no tray. The tray is launched out-of-band (``friday tray``), not
+    # inside the ASGI lifespan, since its event loop blocks.
+    enable_tray: bool = False
+    tray_title: str = "FRIDAY"
+    tray_hud_url: str = "http://127.0.0.1:8000/hud"
+
     # --- Voiceprint / owner recognition (Stage 2; default off) ---
     # Gates speaker verification (owner recognition). Off by default so no
     # voiceprint identity is constructed. When on, an
@@ -503,6 +513,15 @@ class Settings(BaseSettings):
     budget_downshift_model_id: str = ""
     # Fraction of the token cap at/beyond which ``should_downshift`` trips (0.0-1.0).
     budget_downshift_at: float = 0.8
+
+    # --- OpenTelemetry trace export (Wave H observability; default OFF) ---
+    # Gates forwarding finished traces to an OTLP/HTTP collector via the OPTIONAL
+    # ``opentelemetry`` SDK (lazy-imported only when on). Off by default so the
+    # in-process Tracer keeps only its ring buffer and reaches no network. A
+    # missing SDK degrades to a logged warning — never a crash.
+    enable_otel: bool = False
+    otel_endpoint: str = "http://localhost:4318/v1/traces"
+    otel_service_name: str = "friday"
 
     # --- Calibrated confidence (Wave 0; default OFF) ---
     # Gates the calibrated confidence scorer (:mod:`friday.core.confidence`). Off
@@ -546,6 +565,23 @@ class Settings(BaseSettings):
     wakeword_model: str = ""
     # Detection threshold in [0, 1]; a frame scoring at/above this is a wake.
     wake_threshold: float = 0.5
+
+    # --- Sentiment analysis (Wave C multimodal; default off) ---
+    # Gates the offline lexicon sentiment seam (POST /sentiment). Off by default so
+    # the route 404s; the analyzer itself (:mod:`friday.nlp.sentiment`) is pure and
+    # dependency-free, so enabling it adds no runtime cost or import.
+    enable_sentiment: bool = False
+
+    # --- Multimodal seams (Wave C; default off; OPTIONAL/LAZY real backends) ---
+    # Speaker diarization (who-spoke-when). Fake = deterministic segments; the real
+    # pyannote.audio backend is lazy/optional. Gates POST /diarize.
+    enable_diarization: bool = False
+    # Text-to-image generation. Fake = a deterministic SVG placeholder; the real
+    # diffusers backend is lazy/optional. Gates POST /imagegen.
+    enable_imagegen: bool = False
+    # Layout-aware PDF extraction (pages -> text blocks). Fake = a plain-text page;
+    # the real PyMuPDF backend is lazy/optional. Gates POST /pdf/layout.
+    enable_pdf_layout: bool = False
 
     # --- 3D Studio (Phase 7; default off) ---
     # The whole studio feature (router + static UI) is gated behind this flag; off

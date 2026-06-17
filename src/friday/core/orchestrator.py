@@ -64,7 +64,9 @@ from friday.memory.vector import Chunk
 from friday.models.budget import Budgeter
 from friday.models.gateway import ModelGateway
 from friday.observability.metrics import Metrics
+from friday.observability.replay import TurnRecorder
 from friday.observability.tracing import Tracer
+from friday.observability.usage import UsageLedger
 from friday.protocols.runner import ProtocolResult, ProtocolRunner
 from friday.protocols.store import Protocol as ProtocolModel
 from friday.providers.llm import LLMProvider, LLMResponse, Message
@@ -513,6 +515,8 @@ class Orchestrator:
         vector: ForgettableVectorStore | None = None,
         tracer: Tracer | None = None,
         metrics: Metrics | None = None,
+        usage_ledger: UsageLedger | None = None,
+        turn_recorder: TurnRecorder | None = None,
         protocol_store: ProtocolStore | None = None,
         protocol_runner: ProtocolRunner | None = None,
         critic: SelfCritic | None = None,
@@ -533,6 +537,8 @@ class Orchestrator:
         self._vector = vector
         self._tracer = tracer
         self._metrics = metrics
+        self._usage_ledger = usage_ledger
+        self._turn_recorder = turn_recorder
         self._protocol_store = protocol_store
         self._protocol_runner = protocol_runner
         self._critic = critic
@@ -628,6 +634,7 @@ class Orchestrator:
                 f"{owner}. That's a real outage, not me stalling — try again in "
                 f"a moment."
             )
+        self._record_usage(response)
         if session_id is not None:
             self._record_budget(session_id, response)
         text = response.text
@@ -635,6 +642,32 @@ class Orchestrator:
             owner = get_settings().owner_address
             return f"I came back empty on that one, {owner}. Mind rephrasing?"
         return text.strip()
+
+    # -- usage/cost ledger (observability; cost dashboard) ----------------- #
+    def _record_usage(self, response: LLMResponse) -> None:
+        """Tally a completion's tokens into the process usage ledger.
+
+        Always-on observability (like :class:`Metrics`), independent of the
+        budgeter flag — so ``GET /admin/usage`` reflects real spend on every
+        build. The model id is the gateway's active model when a gateway is
+        wired, else the configured provider name (e.g. ``"fake"``). Free models
+        record ``usd=0.0`` so only the token columns move. Inert (and never
+        raises into the turn) when no ledger is wired.
+        """
+        if self._usage_ledger is None:
+            return
+        usage = response.usage
+        model_id = (
+            self._gateway.active_model_id
+            if self._gateway is not None
+            else get_settings().llm_provider
+        )
+        self._usage_ledger.record(
+            model_id,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            usd=0.0,
+        )
 
     # -- per-turn budgeter (Wave 0) ---------------------------------------- #
     def _start_budget_turn(self, session_id: str) -> None:
@@ -1402,6 +1435,13 @@ class Orchestrator:
                     self._metrics.inc_errors()
             if self._tracer is not None:
                 self._tracer.finish().mode = str(state.mode)
+            if self._turn_recorder is not None:
+                self._turn_recorder.record(
+                    session_id=state.session_id,
+                    user_input=state.user_input,
+                    response=state.response,
+                    mode=None if state.mode is None else str(state.mode),
+                )
 
     async def _handle_inner(self, state: GraphState) -> GraphState:
         # 1. Load short-term history for the session.

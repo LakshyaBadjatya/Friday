@@ -145,6 +145,107 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _handle_eval(args: argparse.Namespace) -> int:
+    """Run a prompt-eval suite; exit non-zero if the pass-rate is below threshold.
+
+    Loads cases from a JSON file (a list of ``{name, prompt, expect?, forbid?}``),
+    runs them through the configured LLM provider (the same selection the runtime
+    uses — the offline ``fake`` build needs no keys), prints the report, and
+    returns ``0`` iff ``pass_rate >= --min-pass-rate``.
+    """
+    import asyncio  # noqa: PLC0415 — local keeps the CLI import light
+    import json  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    from friday.app import _build_llm  # noqa: PLC0415 — lazy: avoids the runtime graph at import
+    from friday.eval.harness import EvalCase, run_eval  # noqa: PLC0415
+
+    raw = json.loads(Path(args.cases).read_text(encoding="utf-8"))
+    cases = [EvalCase.model_validate(item) for item in raw]
+    llm = _build_llm(get_settings())
+    report = asyncio.run(run_eval(cases, llm))
+    print(report.render())
+    return 0 if report.ok(args.min_pass_rate) else 1
+
+
+def _handle_backup(args: argparse.Namespace) -> int:
+    """Create or restore an encrypted backup of the durable memory DB + ledger.
+
+    The passphrase comes from ``--key`` or ``$FRIDAY_BACKUP_KEY`` (a missing one
+    exits ``2``). ``create`` bundles the configured ``memory_db_path`` (unless it
+    is the in-memory ``:memory:``) and ``audit_ledger_path`` into one encrypted,
+    authenticated blob; ``restore`` verifies and extracts it. A bad passphrase or
+    a tampered archive fails closed with exit ``1``.
+    """
+    import os  # noqa: PLC0415 — local keeps the CLI import light
+    from pathlib import Path  # noqa: PLC0415
+
+    from friday.system.backup import (  # noqa: PLC0415 — lazy keeps import light
+        BackupError,
+        create_backup,
+        restore_backup,
+    )
+
+    settings = get_settings()
+    passphrase = args.key or os.environ.get("FRIDAY_BACKUP_KEY", "")
+    if not passphrase:
+        print("backup: pass a passphrase via --key or set FRIDAY_BACKUP_KEY")
+        return 2
+
+    try:
+        if args.backup_command == "create":
+            paths: list[Path] = []
+            if settings.memory_db_path != ":memory:":
+                paths.append(Path(settings.memory_db_path))
+            paths.append(Path(settings.audit_ledger_path))
+            blob = create_backup(paths, passphrase)
+            Path(args.out).write_bytes(blob)
+            print(f"backup written to {args.out} ({len(blob)} bytes)")
+            return 0
+        # ``restore``
+        blob = Path(args.archive).read_bytes()
+        names = restore_backup(blob, passphrase, Path(args.dest))
+        print(f"restored {len(names)} file(s) into {args.dest}: {', '.join(names)}")
+        return 0
+    except BackupError as exc:
+        print(f"backup error: {exc}")
+        return 1
+
+
+def _handle_tui(args: argparse.Namespace) -> int:
+    """Run the in-process terminal cockpit (REPL over the core loop).
+
+    Builds a fully-wired orchestrator from settings (offline on the ``fake``
+    build, live when providers are configured) and runs the TUI loop until
+    EOF/``:quit``.
+    """
+    import asyncio  # noqa: PLC0415 — local keeps the CLI import light
+
+    from friday.app import build_orchestrator  # noqa: PLC0415 — lazy: avoids the graph at import
+    from friday.tui.app import run_tui  # noqa: PLC0415
+
+    orchestrator = build_orchestrator(get_settings())
+    return asyncio.run(run_tui(orchestrator, session_id=args.session))
+
+
+def _handle_tray(args: argparse.Namespace) -> int:
+    """Launch the system-tray icon (blocks until quit); 1 when the tray is off.
+
+    Builds the tray from settings — a real ``pystray`` icon when ``enable_tray``
+    is on and the backend is installed, else a logged no-op fallback. Disabled by
+    default, so this prints how to enable it and exits non-zero.
+    """
+    from friday.desktop.tray import build_tray  # noqa: PLC0415 — lazy keeps import light
+
+    tray = build_tray(get_settings())
+    if tray is None:
+        print("tray: disabled (set FRIDAY_ENABLE_TRAY=true to enable)")
+        return 1
+    print("starting FRIDAY tray — quit from the tray menu")
+    tray.run()  # blocks for a real icon; immediate no-op for the fallback tray
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the ``friday`` argument parser (no side effects).
 
@@ -199,6 +300,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="one-shot health self-test")
     doctor.set_defaults(func=_handle_doctor)
+
+    eval_cmd = subparsers.add_parser(
+        "eval", help="run a JSON prompt-eval suite against the configured LLM"
+    )
+    eval_cmd.add_argument("cases", help="path to a JSON file of eval cases")
+    eval_cmd.add_argument(
+        "--min-pass-rate",
+        type=float,
+        default=1.0,
+        help="minimum fraction of cases that must pass (default 1.0 = all)",
+    )
+    eval_cmd.set_defaults(func=_handle_eval)
+
+    backup = subparsers.add_parser(
+        "backup", help="encrypted backup/restore of the memory DB + audit ledger"
+    )
+    backup_sub = backup.add_subparsers(dest="backup_command")
+    b_create = backup_sub.add_parser("create", help="write an encrypted backup blob")
+    b_create.add_argument("out", help="output path for the encrypted backup")
+    b_create.add_argument(
+        "--key", default=None, help="passphrase (else $FRIDAY_BACKUP_KEY)"
+    )
+    b_create.set_defaults(func=_handle_backup)
+    b_restore = backup_sub.add_parser("restore", help="restore from an encrypted backup")
+    b_restore.add_argument("archive", help="path to the encrypted backup blob")
+    b_restore.add_argument("dest", help="directory to restore the files into")
+    b_restore.add_argument(
+        "--key", default=None, help="passphrase (else $FRIDAY_BACKUP_KEY)"
+    )
+    b_restore.set_defaults(func=_handle_backup)
+
+    tui = subparsers.add_parser("tui", help="run the in-process terminal cockpit")
+    tui.add_argument(
+        "--session", default="tui", help="session id for the TUI conversation"
+    )
+    tui.set_defaults(func=_handle_tui)
+
+    tray = subparsers.add_parser("tray", help="launch the system-tray icon")
+    tray.set_defaults(func=_handle_tray)
 
     return parser
 

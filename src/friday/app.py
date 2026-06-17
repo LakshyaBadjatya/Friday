@@ -57,6 +57,7 @@ from friday.api.routes_journal import router as journal_router
 from friday.api.routes_meetings import router as meetings_router
 from friday.api.routes_memory import router as memory_router
 from friday.api.routes_models import router as models_router
+from friday.api.routes_multimodal import router as multimodal_router
 from friday.api.routes_n8n import router as n8n_router
 from friday.api.routes_perception import router as perception_router
 from friday.api.routes_planner import router as planner_router
@@ -67,6 +68,7 @@ from friday.api.routes_reminders import router as reminders_router
 from friday.api.routes_roster import router as roster_router
 from friday.api.routes_schedules import router as schedules_router
 from friday.api.routes_security import router as security_router
+from friday.api.routes_sentiment import router as sentiment_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
 from friday.api.routes_study import router as study_router
@@ -110,7 +112,10 @@ from friday.n8n.drafter import WorkflowDrafter
 from friday.n8n.service import N8nService
 from friday.observability.audit import AuditLog
 from friday.observability.metrics import Metrics
+from friday.observability.otel import build_trace_exporter
+from friday.observability.replay import TurnRecorder
 from friday.observability.tracing import Tracer
+from friday.observability.usage import UsageLedger
 from friday.perception.clipboard import FakeClipboard
 from friday.perception.ocr import FakeOCR
 from friday.perception.screen import (
@@ -1583,6 +1588,12 @@ class AppRuntime:
     tracer: Tracer
     audit: AuditLog
     metrics: Metrics
+    #: Process-lifetime token/dollar ledger behind ``GET /admin/usage`` (the cost
+    #: dashboard) — the same instance the orchestrator records each completion into.
+    usage_ledger: UsageLedger
+    #: Bounded turn-transcript recorder behind ``GET /admin/turns`` (turn replay)
+    #: — the same instance the orchestrator appends each settled turn to.
+    turn_recorder: TurnRecorder
     registry: ToolRegistry
     short_term: ShortTermMemory
     #: The shared durable long-term store — :class:`SQLiteLongTermStore` by
@@ -1723,9 +1734,14 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     unchanged); ``repo_root`` is the directory the self-check scans (the process
     working directory by default; tests pin a tmp path).
     """
-    tracer = Tracer()
+    # The Tracer keeps an in-process ring buffer for GET /admin/traces, and —
+    # when enable_otel is on — also forwards each finished trace to an OTLP
+    # collector via the lazy OpenTelemetry seam (None = in-process only).
+    tracer = Tracer(exporter=build_trace_exporter(settings))
     audit = AuditLog()
     metrics = Metrics()
+    usage_ledger = UsageLedger()
+    turn_recorder = TurnRecorder()
     flag_overrides: dict[str, bool] = {}
 
     # Security spine: the tamper-evident ledger + secret vault are built first so
@@ -1871,6 +1887,8 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         vector=vector,
         tracer=tracer,
         metrics=metrics,
+        usage_ledger=usage_ledger,
+        turn_recorder=turn_recorder,
         protocol_store=protocol_store,
         protocol_runner=protocol_runner,
         critic=critic,
@@ -1887,6 +1905,8 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         tracer=tracer,
         audit=audit,
         metrics=metrics,
+        usage_ledger=usage_ledger,
+        turn_recorder=turn_recorder,
         registry=registry,
         short_term=short_term,
         long_term=long_term,
@@ -2335,6 +2355,12 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.tracer = runtime.tracer
     app.state.audit = runtime.audit
     app.state.metrics = runtime.metrics
+    # Cost dashboard: the token/dollar ledger read back by GET /admin/usage —
+    # the same instance the orchestrator tallies each completion into.
+    app.state.usage = runtime.usage_ledger
+    # Turn replay: the transcript recorder read back by GET /admin/turns —
+    # the same instance the orchestrator appends each settled turn to.
+    app.state.turns = runtime.turn_recorder
     app.state.registry = runtime.registry
     app.state.short_term = runtime.short_term
     app.state.long_term = runtime.long_term
@@ -2480,6 +2506,8 @@ def create_app() -> FastAPI:
     app.include_router(automation_router)
     app.include_router(approvals_router)
     app.include_router(security_router)
+    app.include_router(sentiment_router)
+    app.include_router(multimodal_router)
     # Voice endpoints are always registered but self-guard on FRIDAY_ENABLE_VOICE
     # (404 / socket refusal when off), so the offline default exposes no voice UX.
     app.include_router(voice_router)

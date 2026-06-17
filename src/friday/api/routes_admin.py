@@ -19,6 +19,12 @@ Endpoints (all under the ``/admin`` prefix):
 * ``GET  /admin/traces``  — recent per-request traces (each correlation id with
   its span names + timings) — the evidence that every turn is traced.
 * ``GET  /admin/metrics`` — the :meth:`~friday.observability.metrics.Metrics.snapshot`.
+* ``GET  /admin/usage``   — the token/dollar cost ledger
+  (:meth:`~friday.observability.usage.UsageLedger.snapshot`): completions +
+  prompt/completion/total tokens + dollars, overall and per model.
+* ``GET  /admin/turns``   — recent turn transcripts (id + session + mode +
+  input/output) for replay; ``GET /admin/turns/{id}`` fetches one (``404`` if
+  it has aged out of the ring buffer).
 
 Everything is read off ``app.state``; the router constructs nothing heavy and
 never reaches the network or an LLM SDK. The holders are populated at startup, so
@@ -37,7 +43,9 @@ from friday.broker import HashChainedAudit
 from friday.config import Settings, get_settings
 from friday.observability.audit import AuditLog, ToolCallAudit
 from friday.observability.metrics import Metrics
+from friday.observability.replay import TurnRecord, TurnRecorder
 from friday.observability.tracing import Tracer
+from friday.observability.usage import UsageLedger
 
 router = APIRouter(prefix="/admin")
 
@@ -118,6 +126,12 @@ class TracesResponse(BaseModel):
     traces: list[TraceView]
 
 
+class TurnsResponse(BaseModel):
+    """Recent turn transcripts for replay, oldest-first (newest last)."""
+
+    turns: list[TurnRecord]
+
+
 # --------------------------------------------------------------------------- #
 # app.state accessors (read-only, with safe empty fallbacks)
 # --------------------------------------------------------------------------- #
@@ -154,6 +168,16 @@ def _audit(request: Request) -> AuditLog | None:
 def _metrics(request: Request) -> Metrics | None:
     metrics = getattr(request.app.state, "metrics", None)
     return metrics if isinstance(metrics, Metrics) else None
+
+
+def _usage(request: Request) -> UsageLedger | None:
+    usage = getattr(request.app.state, "usage", None)
+    return usage if isinstance(usage, UsageLedger) else None
+
+
+def _turns(request: Request) -> TurnRecorder | None:
+    turns = getattr(request.app.state, "turns", None)
+    return turns if isinstance(turns, TurnRecorder) else None
 
 
 def _hash_audit(request: Request) -> HashChainedAudit | None:
@@ -292,6 +316,56 @@ async def get_metrics(request: Request) -> JSONResponse:
         else {"requests": 0, "tool_calls": 0, "errors": 0, "by_mode": {}}
     )
     return JSONResponse(status_code=200, content=snap)
+
+
+@router.get("/usage", response_model=None)
+async def get_usage(request: Request) -> JSONResponse:
+    """Return the token/dollar usage ledger — the cost-dashboard data.
+
+    Aggregate completions + prompt/completion/total tokens + dollars spent, with
+    a per-model breakdown under ``by_model``. Empty-but-valid before any turn (a
+    fresh app reports all-zero), mirroring the other ``/admin`` observability
+    views. Free models keep the dollar columns at ``0.0``.
+    """
+    usage = _usage(request)
+    snap = (
+        usage.snapshot()
+        if usage is not None
+        else {
+            "completions": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "tokens": 0,
+            "usd": 0.0,
+            "by_model": {},
+        }
+    )
+    return JSONResponse(status_code=200, content=snap)
+
+
+@router.get("/turns", response_model=TurnsResponse)
+async def get_turns(request: Request) -> TurnsResponse:
+    """Return recent turn transcripts (id + session + mode + input/output).
+
+    Empty-but-valid before any turn, like the other ``/admin`` views; each row is
+    a captured turn the dashboard can display or replay. Newest last.
+    """
+    recorder = _turns(request)
+    turns = recorder.recent(100) if recorder is not None else []
+    return TurnsResponse(turns=turns)
+
+
+@router.get("/turns/{turn_id}", response_model=None)
+async def get_turn(request: Request, turn_id: int) -> JSONResponse:
+    """Return one captured turn by id, or ``404`` if it aged out / never existed."""
+    recorder = _turns(request)
+    record = recorder.get(turn_id) if recorder is not None else None
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"no turn with id {turn_id}", "type": "TurnNotFound"},
+        )
+    return JSONResponse(status_code=200, content=record.model_dump())
 
 
 # --------------------------------------------------------------------------- #

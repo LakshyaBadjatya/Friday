@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ask FRIDAY</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 12px;
+        background: #060910;
+        color: #d6e6f7;
+        font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      h1 { font-size: 13px; letter-spacing: 0.08em; color: #4fe3ff; margin: 0 0 8px; }
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 64px;
+        background: #0b1220;
+        color: #d6e6f7;
+        border: 1px solid #1a2740;
+        border-radius: 8px;
+        padding: 8px;
+        resize: vertical;
+      }
+      .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+      input[type="url"] { flex: 1; background: #0b1220; color: #9fb3cc; border: 1px solid #1a2740; border-radius: 8px; padding: 6px; }
+      button {
+        background: #122036;
+        color: #4fe3ff;
+        border: 1px solid #243653;
+        border-radius: 8px;
+        padding: 6px 12px;
+        cursor: pointer;
+      }
+      button:hover { border-color: #4fe3ff; }
+      #reply { margin-top: 10px; white-space: pre-wrap; color: #d6e6f7; }
+      .dim { color: #62788f; }
+    </style>
+  </head>
+  <body>
+    <h1>◉ ASK FRIDAY</h1>
+    <textarea id="q" placeholder="Ask FRIDAY…" autofocus></textarea>
+    <div class="row">
+      <button id="send">Send</button>
+      <span id="status" class="dim"></span>
+    </div>
+    <div class="row">
+      <input id="base" type="url" placeholder="http://127.0.0.1:8000" />
+    </div>
+    <div id="reply"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

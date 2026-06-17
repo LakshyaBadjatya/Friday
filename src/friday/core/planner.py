@@ -81,7 +81,11 @@ class Plan(BaseModel):
             raise ValueError("plan has duplicate step ids")
         indegree: dict[str, int] = {s.id: 0 for s in self.steps}
         for step in self.steps:
-            for dep in step.depends_on:
+            # Dedupe per step: the decrement loop below tests membership
+            # (``current in step.depends_on``) once per processed id, so a
+            # duplicated dependency must only count once here or the step's
+            # indegree could never reach zero (a spurious "cycle").
+            for dep in set(step.depends_on):
                 if dep not in by_id:
                     raise ValueError(
                         f"step {step.id!r} depends on unknown step {dep!r}"
@@ -162,7 +166,18 @@ class Planner:
         steps = self._parse_steps(response.text)
         if not steps:
             return self._fallback(goal)
-        return Plan(goal=goal, steps=steps)
+        plan = Plan(goal=goal, steps=steps)
+        # Per-step pydantic validation does not catch dependency-graph defects
+        # (unknown deps, cycles, duplicate ids). Probe the assembled graph so a
+        # malformed LLM decomposition degrades to the single-step fallback rather
+        # than returning a Plan whose render()/topological_order() raises in the
+        # caller — honoring decompose()'s "always yields a usable Plan" contract.
+        try:
+            plan.topological_order()
+        except ValueError as exc:
+            logger.warning("planner produced an unrunnable graph; single-step fallback: %s", exc)
+            return self._fallback(goal)
+        return plan
 
     @staticmethod
     def _fallback(goal: str) -> Plan:

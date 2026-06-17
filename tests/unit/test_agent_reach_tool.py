@@ -8,6 +8,7 @@ must NEVER fabricate content on failure.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -149,6 +150,49 @@ class _FakeProcess:
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
+
+
+async def test_transcribe_kills_and_reaps_subprocess_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On timeout the child must be killed and reaped — leaving it running leaks the
+    # process and its stdout/stderr pipe FDs.
+    monkeypatch.setattr(
+        agent_reach_module.shutil, "which", lambda _name: "/usr/bin/agent-reach"
+    )
+
+    class _HangingProcess:
+        def __init__(self) -> None:
+            self.killed = False
+            self.waited = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)  # longer than the tool's timeout -> wait_for fires
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.waited = True
+            return -9
+
+    proc = _HangingProcess()
+
+    async def _fake_exec(*_cmd: str, **_kwargs: Any) -> _HangingProcess:
+        return proc
+
+    monkeypatch.setattr(
+        agent_reach_module.asyncio, "create_subprocess_exec", _fake_exec
+    )
+
+    tool = AgentReachTool(cli_path="agent-reach", timeout=0.05)
+    result = await tool(AgentReachArgs(action="transcribe", target=PAGE_URL))
+
+    assert result.ok is False
+    assert result.error is not None and result.error.code == "transcribe_failed"
+    assert result.error.retriable is True
+    assert proc.killed is True and proc.waited is True  # reaped, not leaked
 
 
 async def test_transcribe_missing_cli_returns_error_without_subprocess(

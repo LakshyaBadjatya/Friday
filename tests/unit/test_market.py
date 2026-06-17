@@ -250,6 +250,33 @@ async def test_tool_surfaces_honest_failure_without_fabricating() -> None:
     assert "quote" not in result.data
 
 
+@respx.mock
+async def test_tool_retriable_decided_by_status_not_body_digits() -> None:
+    # A terminal 404 whose body merely echoes a transient code ("503") must NOT be
+    # marked retriable — retriability is the HTTP status, not a substring of the body.
+    respx.post(f"{BASE_URL}/v2/marketfeed/quote").mock(
+        return_value=httpx.Response(404, json={"errorCode": "DH-404", "hint": "see 503 page"})
+    )
+    async with httpx.AsyncClient(base_url=BASE_URL) as http:
+        tool = MarketDataTool(_client(http))
+        result = await tool(QuoteArgs(symbol="NSE_EQ:11536"))
+    assert result.ok is False and result.error is not None
+    assert result.error.retriable is False
+
+
+@respx.mock
+async def test_tool_retriable_on_genuine_transient_status() -> None:
+    # A real 503 (no transient digits in the body) IS retriable.
+    respx.post(f"{BASE_URL}/v2/marketfeed/quote").mock(
+        return_value=httpx.Response(503, text="service unavailable")
+    )
+    async with httpx.AsyncClient(base_url=BASE_URL) as http:
+        tool = MarketDataTool(_client(http))
+        result = await tool(QuoteArgs(symbol="NSE_EQ:11536"))
+    assert result.ok is False and result.error is not None
+    assert result.error.retriable is True
+
+
 async def test_tool_missing_credentials_is_handled_failure() -> None:
     async with httpx.AsyncClient(base_url=BASE_URL) as http:
         tool = MarketDataTool(DhanClient("", "", http=http))

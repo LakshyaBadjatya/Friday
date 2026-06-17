@@ -9,6 +9,7 @@ missing. No real audio, no network.
 from __future__ import annotations
 
 import builtins
+import types
 from typing import Any
 
 import pytest
@@ -107,6 +108,19 @@ def test_openwakeword_missing_backend_raises_helpful_error(
     with pytest.raises(ProviderError) as exc:
         OpenWakeWordDetector()
     assert "install-voice" in str(exc.value)
+
+
+def test_openwakeword_detect_tolerates_odd_length_frame() -> None:
+    """An odd-length PCM frame must not crash np.frombuffer(int16) in detect()."""
+    pytest.importorskip("numpy")
+    det = OpenWakeWordDetector.__new__(OpenWakeWordDetector)
+    det.threshold = 0.5
+    det._model = types.SimpleNamespace(predict=lambda audio: {"hey_friday": 0.1})
+    # 3 bytes is not a whole number of int16 samples — without the guard this
+    # raises "buffer size must be a multiple of element size".
+    result = det.detect(b"\x00\x01\x02")
+    assert result.detected is False
+    assert 0.0 <= result.score <= 1.0
 
 
 def test_module_import_does_not_require_openwakeword() -> None:

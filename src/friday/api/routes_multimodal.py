@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import binascii
 
+import anyio
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -51,7 +52,9 @@ async def generate_image(body: ImageGenRequest) -> JSONResponse:
     generator = build_image_generator(get_settings())
     if generator is None:
         return JSONResponse(status_code=404, content={"detail": "imagegen disabled"})
-    image = generator.generate(body.prompt)
+    # generate() lazily loads a (multi-GB) diffusion pipeline and runs CPU/GPU
+    # inference — offload it so a single request cannot stall the event loop.
+    image = await anyio.to_thread.run_sync(generator.generate, body.prompt)
     return JSONResponse(status_code=200, content=image.model_dump())
 
 
@@ -68,5 +71,7 @@ async def extract_pdf_layout(body: PdfLayoutRequest) -> JSONResponse:
             status_code=400,
             content={"detail": "pdf_base64 is not valid base64", "type": "BadInput"},
         )
-    document = extractor.extract(pdf_bytes)
+    # PDF parsing is synchronous, CPU-bound work over arbitrarily large input;
+    # offload it so it does not block the event loop / other in-flight requests.
+    document = await anyio.to_thread.run_sync(extractor.extract, pdf_bytes)
     return JSONResponse(status_code=200, content=document.model_dump())

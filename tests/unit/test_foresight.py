@@ -42,6 +42,21 @@ def test_empty_events_yield_no_suggestions() -> None:
     assert Foresight().suggest([], now=NOW) == []
 
 
+def test_mixed_naive_and_aware_timestamps_do_not_raise() -> None:
+    # datetime.fromisoformat accepts both naive and aware ISO strings; comparing a
+    # mix raises TypeError. suggest() promises to be total, so it must normalize.
+    events = [
+        {"type": "metric", "name": "cpu", "at": "2026-06-15T09:00", "value": 1.0},
+        {"type": "metric", "name": "cpu", "at": "2026-06-15T10:00+00:00", "value": 2.0},
+    ]
+    suggestions = Foresight().suggest(events, now=NOW)
+    assert isinstance(suggestions, list)
+
+    # A tz-naive reminder due against the aware NOW must also not raise.
+    reminder_events = [{"type": "reminder", "title": "renew", "due": "2026-06-15T09:30"}]
+    assert isinstance(Foresight().suggest(reminder_events, now=NOW), list)
+
+
 def test_rising_metric_trend_is_surfaced() -> None:
     """A metric whose value climbs over time produces one trend suggestion."""
     events = [

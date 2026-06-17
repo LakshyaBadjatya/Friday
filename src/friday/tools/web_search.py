@@ -103,6 +103,11 @@ class _DDGResultParser(HTMLParser):
             return
         classes = self._class_of(attrs).split()
         if "result__a" in classes:
+            # Emit any previous result still buffered without a snippet before we
+            # overwrite the title/url — DDG sometimes omits result__snippet, and
+            # without this flush such a result would be silently dropped. The
+            # flush no-ops when there is nothing buffered.
+            self._flush_result()
             self._in_title = True
             self._current_title = []
             self._current_url = self._href_of(attrs)
@@ -135,11 +140,17 @@ class _DDGResultParser(HTMLParser):
         self._current_url = None
         self._current_snippet = []
 
+    def close(self) -> None:
+        # Flush a trailing snippet-less result that no later result__a will close.
+        super().close()
+        self._flush_result()
+
 
 def _parse_html(html_text: str, max_results: int) -> list[dict[str, str]]:
     """Parse DuckDuckGo HTML into at most ``max_results`` result rows."""
     parser = _DDGResultParser()
     parser.feed(html_text)
+    parser.close()  # emits the final buffered result if it had no snippet
     return parser.results[:max_results]
 
 

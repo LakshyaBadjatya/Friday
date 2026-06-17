@@ -95,3 +95,36 @@ async def test_decompose_provider_error_falls_back() -> None:
     plan = await Planner(llm).decompose("do the thing")
     assert len(plan.steps) == 1
     assert plan.steps[0].id == "s1"
+
+
+def test_topological_order_tolerates_duplicate_dependency() -> None:
+    # An LLM (or hand-authored) step may list the same dependency twice; the
+    # indegree count must still drive to zero, not falsely report a cycle.
+    plan = Plan(goal="g", steps=[_step("s1"), _step("s2", deps=["s1", "s1"])])
+    assert [s.id for s in plan.topological_order()] == ["s1", "s2"]
+    assert plan.render()  # render walks the order; must not raise
+
+
+async def test_decompose_degrades_on_cyclic_graph() -> None:
+    payload = json.dumps(
+        [
+            {"id": "s1", "description": "a", "depends_on": ["s2"]},
+            {"id": "s2", "description": "b", "depends_on": ["s1"]},
+        ]
+    )
+    llm = FakeLLM(responses=[LLMResponse(text=payload)])
+    plan = await Planner(llm).decompose("loopy goal")
+    # The cyclic decomposition is unrunnable -> single-step fallback, and the
+    # returned plan must render without raising (the bug let render() 500).
+    assert len(plan.steps) == 1
+    assert plan.steps[0].description == "loopy goal"
+    assert plan.render()
+
+
+async def test_decompose_degrades_on_unknown_dependency() -> None:
+    payload = json.dumps([{"id": "s1", "description": "a", "depends_on": ["missing"]}])
+    llm = FakeLLM(responses=[LLMResponse(text=payload)])
+    plan = await Planner(llm).decompose("dangling goal")
+    assert len(plan.steps) == 1
+    assert plan.steps[0].description == "dangling goal"
+    assert plan.render()

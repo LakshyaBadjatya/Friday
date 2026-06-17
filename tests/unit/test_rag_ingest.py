@@ -207,3 +207,22 @@ async def test_forget_source_removes_from_vector_and_long_term() -> None:
     after = vector.query(secret, k=4)
     assert not any(hit.source_id.startswith("notes-secret#") for hit in after)
     assert long_term.query_facts("notes-secret", limit=10) == []
+
+
+async def test_forget_source_does_not_collaterally_delete_other_documents() -> None:
+    """Forgetting one source must not delete an unrelated doc whose text merely
+    contains the forgotten source-id as a substring (the bare-source over-delete)."""
+    ingestor, vector, _ = _ingestor()
+    # "alpha"'s text literally contains "report" — the id of the *other* source.
+    alpha_text = "The quarterly report shows strong growth in revenue this year."
+    await ingestor.ingest("alpha", alpha_text)
+    await ingestor.ingest("report", "An unrelated document about gardening tips.")
+
+    removed = ingestor.forget_source("report")
+
+    # report's own chunk was removed...
+    assert removed >= 1
+    # ...but alpha survives (identical-text query self-matches with score 1 under
+    # the deterministic FakeEmbeddings). The bug deleted alpha here too.
+    hits = vector.query(alpha_text, k=4)
+    assert any(hit.source_id.startswith("alpha#") for hit in hits)

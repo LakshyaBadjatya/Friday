@@ -40,6 +40,24 @@ def test_second_entry_links_to_first(tmp_path: Path) -> None:
     assert second.prev_hash == first.entry_hash
 
 
+def test_append_continues_chain_across_instances(tmp_path: Path) -> None:
+    # append() caches the chain tail; a fresh instance must reconstruct it from the
+    # persisted file so a subsequent append links correctly (not restart at index 0).
+    path = tmp_path / "audit.jsonl"
+    first_instance = HashChainedAudit(path)
+    first_instance.append({"step": "one"})
+    e2 = first_instance.append({"step": "two"})
+
+    second_instance = HashChainedAudit(path)
+    e3 = second_instance.append({"step": "three"})
+
+    assert e3.index == 2
+    assert e3.prev_hash == e2.entry_hash
+    assert [e.index for e in second_instance.entries()] == [0, 1, 2]
+    ok, broken_at = second_instance.verify()
+    assert ok is True and broken_at is None
+
+
 def test_verify_ok_on_untampered_chain(tmp_path: Path) -> None:
     audit = _audit(tmp_path)
     audit.append({"a": 1})

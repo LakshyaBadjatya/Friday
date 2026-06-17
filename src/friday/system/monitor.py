@@ -95,7 +95,11 @@ class PsutilSampler:
         """Read live host metrics; optional sensors degrade to ``None``."""
         import psutil  # lazy: keep the module import-safe without the dependency
 
-        cpu_percent = float(psutil.cpu_percent(interval=None))
+        # interval>0 blocks ~100ms and returns a true instantaneous reading on
+        # every call. interval=None is non-blocking but returns 0.0 on the first
+        # call and is otherwise cadence-dependent (busy% since the previous call),
+        # so the first /system/check could never see real CPU load.
+        cpu_percent = float(psutil.cpu_percent(interval=0.1))
         mem_percent = float(psutil.virtual_memory().percent)
         disk_percent = float(psutil.disk_usage(self._disk_path).percent)
         return SystemStats(

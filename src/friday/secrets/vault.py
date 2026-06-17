@@ -170,9 +170,18 @@ class FileVault:
         data = self._load()
         data[name] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        # Create with restrictive perms from the start; chmod after to be sure
-        # (umask can loosen the open() mode).
-        self._path.write_text(json.dumps(data), encoding="utf-8")
+        # Write to a sibling temp file, then atomically rename it into place. This
+        # means a concurrent reader never observes a truncated/half-written file
+        # (the rename is atomic on the same filesystem), and the file is created
+        # with restrictive perms *before* any bytes hit disk: os.open's mode is
+        # umask-masked, but masking only ever removes bits from 0o600 — it can
+        # never add group/world bits — so the secrets never exist looser than 0o600.
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data))
+        os.replace(tmp, self._path)  # atomic swap (same dir → same filesystem)
+        # Tighten any pre-existing file that an earlier looser write may have left.
         self._path.chmod(0o600)
 
 

@@ -19,9 +19,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from friday.broker import HashChainedAudit
 from friday.broker.audit import GENESIS_HASH
@@ -47,12 +48,25 @@ class RotationRequest(BaseModel):
 
 
 @router.post("/security/rotation", response_model=None)
-async def rotation_due(request: Request, body: RotationRequest) -> JSONResponse:
-    """Return the names of the posted secrets overdue for rotation; 404 when off."""
+async def rotation_due(request: Request) -> JSONResponse:
+    """Return the names of the posted secrets overdue for rotation; 404 when off.
+
+    The body is parsed *after* the feature-flag check (not via a bound parameter)
+    so a disabled feature returns 404 even for a malformed body — a bound param
+    would let FastAPI 422 first, leaking that the route exists.
+    """
     if not _enabled(request, "enable_secret_rotation"):
         return JSONResponse(
             status_code=404, content={"detail": "secret rotation disabled"}
         )
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse(status_code=422, content={"detail": "invalid body"})
+    try:
+        body = RotationRequest.model_validate(raw)
+    except ValidationError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
     policy = RotationPolicy(body.max_age_seconds)
     due = policy.due(body.secrets, now=time.time())
     return JSONResponse(status_code=200, content={"due": due})
@@ -75,8 +89,14 @@ async def anchor_ledger(request: Request) -> JSONResponse:
     anchor = make_anchor(head, now=time.time(), note="api")
     settings = getattr(request.app.state, "settings", None)
     path = Path(getattr(settings, "audit_anchor_path", "data/anchors.jsonl"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(anchor.model_dump_json() + "\n")
+
+    def _append_anchor(line: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
+    # Off the event loop: a slow/contended disk would otherwise stall every
+    # concurrent request for the duration of the append.
+    await anyio.to_thread.run_sync(_append_anchor, anchor.model_dump_json() + "\n")
     logger.info("audit anchor written", extra={"head": head[:12]})
     return JSONResponse(status_code=200, content=anchor.model_dump())

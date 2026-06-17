@@ -314,5 +314,15 @@ def _scrub_value(value: Any, secrets: set[str]) -> Any:
 
 
 def _scrub_result(result: ToolResult, secrets: set[str]) -> ToolResult:
-    """Return ``result`` with any injected secret value masked in its ``data``."""
-    return result.model_copy(update={"data": _scrub_value(result.data, secrets)})
+    """Return ``result`` with any injected secret value masked.
+
+    Both the ``data`` payload and the free-text ``error.message`` are scrubbed: a
+    tool that interpolates a resolved ``{{secret:NAME}}`` value into its failure
+    message would otherwise round-trip the credential straight back to the caller.
+    ``error.code`` is a controlled, enum-like string and is left untouched.
+    """
+    update: dict[str, Any] = {"data": _scrub_value(result.data, secrets)}
+    if result.error is not None:
+        scrubbed_message = _scrub_value(result.error.message, secrets)
+        update["error"] = result.error.model_copy(update={"message": scrubbed_message})
+    return result.model_copy(update=update)

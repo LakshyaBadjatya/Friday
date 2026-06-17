@@ -30,6 +30,22 @@ def test_ws_emotion_closed_when_disabled() -> None:
             ws.receive_json()
 
 
+def test_ws_emotion_unregisters_listener_on_disconnect() -> None:
+    # The analyzer is shared/long-lived: each connection registers a listener and
+    # MUST detach it on disconnect, or _listeners grows unbounded across reconnects.
+    analyzer = EmotionStreamAnalyzer(
+        FakeEmotion(valence=0.2, arousal=0.3, dominance=0.4),
+        window_s=0.5, hop_s=0.25,
+    )
+    client = TestClient(_app(enable=True, analyzer=analyzer))
+    baseline = len(analyzer._listeners)
+    for _ in range(5):
+        with client.websocket_connect("/ws/emotion") as ws:
+            assert ws.receive_json() == {"type": "ready"}
+    # After every connection has closed, no listeners must remain leaked.
+    assert len(analyzer._listeners) == baseline
+
+
 def test_ws_emotion_ready_then_streams() -> None:
     analyzer = EmotionStreamAnalyzer(
         FakeEmotion(valence=0.2, arousal=0.3, dominance=0.4),

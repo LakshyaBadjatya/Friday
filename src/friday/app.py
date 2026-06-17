@@ -134,6 +134,14 @@ from friday.providers.embeddings import (
     FakeEmbeddings,
     NvidiaEmbeddings,
 )
+from friday.providers.emotion import (
+    CalibratedEmotion,
+    DimEmotion,
+    EmotionCalibration,
+    EmotionProvider,
+    FakeEmotion,
+    LiteEmotion,
+)
 from friday.providers.llm import (
     FakeLLM,
     FallbackLLM,
@@ -195,14 +203,6 @@ from friday.tools.reminders import (
 from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
 from friday.tools.weather import WeatherTool
 from friday.tools.web_search import WebSearchTool
-from friday.providers.emotion import (
-    CalibratedEmotion,
-    DimEmotion,
-    EmotionCalibration,
-    EmotionProvider,
-    FakeEmotion,
-    LiteEmotion,
-)
 from friday.voice.capture import MicCapture
 from friday.voice.emotion_stream import EmotionStreamAnalyzer, feed_analyzer
 from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity

@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 
 from friday.providers.emotion import FakeEmotion
-from friday.providers.stt import FakeSTT
 from friday.providers.tts import FakeTTS
 from friday.voice.capture import FakeAudioCapture
 from friday.voice.emotion_stream import EmotionStreamAnalyzer
@@ -17,7 +16,7 @@ from friday.voice.fixtures import make_silence_frame, make_wake_frame
 from friday.voice.pipeline import VoicePipeline
 from friday.voice.vad import FakeVAD
 from friday.voice.wake_word import FakeWakeWord
-from tests.integration.test_voice_pipeline import _ScriptedSTT, _orchestrator
+from tests.integration.test_voice_pipeline import _orchestrator, _ScriptedSTT
 
 
 def _capture() -> FakeAudioCapture:

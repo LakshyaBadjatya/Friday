@@ -1297,6 +1297,7 @@ class Orchestrator:
 
         lowered = text.lower()
         best: ProtocolModel | None = None
+        best_len = 0
         for protocol in store.list_protocols():
             if not protocol.enabled:
                 continue
@@ -1304,8 +1305,12 @@ class Orchestrator:
             if not phrase:
                 continue
             if re.search(rf"\b{re.escape(phrase)}\b", lowered):
-                if best is None or len(phrase) > len(best.trigger_phrase):
+                # Compare like-for-like: the normalized phrase length, not the raw
+                # (possibly whitespace-padded) incumbent length, so "longest phrase
+                # wins" picks the genuinely most-specific protocol.
+                if best is None or len(phrase) > best_len:
                     best = protocol
+                    best_len = len(phrase)
         return best
 
     async def _run_protocol(

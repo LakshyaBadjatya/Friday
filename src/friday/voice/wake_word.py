@@ -135,6 +135,12 @@ class OpenWakeWordDetector:
         """Evaluate ``frame`` with the loaded model and return the best score."""
         import numpy as np  # type: ignore[import-not-found]  # noqa: PLC0415
 
+        # 16-bit PCM needs an even byte count; np.frombuffer raises ValueError on
+        # a stray odd-length frame (e.g. a truncated capture chunk). Drop the
+        # trailing odd byte so a malformed frame degrades to a slightly-short
+        # window rather than crashing the wake detector.
+        if len(frame) % 2:
+            frame = frame[:-1]
         audio = np.frombuffer(frame, dtype=np.int16)
         scores = self._model.predict(audio)
         best = max(scores.values()) if scores else 0.0

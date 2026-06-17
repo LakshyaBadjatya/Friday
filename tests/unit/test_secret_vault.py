@@ -143,6 +143,32 @@ def test_file_vault_file_is_0600(tmp_path: Path) -> None:
     assert mode == 0o600
 
 
+def test_file_vault_creates_file_with_restrictive_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The secrets file is created 0600 *before* any bytes are written.
+
+    The post-write ``chmod`` masks an over-permissive *creation* mode from a plain
+    ``stat`` check, so spy on ``os.open`` to pin the mode requested at creation —
+    guarding against a regression to ``write_text`` (which opens 0666 & umask,
+    leaving a world/group-readable window).
+    """
+    recorded: list[int] = []
+    real_open = os.open
+
+    def _spy_open(path: Any, flags: int, mode: int = 0o777, *args: Any) -> int:
+        recorded.append(mode)
+        return real_open(path, flags, mode, *args)
+
+    monkeypatch.setattr(os, "open", _spy_open)
+
+    path = tmp_path / "secrets.json"
+    FileVault(str(path)).set("k", "v")
+
+    assert recorded and recorded[-1] == 0o600
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_file_vault_writes_valid_json(tmp_path: Path) -> None:
     path = tmp_path / "secrets.json"
     FileVault(str(path)).set("k", "v")

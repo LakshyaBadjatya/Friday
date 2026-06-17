@@ -94,6 +94,24 @@ def test_alerting_agent_satisfies_agent_protocol() -> None:
 # --------------------------------------------------------------------------- #
 # The dedupe + rate-limit guarantee (the headline tests)
 # --------------------------------------------------------------------------- #
+async def test_dedupe_map_evicts_stale_entries() -> None:
+    # Many distinct alerts are sent, then the clock advances past the window and
+    # one more is sent: the dedupe map must not retain the now-useless old keys.
+    registry, _ = _registry()
+    clock = _Clock(start=1000.0)
+    agent = AlertingAgent(registry, clock=clock, settings=_settings(window=300.0))
+
+    for i in range(20):
+        await agent.run(_state(subject=f"distinct alert {i}"))
+    assert len(agent._last_sent) == 20  # all still inside the window
+
+    clock.advance(301.0)  # the whole batch's window has now fully elapsed
+    await agent.run(_state(subject="fresh alert"))
+
+    # The 20 elapsed entries were evicted; only the fresh one remains.
+    assert len(agent._last_sent) == 1
+
+
 async def test_identical_alerts_within_window_collapse_to_one_send() -> None:
     # N identical alerts fired back-to-back inside the window -> exactly ONE
     # notify call. The clock does NOT advance between fires.

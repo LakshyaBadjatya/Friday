@@ -115,6 +115,22 @@ class HashChainedAudit:
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = Path(path)
+        # Cache the chain tail (last entry_hash + count) so append() is O(1)
+        # instead of re-reading and re-parsing the whole ledger on every call
+        # (one append happens per tool dispatch). Reconstructed once here from the
+        # persisted file. Assumes a single appending instance per path — which
+        # matches the wiring (one injected ledger); readers (entries/verify) still
+        # read the file fresh, so external appends remain visible to them.
+        self._tail_hash = GENESIS_HASH
+        self._count = 0
+        if self._path.exists():
+            with self._path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    self._count += 1
+                    self._tail_hash = json.loads(line)["entry_hash"]
 
     def entries(self) -> list[AuditEntry]:
         """Return every persisted entry, oldest-first (empty if no ledger yet)."""
@@ -136,9 +152,8 @@ class HashChainedAudit:
         :data:`GENESIS_HASH` for the first entry). The redacted record — never
         the raw one — is what is hashed and persisted.
         """
-        existing = self.entries()
-        prev_hash = existing[-1].entry_hash if existing else GENESIS_HASH
-        index = len(existing)
+        prev_hash = self._tail_hash
+        index = self._count
 
         clean = redact(record)
         entry = AuditEntry(
@@ -151,6 +166,9 @@ class HashChainedAudit:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as fh:
             fh.write(entry.model_dump_json() + "\n")
+        # Advance the cached tail only after the write succeeds.
+        self._tail_hash = entry.entry_hash
+        self._count += 1
         return entry
 
     def verify(self) -> tuple[bool, int | None]:

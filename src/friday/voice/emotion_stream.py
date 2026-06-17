@@ -9,6 +9,7 @@ listeners. It depends only on the provider boundary — no model is imported her
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -18,11 +19,13 @@ if TYPE_CHECKING:
     from friday.voice.capture import AudioCapture
     from friday.voice.voiceprint import OwnerIdentity
 
+logger = logging.getLogger(__name__)
+
 EmotionListener = Callable[[Emotion], None]
 
 
 async def feed_analyzer(
-    capture: "AudioCapture", analyzer: "EmotionStreamAnalyzer"
+    capture: AudioCapture, analyzer: EmotionStreamAnalyzer
 ) -> None:
     """Pump frames from ``capture`` into ``analyzer`` until the stream ends.
 
@@ -45,7 +48,7 @@ class EmotionStreamAnalyzer:
         window_s: float = 1.5,
         hop_s: float = 0.5,
         alpha: float = 0.4,
-        owner: "OwnerIdentity | None" = None,
+        owner: OwnerIdentity | None = None,
         owner_only: bool = False,
     ) -> None:
         self._provider = provider
@@ -67,6 +70,18 @@ class EmotionStreamAnalyzer:
     def on_emotion(self, listener: EmotionListener) -> None:
         """Register ``listener`` to be called on every smoothed Emotion."""
         self._listeners.append(listener)
+
+    def off_emotion(self, listener: EmotionListener) -> None:
+        """Detach a previously registered listener (no-op if not present).
+
+        Callers with a finite lifetime (e.g. a ``/ws/emotion`` connection) must
+        detach on teardown so the shared analyzer does not accumulate dead
+        listeners — and keep firing into their orphaned queues — forever.
+        """
+        try:
+            self._listeners.remove(listener)
+        except ValueError:
+            pass
 
     def last(self) -> Emotion | None:
         """The most recent smoothed Emotion, or ``None`` before the first hop."""
@@ -91,13 +106,17 @@ class EmotionStreamAnalyzer:
         raw = await self._provider.analyze(window, sr=self._sr)
         cur = (raw.valence, raw.arousal, raw.dominance)
         if self._ema is None:
-            self._ema = cur
+            ema: tuple[float, float, float] = cur
         else:
             a = self._alpha
-            self._ema = tuple(
-                a * c + (1 - a) * p for c, p in zip(cur, self._ema, strict=True)
-            )  # type: ignore[assignment]
-        valence, arousal, dominance = self._ema
+            p = self._ema
+            ema = (
+                a * cur[0] + (1 - a) * p[0],
+                a * cur[1] + (1 - a) * p[1],
+                a * cur[2] + (1 - a) * p[2],
+            )
+        self._ema = ema
+        valence, arousal, dominance = ema
         label, intensity = derive_label(valence, arousal, dominance)
         self._t += self._hop_s
         emotion = Emotion(
@@ -106,4 +125,10 @@ class EmotionStreamAnalyzer:
         )
         self._last = emotion
         for listener in self._listeners:
-            listener(emotion)
+            # Isolate listener failures: a single misbehaving listener (e.g. a
+            # broken /ws/emotion broadcast) must not propagate out through push()
+            # and silently kill the fire-and-forget continuous-sensing task.
+            try:
+                listener(emotion)
+            except Exception:
+                logger.exception("emotion listener failed; continuing")

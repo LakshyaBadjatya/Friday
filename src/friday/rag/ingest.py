@@ -269,12 +269,18 @@ class DocumentIngestor:
 
         Each ingested chunk is stored under the exact id ``f"{source_id}#{i}"``,
         so the chunks are dropped by forgetting those ids in order until one
-        removes nothing (the contiguous index space ends). The bare ``source_id``
-        is also forgotten so a single un-suffixed write (or any future shape) is
-        covered. The long-term marker fact is removed too. Returns the combined
-        count removed (0 when the source was never ingested).
+        removes nothing (the contiguous index space ends). The long-term marker
+        fact is removed too. Returns the combined count removed (0 when the
+        source was never ingested).
+
+        Note: we deliberately do NOT forget the bare ``source_id``. No chunk is
+        ever stored under it (chunks use ``source_id#i``), so
+        :meth:`VectorStore.forget` could only match it via its substring-of-text
+        fallback — collaterally deleting chunks of *unrelated* documents whose
+        text merely contains the source id string. The exact ``source_id#i`` loop
+        below removes this source's own chunks precisely.
         """
-        removed = self._vector.forget(source_id)
+        removed = 0
         index = 0
         while True:
             dropped = self._vector.forget(f"{source_id}#{index}")

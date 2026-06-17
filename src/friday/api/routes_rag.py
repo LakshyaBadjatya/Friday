@@ -169,7 +169,12 @@ async def rag_ingest(request: Request) -> JSONResponse:
             )
         filename, data = parsed
         source_id = _source_id_from_filename(filename)
-        text = ingestor.read_text(filename, data)
+        try:
+            text = ingestor.read_text(filename, data)
+        except (RuntimeError, ValueError) as exc:
+            # e.g. a .pdf upload when the optional ``pypdf`` is not installed —
+            # surface the actionable hint as 415 rather than leaking a raw 500.
+            return JSONResponse(status_code=415, content={"detail": str(exc)})
         result = await ingestor.ingest(source_id, text)
         return JSONResponse(status_code=200, content=result.model_dump())
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
 from friday.core.graph import ModeGraph, build_graph
@@ -67,6 +68,37 @@ def _make_orchestrator(
 
 def _resp(text: str) -> LLMResponse:
     return LLMResponse(text=text, tool_calls=[], usage=Usage())
+
+
+def test_match_protocol_tiebreak_uses_normalized_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # "Longest phrase wins" must compare normalized lengths on both sides. A short
+    # trigger padded with whitespace must not beat a genuinely more-specific one.
+    from types import SimpleNamespace
+
+    from friday.core import orchestrator as orch_module
+    from friday.protocols.store import Protocol
+
+    short_padded = Protocol(id=1, name="A", trigger_phrase="nap" + " " * 20)  # raw len 23
+    specific = Protocol(id=2, name="B", trigger_phrase="afternoon nap")  # normalized 13
+
+    class _FakeStore:
+        def list_protocols(self) -> list[Protocol]:
+            return [short_padded, specific]  # padded one first -> initial best
+
+        def get_by_name(self, name: str) -> Protocol | None:
+            return None
+
+    orch = _make_orchestrator(FakeLLM(responses=[]))
+    orch._protocol_store = _FakeStore()  # type: ignore[assignment]
+    orch._protocol_runner = object()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        orch_module, "get_settings", lambda: SimpleNamespace(enable_protocols=True)
+    )
+
+    match = orch._match_protocol("time for my afternoon nap")
+    assert match is not None and match.name == "B"  # the more-specific trigger wins
 
 
 async def test_conversation_reply_has_no_banned_tone_markers() -> None:

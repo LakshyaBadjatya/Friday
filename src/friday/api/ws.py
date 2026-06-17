@@ -148,7 +148,14 @@ async def ws_emotion(websocket: WebSocket) -> None:
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue()
-    analyzer.on_emotion(lambda e: loop.call_soon_threadsafe(queue.put_nowait, e))
+
+    def _enqueue(emotion: Any) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, emotion)
+
+    # Named (not a throwaway lambda) so it can be detached on disconnect — the
+    # analyzer is shared/long-lived, so an un-removed listener would leak this
+    # connection's loop+queue and keep firing for the process lifetime.
+    analyzer.on_emotion(_enqueue)
 
     try:
         while True:
@@ -157,5 +164,6 @@ async def ws_emotion(websocket: WebSocket) -> None:
     except WebSocketDisconnect:  # pragma: no cover - exercised via client close
         logger.info("emotion websocket disconnected")
     finally:
+        analyzer.off_emotion(_enqueue)
         if websocket.application_state != WebSocketState.DISCONNECTED:
             await websocket.close()

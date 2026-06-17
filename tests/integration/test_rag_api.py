@@ -143,6 +143,24 @@ def test_rag_ingest_multipart_upload(monkeypatch: pytest.MonkeyPatch) -> None:
         assert "meeting" in listed.json()["sources"]
 
 
+def test_rag_ingest_pdf_without_pypdf_is_415_not_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A .pdf upload when the optional ``pypdf`` is absent yields a clean 415, not 500."""
+    import importlib.util
+
+    if importlib.util.find_spec("pypdf") is not None:  # pragma: no cover
+        pytest.skip("pypdf is installed; the optional-dependency 415 path is not exercised")
+    with _client(monkeypatch, enabled=True) as client:
+        client.app.state.settings = _enable_rag_settings()
+        resp = client.post(
+            "/rag/ingest",
+            files={"file": ("report.pdf", b"%PDF-1.4 not a real pdf", "application/pdf")},
+        )
+        assert resp.status_code == 415
+        assert "pypdf" in resp.json()["detail"].lower()
+
+
 def test_rag_delete_then_requery_returns_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -20,6 +20,8 @@ Pinned behaviours:
 
 from __future__ import annotations
 
+import pytest
+
 from friday.system.monitor import (
     Alert,
     PsutilSampler,
@@ -64,6 +66,28 @@ class _FakeSampler:
 # --------------------------------------------------------------------------- #
 # protocol / typing
 # --------------------------------------------------------------------------- #
+def test_psutil_sampler_uses_blocking_cpu_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    # cpu_percent(interval=None) returns 0.0 on the first call and is otherwise
+    # cadence-dependent; the sampler must pass a small blocking interval so the
+    # reading reflects real instantaneous load.
+    import sys
+    import types
+
+    calls: list[float | None] = []
+    fake = types.SimpleNamespace(
+        cpu_percent=lambda interval=None: (calls.append(interval) or 0.0),
+        virtual_memory=lambda: types.SimpleNamespace(percent=10.0),
+        disk_usage=lambda path: types.SimpleNamespace(percent=10.0),
+        sensors_temperatures=lambda: {},
+        getloadavg=lambda: (0.0, 0.0, 0.0),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+
+    PsutilSampler().sample()
+
+    assert calls == [0.1]
+
+
 def test_fake_sampler_satisfies_protocol() -> None:
     """The fake (and the real PsutilSampler) structurally satisfy ``Sampler``."""
     fake: Sampler = _FakeSampler(_stats())

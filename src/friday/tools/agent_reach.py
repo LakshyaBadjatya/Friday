@@ -238,11 +238,27 @@ class AgentReachTool:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+        except OSError as exc:
+            logger.warning("agent_reach transcribe failed to spawn CLI: %s", exc)
+            return ToolResult(
+                ok=False,
+                error=ToolError(
+                    code="transcribe_failed",
+                    message=f"agent-reach transcribe failed to run: {exc}",
+                    retriable=True,
+                ),
+            )
+
+        try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=self._timeout
             )
-        except (OSError, TimeoutError) as exc:
-            logger.warning("agent_reach transcribe failed to run CLI: %s", exc)
+        except TimeoutError as exc:
+            # wait_for cancels communicate() but leaves the child running; kill and
+            # reap it so a timeout doesn't leak a process and its stdout/stderr FDs.
+            process.kill()
+            await process.wait()
+            logger.warning("agent_reach transcribe timed out: %s", exc)
             return ToolResult(
                 ok=False,
                 error=ToolError(

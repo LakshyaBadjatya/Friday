@@ -137,6 +137,23 @@ class AlertingAgent:
         window = self._settings.alert_rate_limit_seconds
         return (now - last) < window
 
+    def _evict_stale(self, now: float) -> None:
+        """Drop dedupe entries whose window has fully elapsed.
+
+        Once ``now - ts >= window`` an entry can no longer suppress anything, so
+        keeping it only leaks memory. Sweeping here bounds ``_last_sent`` to roughly
+        the identities seen within one window rather than growing without limit
+        over a long-lived process handling many distinct alerts.
+        """
+        if not self._settings.alert_dedupe:
+            return
+        window = self._settings.alert_rate_limit_seconds
+        if window <= 0:
+            return
+        stale = [key for key, ts in self._last_sent.items() if (now - ts) >= window]
+        for key in stale:
+            del self._last_sent[key]
+
     # -- dispatch ----------------------------------------------------------- #
     async def _dispatch(self, alert: dict[str, str]) -> ToolCall | None:
         """Send the alert via ``notify`` with the confirm-step satisfied.
@@ -215,7 +232,9 @@ class AlertingAgent:
             )
 
         # Record the send time so future identical alerts are deduped within the
-        # window. Only a *successful* dispatch updates the clock.
+        # window. Only a *successful* dispatch updates the clock. Evict elapsed
+        # entries first so the dedupe map stays bounded.
+        self._evict_stale(now)
         self._last_sent[identity] = now
         return AgentResult(
             output=(

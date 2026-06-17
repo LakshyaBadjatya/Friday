@@ -60,7 +60,16 @@ _CONFIGURE_MESSAGE = (
 
 
 class MarketDataError(FridayError):
-    """A Dhan market-data call failed (missing creds, transport, or non-2xx)."""
+    """A Dhan market-data call failed (missing creds, transport, or non-2xx).
+
+    ``status_code`` carries the HTTP status for a non-2xx response (``None`` for
+    transport/credential/parse failures) so retriability is decided structurally
+    rather than by scraping digits out of the error message.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _parse_symbol(symbol: str) -> tuple[str, int]:
@@ -163,7 +172,8 @@ class DhanClient:
         if not response.is_success:
             logger.warning("dhan POST %s returned HTTP %d", path, response.status_code)
             raise MarketDataError(
-                f"Dhan returned HTTP {response.status_code}: {_safe_body(response)}"
+                f"Dhan returned HTTP {response.status_code}: {_safe_body(response)}",
+                status_code=response.status_code,
             )
 
         try:
@@ -285,7 +295,10 @@ class MarketDataTool:
             quote = await self._client.quote(args.symbol)
         except MarketDataError as exc:
             message = str(exc)
-            retriable = any(str(code) in message for code in _TRANSIENT_STATUSES)
+            # Decide retriability from the structured HTTP status, not by scanning
+            # the message text (a body snippet echoing a transient code would
+            # otherwise flip the flag). Transport/parse errors carry no status.
+            retriable = exc.status_code in _TRANSIENT_STATUSES
             return ToolResult(
                 ok=False,
                 data={"symbol": args.symbol},

@@ -15,7 +15,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from friday.broker import Broker, HashChainedAudit
-from friday.tools.base import ToolResult
+from friday.tools.base import ToolError, ToolResult
 
 
 class EchoArgs(BaseModel):
@@ -250,6 +250,41 @@ async def test_secret_marker_without_provider_passes_through(tmp_path: Path) -> 
     assert result.ok is True
     assert tool.called_with is not None
     assert tool.called_with.text == "{{secret:NONE}}"
+
+
+async def test_secret_absent_from_error_message(tmp_path: Path) -> None:
+    # A tool that echoes the resolved secret into its *failure* message must not
+    # round-trip the credential back out of the broker (data + error.message are
+    # both scrubbed).
+    secret_value = "sk-LIVE-DEADBEEF"
+
+    class LeakyTool(FakeTool):
+        async def __call__(self, args: Any) -> ToolResult:
+            self.called_with = args
+            return ToolResult(
+                ok=False,
+                error=ToolError(code="auth_failed", message=f"auth failed for {args.text}"),
+            )
+
+    tool = LeakyTool("send", side_effecting=True, idempotent=False)
+    broker, _, _ = _broker(
+        tmp_path, {"send": tool}, secrets={"OPENAI_KEY": secret_value}
+    )
+
+    result = await broker.dispatch(
+        "send",
+        {"text": "{{secret:OPENAI_KEY}}"},
+        allowed_tools={"send"},
+        confirmed=True,
+    )
+
+    # The resolved secret reached the tool unredacted...
+    assert tool.called_with is not None and tool.called_with.text == secret_value
+    # ...but is scrubbed from the error surfaced to the caller.
+    assert result.error is not None
+    assert secret_value not in result.error.message
+    assert result.error.code == "auth_failed"
+    assert secret_value not in repr(result.model_dump())
 
 
 async def test_actor_and_channel_recorded(tmp_path: Path) -> None:

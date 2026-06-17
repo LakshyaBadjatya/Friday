@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -133,6 +133,7 @@ class Foresight:
         self, events: list[dict[str, Any]], now: datetime
     ) -> list[Suggestion]:
         """Emit a suggestion per reminder due within the look-ahead window."""
+        now = _aware(now)  # parsed dues are aware; keep the window bounds aware too
         horizon = now + self.lookahead
         candidates: list[tuple[datetime, str]] = []
         for event in events:
@@ -195,13 +196,24 @@ class Foresight:
 # --------------------------------------------------------------------------- #
 # Helpers (pure)
 # --------------------------------------------------------------------------- #
+def _aware(dt: datetime) -> datetime:
+    """Coerce a naive datetime to UTC so naive/aware values never mix in compares.
+
+    ``datetime.fromisoformat`` accepts both ``"...T09:00"`` (naive) and
+    ``"...T09:00+00:00"`` (aware); sorting or comparing a mix raises ``TypeError``.
+    Normalizing every parsed/inbound datetime to aware (treating naive as UTC)
+    keeps :meth:`Foresight.suggest` total — it never raises on mixed timestamps.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 def _parse_dt(raw: Any) -> datetime | None:
-    """Coerce ``raw`` to a :class:`datetime`, returning ``None`` if impossible."""
+    """Coerce ``raw`` to a tz-aware :class:`datetime`, returning ``None`` if impossible."""
     if isinstance(raw, datetime):
-        return raw
+        return _aware(raw)
     if isinstance(raw, str):
         try:
-            return datetime.fromisoformat(raw)
+            return _aware(datetime.fromisoformat(raw))
         except ValueError:
             return None
     return None

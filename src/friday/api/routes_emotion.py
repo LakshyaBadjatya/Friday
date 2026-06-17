@@ -19,6 +19,7 @@ import io
 import wave
 from pathlib import Path
 
+import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -50,7 +51,7 @@ def _decode_wav(b64: str) -> bytes:
     raw = base64.b64decode(b64)
     with wave.open(io.BytesIO(raw)) as wf:
         nch = wf.getnchannels()
-        data = wf.readframes(wf.getnframes())
+        data: bytes = wf.readframes(wf.getnframes())
     if nch > 1:  # collapse to the first channel
         samples = array.array("h", data)
         data = array.array("h", samples[0::nch]).tobytes()
@@ -58,7 +59,7 @@ def _decode_wav(b64: str) -> bytes:
 
 
 @router.post("/emotion/enroll", response_model=None)
-async def emotion_enroll(req: EnrollRequest, request: Request) -> JSONResponse | dict:
+async def emotion_enroll(req: EnrollRequest, request: Request) -> JSONResponse | dict[str, object]:
     """Build + persist the owner's emotion calibration from their neutral clips."""
     if not _emotion_enabled(request):
         return JSONResponse(status_code=404, content={"detail": "emotion disabled"})
@@ -77,8 +78,15 @@ async def emotion_enroll(req: EnrollRequest, request: Request) -> JSONResponse |
 
     settings = request.app.state.settings
     path = getattr(settings, "emotion_calibration", "") or _DEFAULT_CALIBRATION_PATH
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(calibration.model_dump_json(indent=2), encoding="utf-8")
+
+    def _persist() -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(calibration.model_dump_json(indent=2), encoding="utf-8")
+
+    # Off the event loop: mkdir + write would otherwise block the single async
+    # loop (and every concurrent request) for the duration of the disk I/O.
+    await anyio.to_thread.run_sync(_persist)
 
     # Apply live: re-wrap the running analyzer's provider so the calibration takes
     # effect immediately (best-effort; the persisted file is the source of truth).

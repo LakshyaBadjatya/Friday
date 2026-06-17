@@ -12,7 +12,7 @@ import httpx
 import respx
 
 from friday.tools.base import ToolResult
-from friday.tools.web_search import WebSearchArgs, WebSearchTool
+from friday.tools.web_search import WebSearchArgs, WebSearchTool, _parse_html
 
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 
@@ -83,6 +83,27 @@ async def test_web_search_parses_results() -> None:
 
     second = results[1]
     assert second["url"] == "https://qdrant.tech/"
+
+
+def test_parse_html_keeps_snippetless_results() -> None:
+    # A DDG result that has a title/link but no result__snippet must still be
+    # returned (with snippet=""), including when it is the LAST result — the bug
+    # silently dropped such results.
+    html = """
+    <div class="result"><a class="result__a" href="https://a.example/">Alpha</a></div>
+    <div class="result">
+      <a class="result__a" href="https://b.example/">Beta</a>
+      <a class="result__snippet" href="https://b.example/">Beta has a snippet.</a>
+    </div>
+    <div class="result"><a class="result__a" href="https://c.example/">Gamma</a></div>
+    """
+    results = _parse_html(html, 10)
+    by_url = {r["url"]: r for r in results}
+    assert set(by_url) == {"https://a.example/", "https://b.example/", "https://c.example/"}
+    assert by_url["https://a.example/"]["title"] == "Alpha"
+    assert by_url["https://a.example/"]["snippet"] == ""  # snippet-less, not dropped
+    assert by_url["https://c.example/"]["snippet"] == ""  # trailing snippet-less, not dropped
+    assert "snippet" in by_url["https://b.example/"]["snippet"]
 
 
 @respx.mock

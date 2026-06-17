@@ -29,6 +29,30 @@ def test_rotation_404_when_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 404
 
 
+def test_rotation_disabled_404s_even_for_invalid_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The flag check must precede body validation: a disabled feature returns 404
+    # even for a malformed body (a bound param would 422 first, leaking existence).
+    with _client(monkeypatch) as client:
+        resp = client.post(
+            "/security/rotation", json={"secrets": [], "max_age_seconds": -1}
+        )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "secret rotation disabled"
+
+
+def test_rotation_enabled_still_422s_for_invalid_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When enabled, validation is preserved: an invalid body is a 422.
+    with _client(monkeypatch, FRIDAY_ENABLE_SECRET_ROTATION="true") as client:
+        resp = client.post(
+            "/security/rotation", json={"secrets": [], "max_age_seconds": -1}
+        )
+    assert resp.status_code == 422
+
+
 def test_rotation_reports_due(monkeypatch: pytest.MonkeyPatch) -> None:
     body = {
         "secrets": [

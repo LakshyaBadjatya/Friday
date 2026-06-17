@@ -1,16 +1,17 @@
 """The Maps feature (Tier 3) — off by default behind ``FRIDAY_ENABLE_MAPS``.
 
-A flagged, no-build page that loads the Google Maps Platform JS API and renders a
-**Photorealistic 3D globe** (``gmp-map-3d`` / ``Map3DElement``). The globe idle-
-rotates (``flyCameraAround``), supports "fly to <place>" (geocode then
-``flyCameraTo`` with a Google-Earth-style animation) and "distance to <place>"
-(geocode + draw a line + show the distance), driven by an in-page Web Speech mic
-and by ``?fly=`` / ``?to=`` query params on load.
+A flagged, no-build page that renders an interactive **OpenStreetMap globe** with
+MapLibre GL — **fully keyless, no paid API**. The globe idle-rotates and supports
+"fly to <place>", "distance to <place>", place search, driving routes, live
+weather and multi-stop tours, driven by an in-page Web Speech mic and by
+``?fly=`` / ``?to=`` / ``?cmd=`` query params on load.
 
-Security: the Google Maps API key is NEVER baked into the served HTML. The page
-fetches it at runtime from ``GET /maps/config``; on the backend the key is a
-:class:`~pydantic.SecretStr` (never logged). The router self-guards on the flag,
-so the offline default exposes no maps surface (every route -> 404).
+Geocoding, search, routing and weather are proxied server-side from the free
+OpenStreetMap ecosystem (Nominatim + OSRM) and wttr.in via ``/maps/geocode``,
+``/maps/reverse``, ``/maps/route`` and ``/maps/weather`` — so the browser never
+holds a key and no billable Google Maps API is ever called. The router
+self-guards on the flag, so the offline default exposes no maps surface (every
+route -> 404).
 
 The integration agent wires this slice by including :data:`friday.maps.router`.
 """

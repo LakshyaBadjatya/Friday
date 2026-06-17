@@ -13,20 +13,16 @@
 "use strict";
 
 // ── Shared constants + state ──────────────────────────────────────────────────
-export const HOME = { lat: 20, lng: 0, altitude: 0 };
-export const ORBIT_RANGE = 12_000_000; // metres — a comfortable whole-globe view
+export const HOME = { lat: 20, lng: 0 };
+export const HOME_ZOOM = 1.4; // a comfortable whole-globe view
 
 export const state = {
-  map: null,
-  Map3DElement: null,
-  Polyline3DElement: null,
-  Marker3DElement: null,
-  geocoder: null,
-  places: null, // Places library namespace (when available)
-  routes: null, // Routes/Directions library namespace (when available)
-  focus: { ...HOME },
+  map: null, // the MapLibre GL map
+  focus: { ...HOME }, // last place we flew to (origin for distance/route)
   rotating: true,
-  overlays: [], // every Marker3D / Polyline3D we appended, so we can clear them
+  spinTimer: null, // idle-rotation interval handle
+  markers: [], // maplibregl.Marker handles we added (so we can clear them)
+  lineIds: [], // GeoJSON line layer/source ids we added (so we can clear them)
 };
 
 // ── DOM handles ───────────────────────────────────────────────────────────────

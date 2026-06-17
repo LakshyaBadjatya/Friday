@@ -1,59 +1,55 @@
 /*
- * FRIDAY Maps — globe core (browser ES module).
+ * FRIDAY Maps — globe core (browser ES module), MapLibre GL + OpenStreetMap.
  *
- * The Map3DElement lifecycle and everything that touches the camera or the
- * globe's overlays:
- *   - buildGlobe(): import the 3D libraries, create the globe, wire click-to-
- *     identify, start the idle orbit.
- *   - idle rotation (flyCameraAround loop) + start/stop.
- *   - camera helpers: flyToCoords, home, zoomBy, tiltBy, fitTo.
- *   - overlays: addMarker / addLine / clearOverlays (tracked so we can wipe them).
- *   - geocode / reverseGeocode / haversineKm.
- *   - flyTo(place) / distanceTo(place): the high-level geocode→camera actions.
+ * Keyless / no-paid-API: MapLibre GL renders an OpenStreetMap raster globe, and
+ * geocoding / reverse-geocoding are proxied from FRIDAY's own backend (which in
+ * turn uses the free Nominatim service). Exposes the same function names the
+ * feature + command modules already import, so swapping the provider here is the
+ * only change they need.
  *
- * Imports only ui.js (state + helpers), so the dependency graph stays acyclic.
+ * Responsibilities: build the globe, idle-rotate it, camera helpers
+ * (flyToCoords/home/zoomBy/tiltBy/fitTo), overlays (markers + lines), geocode /
+ * reverseGeocode / haversineKm, flyTo / distanceTo, and click-to-identify.
  */
 
 "use strict";
 
-import { state, HOME, ORBIT_RANGE, setHud, setConn, toast, showPanel } from "./ui.js";
+import { state, HOME, HOME_ZOOM, setHud, setConn, toast, showPanel } from "./ui.js";
 
-// ── Library bootstrap + globe construction ────────────────────────────────────
+const mlg = () => window.maplibregl;
+
+// ── Globe construction ────────────────────────────────────────────────────────
 export async function buildGlobe() {
-  const maps3d = await window.google.maps.importLibrary("maps3d");
-  const geo = await window.google.maps.importLibrary("geocoding");
-
-  state.Map3DElement = maps3d.Map3DElement;
-  state.Polyline3DElement = maps3d.Polyline3DElement || null;
-  state.Marker3DElement = maps3d.Marker3DElement || null;
-  state.geocoder = new geo.Geocoder();
-
-  // Optional libraries — feature-detect so a not-yet-propagated API does not
-  // crash the globe; the dependent feature simply reports "unavailable".
-  try {
-    state.places = await window.google.maps.importLibrary("places");
-  } catch (_e) {
-    state.places = null;
-  }
-  try {
-    state.routes = await window.google.maps.importLibrary("routes");
-  } catch (_e) {
-    state.routes = null;
-  }
-
-  const map = new state.Map3DElement({
-    center: { lat: HOME.lat, lng: HOME.lng, altitude: HOME.altitude },
-    range: ORBIT_RANGE,
-    tilt: 0,
-    heading: 0,
-    mode: "HYBRID", // photorealistic 3D tiles
+  if (!mlg()) throw new Error("MapLibre GL is not loaded");
+  const style = {
+    version: 8,
+    sources: {
+      osm: {
+        type: "raster",
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        maxzoom: 19,
+        attribution: "© OpenStreetMap contributors",
+      },
+    },
+    layers: [{ id: "osm", type: "raster", source: "osm" }],
+  };
+  const map = new (mlg().Map)({
+    container: "map",
+    style,
+    center: [HOME.lng, HOME.lat],
+    zoom: HOME_ZOOM,
+    attributionControl: true,
   });
-  map.id = "map3d-el";
-  const host = document.getElementById("map3d");
-  if (host) host.replaceWith(map);
-  else document.getElementById("stage").appendChild(map);
   state.map = map;
-
+  await new Promise((resolve) => map.on("load", resolve));
+  // Globe projection landed in MapLibre v5; feature-detect so older builds just
+  // render a flat mercator map rather than crashing.
+  try {
+    map.setProjection({ type: "globe" });
+  } catch (_e) {
+    /* mercator fallback */
+  }
   wireClickToIdentify();
   setConn("ok", "connected");
   setHud("status", "ready");
@@ -66,7 +62,12 @@ export function startIdleRotation() {
   setHud("mode", "idle rotate");
   const btn = document.getElementById("rotate");
   if (btn) btn.setAttribute("aria-pressed", "true");
-  orbitOnce();
+  if (state.spinTimer) clearInterval(state.spinTimer);
+  state.spinTimer = setInterval(() => {
+    if (!state.map || !state.rotating) return;
+    const c = state.map.getCenter();
+    state.map.easeTo({ center: [c.lng + 3, c.lat], duration: 1000, easing: (t) => t });
+  }, 1000);
 }
 
 export function stopIdleRotation() {
@@ -74,147 +75,153 @@ export function stopIdleRotation() {
   setHud("mode", "manual");
   const btn = document.getElementById("rotate");
   if (btn) btn.setAttribute("aria-pressed", "false");
-  if (state.map && typeof state.map.stopCameraAnimation === "function") {
-    state.map.stopCameraAnimation();
-  }
-}
-
-function orbitOnce() {
-  if (!state.map || !state.rotating) return;
-  if (typeof state.map.flyCameraAround !== "function") return;
-  state.map.flyCameraAround({
-    camera: {
-      center: { lat: state.focus.lat, lng: state.focus.lng, altitude: state.focus.altitude || 0 },
-      range: ORBIT_RANGE,
-      tilt: 45,
-    },
-    durationMillis: 60000,
-    rounds: 1,
-  });
-  const rearm = () => {
-    if (state.rotating) orbitOnce();
-  };
-  if (typeof state.map.addEventListener === "function") {
-    state.map.addEventListener("gmp-animationend", rearm, { once: true });
-  } else {
-    setTimeout(rearm, 60000);
+  if (state.spinTimer) {
+    clearInterval(state.spinTimer);
+    state.spinTimer = null;
   }
 }
 
 // ── Camera helpers ────────────────────────────────────────────────────────────
-/** Animate the camera to `coords` ({lat,lng}); options override range/tilt. */
 export function flyToCoords(coords, opts = {}) {
   stopIdleRotation();
-  state.focus = { lat: coords.lat, lng: coords.lng, altitude: 0 };
-  if (state.map && typeof state.map.flyCameraTo === "function") {
-    state.map.flyCameraTo({
-      endCamera: {
-        center: { lat: coords.lat, lng: coords.lng, altitude: 0 },
-        range: opts.range ?? 2500,
-        tilt: opts.tilt ?? 65,
-        heading: opts.heading ?? 0,
-      },
-      durationMillis: opts.durationMillis ?? 5000,
-    });
-  }
+  state.focus = { lat: coords.lat, lng: coords.lng };
+  if (!state.map) return;
+  state.map.flyTo({
+    center: [coords.lng, coords.lat],
+    zoom: opts.zoom ?? 12,
+    pitch: opts.pitch ?? 45,
+    duration: opts.duration ?? 3000,
+  });
 }
 
-/** Reset to the whole-globe view and resume the idle orbit. */
 export function home() {
   clearOverlays();
   state.focus = { ...HOME };
-  if (state.map && typeof state.map.flyCameraTo === "function") {
-    state.map.flyCameraTo({
-      endCamera: { center: { ...HOME }, range: ORBIT_RANGE, tilt: 0, heading: 0 },
-      durationMillis: 2000,
-    });
+  if (state.map) {
+    state.map.flyTo({ center: [HOME.lng, HOME.lat], zoom: HOME_ZOOM, pitch: 0, bearing: 0, duration: 2000 });
   }
   setHud("mode", "home");
   startIdleRotation();
 }
 
-/** Multiply the current camera range (factor < 1 zooms in, > 1 zooms out). */
+/** factor < 1 zooms in, > 1 zooms out (preserves the command parser's contract). */
 export function zoomBy(factor) {
   if (!state.map) return;
   stopIdleRotation();
-  const range = (Number(state.map.range) || ORBIT_RANGE) * factor;
-  flyToCoords(state.focus, { range, tilt: Number(state.map.tilt) || 65, durationMillis: 900 });
+  state.map.zoomTo(state.map.getZoom() + (factor < 1 ? 1 : -1), { duration: 500 });
 }
 
-/** Nudge the camera tilt by `delta` degrees, clamped to [0, 90]. */
 export function tiltBy(delta) {
   if (!state.map) return;
   stopIdleRotation();
-  const tilt = Math.min(90, Math.max(0, (Number(state.map.tilt) || 0) + delta));
-  flyToCoords(state.focus, { range: Number(state.map.range) || 2500, tilt, durationMillis: 700 });
+  const pitch = Math.min(85, Math.max(0, state.map.getPitch() + delta));
+  state.map.easeTo({ pitch, duration: 500 });
 }
 
-/** Frame a set of {lat,lng} points by flying to their centroid at a fitted range. */
 export function fitTo(points) {
-  if (!points.length) return;
-  const lat = points.reduce((s, p) => s + p.lat, 0) / points.length;
-  const lng = points.reduce((s, p) => s + p.lng, 0) / points.length;
-  let span = 0;
-  for (const p of points) span = Math.max(span, haversineKm({ lat, lng }, p));
-  const range = Math.max(2500, span * 2200); // ~metres; generous margin
-  flyToCoords({ lat, lng }, { range, tilt: 55, durationMillis: 3000 });
+  if (!state.map || !points.length) return;
+  stopIdleRotation();
+  let minLng = 180;
+  let minLat = 90;
+  let maxLng = -180;
+  let maxLat = -90;
+  for (const p of points) {
+    minLng = Math.min(minLng, p.lng);
+    maxLng = Math.max(maxLng, p.lng);
+    minLat = Math.min(minLat, p.lat);
+    maxLat = Math.max(maxLat, p.lat);
+  }
+  state.map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 80, duration: 2500, maxZoom: 12 });
 }
 
 // ── Overlays (markers + lines) ────────────────────────────────────────────────
-export function addMarker(coords, label) {
-  if (!state.Marker3DElement || !state.map) return null;
-  const marker = new state.Marker3DElement({
-    position: { lat: coords.lat, lng: coords.lng, altitude: 0 },
-    label: label || "",
-  });
-  state.map.append(marker);
-  state.overlays.push(marker);
+export function addMarker(coords, label, onClick) {
+  if (!state.map || !mlg()) return null;
+  const marker = new (mlg().Marker)({ color: "#2b6cff" }).setLngLat([coords.lng, coords.lat]);
+  if (label) marker.setPopup(new (mlg().Popup)({ offset: 24 }).setText(String(label)));
+  marker.addTo(state.map);
+  if (typeof onClick === "function") {
+    const el = marker.getElement();
+    if (el) el.addEventListener("click", () => onClick());
+  }
+  state.markers.push(marker);
   return marker;
 }
 
+let _lineSeq = 0;
 export function addLine(coords, opts = {}) {
-  if (!state.Polyline3DElement || !state.map) return null;
-  const line = new state.Polyline3DElement({
-    coordinates: coords.map((c) => ({ lat: c.lat, lng: c.lng, altitude: 0 })),
-    strokeColor: opts.strokeColor || "#2b6cff",
-    strokeWidth: opts.strokeWidth || 8,
-    altitudeMode: "CLAMP_TO_GROUND",
-    geodesic: opts.geodesic !== false,
-  });
-  state.map.append(line);
-  state.overlays.push(line);
-  return line;
+  if (!state.map) return null;
+  const id = "friday-line-" + _lineSeq++;
+  const data = {
+    type: "Feature",
+    geometry: { type: "LineString", coordinates: coords.map((c) => [c.lng, c.lat]) },
+  };
+  try {
+    state.map.addSource(id, { type: "geojson", data });
+    state.map.addLayer({
+      id,
+      type: "line",
+      source: id,
+      paint: { "line-color": opts.strokeColor || "#2b6cff", "line-width": opts.strokeWidth || 4 },
+    });
+    state.lineIds.push(id);
+  } catch (_e) {
+    return null;
+  }
+  return id;
 }
 
 export function clearOverlays() {
-  for (const el of state.overlays) {
-    if (el && typeof el.remove === "function") el.remove();
+  for (const marker of state.markers) {
+    try {
+      marker.remove();
+    } catch (_e) {
+      /* already gone */
+    }
   }
-  state.overlays = [];
+  state.markers = [];
+  for (const id of state.lineIds) {
+    try {
+      if (state.map.getLayer(id)) state.map.removeLayer(id);
+    } catch (_e) {
+      /* ignore */
+    }
+    try {
+      if (state.map.getSource(id)) state.map.removeSource(id);
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+  state.lineIds = [];
 }
 
-// ── Geocoding ─────────────────────────────────────────────────────────────────
-/** Geocode free text to `{lat, lng, address}` (or null on failure). */
+// ── Geocoding (via FRIDAY's keyless backend proxy → Nominatim) ────────────────
+/** Geocode free text to `{lat, lng, name}` (or null on failure). */
 export async function geocode(place) {
-  if (!state.geocoder) return null;
   try {
-    const { results } = await state.geocoder.geocode({ address: place });
-    if (!results || !results.length) return null;
-    const r = results[0];
-    const loc = r.geometry.location;
-    return { lat: loc.lat(), lng: loc.lng(), address: r.formatted_address || place };
+    const resp = await fetch("/maps/geocode?limit=1&q=" + encodeURIComponent(place), {
+      headers: { Accept: "application/json" },
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const r = data.results && data.results[0];
+    if (!r) return null;
+    return { lat: r.lat, lng: r.lng, name: r.name };
   } catch (_e) {
     return null;
   }
 }
 
-/** Reverse-geocode `{lat,lng}` to a human address (or null). */
+/** Reverse-geocode `{lat,lng}` to an address string (or null). */
 export async function reverseGeocode(coords) {
-  if (!state.geocoder) return null;
   try {
-    const { results } = await state.geocoder.geocode({ location: coords });
-    if (!results || !results.length) return null;
-    return results[0].formatted_address || null;
+    const resp = await fetch(
+      "/maps/reverse?lat=" + encodeURIComponent(coords.lat) + "&lng=" + encodeURIComponent(coords.lng),
+      { headers: { Accept: "application/json" } }
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.name || null;
   } catch (_e) {
     return null;
   }
@@ -233,7 +240,6 @@ export function haversineKm(a, b) {
 }
 
 // ── High-level actions ────────────────────────────────────────────────────────
-/** Geocode `place`, fly in Google-Earth style, and drop a labeled marker. */
 export async function flyTo(place) {
   setHud("status", "locating " + place + "…");
   const target = await geocode(place);
@@ -243,13 +249,12 @@ export async function flyTo(place) {
     return null;
   }
   flyToCoords(target);
-  addMarker(target, place);
+  addMarker(target, target.name || place);
   setHud("mode", "fly to " + place);
   setHud("status", "ready");
   return target;
 }
 
-/** Geocode `place`, draw a line from the current focus, and show the distance. */
 export async function distanceTo(place) {
   setHud("status", "measuring to " + place + "…");
   const target = await geocode(place);
@@ -271,13 +276,10 @@ export async function distanceTo(place) {
 
 // ── Click-to-identify ─────────────────────────────────────────────────────────
 function wireClickToIdentify() {
-  if (!state.map || typeof state.map.addEventListener !== "function") return;
-  state.map.addEventListener("gmp-click", async (ev) => {
-    const pos = ev && (ev.position || ev.latLng);
-    if (!pos) return;
-    const lat = typeof pos.lat === "function" ? pos.lat() : pos.lat;
-    const lng = typeof pos.lng === "function" ? pos.lng() : pos.lng;
-    if (typeof lat !== "number" || typeof lng !== "number") return;
+  if (!state.map) return;
+  state.map.on("click", async (e) => {
+    const lat = e.lngLat.lat;
+    const lng = e.lngLat.lng;
     const address = await reverseGeocode({ lat, lng });
     showPanel({
       title: "Here",

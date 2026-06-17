@@ -84,36 +84,34 @@ def test_maps_index_enabled_serves_html(monkeypatch: pytest.MonkeyPatch) -> None
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     body = resp.text
-    # The page loads the Google Maps JS API and fetches its key at runtime.
-    assert "maps.googleapis.com" in body
-    # The secret key must NOT be baked into the served HTML.
-    assert "test-key-123" not in body
+    # The page loads the keyless MapLibre + OpenStreetMap stack — no Google API.
+    assert "maplibre-gl" in body
+    assert "/maps/static/maps.js" in body
+    assert "googleapis.com" not in body
 
 
-def test_maps_config_enabled_returns_key_field(
+def test_maps_config_enabled_returns_provider_no_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Enabled ``GET /maps/config`` returns the apiKey + enabled fields."""
+    """Enabled ``GET /maps/config`` signals the keyless MapLibre/OSM provider."""
     monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
     with TestClient(_app()) as client:
         resp = client.get("/maps/config")
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"apiKey": "test-key-123", "enabled": True}
+    assert body == {"enabled": True, "provider": "maplibre-osm"}
+    assert "apiKey" not in body  # no key is ever delivered to the browser
 
 
-def test_maps_config_enabled_no_key_returns_empty_string(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Enabled but no key set -> ``apiKey == ""`` (never crashes on missing key)."""
+def test_maps_config_needs_no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The map is keyless: config is identical whether or not a Google key is set."""
     monkeypatch.setattr(
         routes_maps, "get_settings", lambda: _enabled_settings(key=None)
     )
     with TestClient(_app()) as client:
         resp = client.get("/maps/config")
     assert resp.status_code == 200
-    body = resp.json()
-    assert body == {"apiKey": "", "enabled": True}
+    assert resp.json() == {"enabled": True, "provider": "maplibre-osm"}
 
 
 def test_maps_serves_static_js(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,8 +162,9 @@ def test_maps_index_references_runtime_config() -> None:
     """The index HTML wires the runtime ``/maps/config`` fetch (no baked key)."""
     html = _INDEX_HTML.read_text(encoding="utf-8")
     assert "/maps/config" in html
-    # The Maps JS API <script> is bootstrapped, not hardcoded with a key.
-    assert "maps.googleapis.com" in html
+    # The keyless MapLibre + OpenStreetMap stack is loaded — never a Google API.
+    assert "maplibre-gl" in html
+    assert "googleapis.com" not in html
 
 
 # --------------------------------------------------------------------------- #
@@ -227,3 +226,111 @@ def test_maps_weather_upstream_failure_is_502(monkeypatch: pytest.MonkeyPatch) -
     with TestClient(_app()) as client:
         resp = client.get("/maps/weather", params={"location": "Kota"})
     assert resp.status_code == 502
+
+
+# --------------------------------------------------------------------------- #
+# GET /maps/geocode + /maps/reverse + /maps/route — keyless OSM proxies
+# --------------------------------------------------------------------------- #
+_NOMINATIM_SEARCH = "https://nominatim.openstreetmap.org/search"
+_NOMINATIM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
+
+
+def test_maps_geocode_disabled_404_even_without_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag-off returns 404 even for a missing query (no existence leak via 422)."""
+    monkeypatch.setattr(routes_maps, "get_settings", _disabled_settings)
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/geocode")
+    assert resp.status_code == 404
+
+
+def test_maps_geocode_missing_query_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/geocode")
+    assert resp.status_code == 422
+
+
+@respx.mock
+def test_maps_geocode_returns_normalized_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    respx.get(_NOMINATIM_SEARCH).mock(
+        return_value=httpx.Response(
+            200, json=[{"display_name": "London, UK", "lat": "51.5074", "lon": "-0.1278"}]
+        )
+    )
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/geocode", params={"q": "London"})
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert results[0] == {"name": "London, UK", "lat": 51.5074, "lng": -0.1278}
+
+
+@respx.mock
+def test_maps_geocode_upstream_failure_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    respx.get(_NOMINATIM_SEARCH).mock(return_value=httpx.Response(500, text="boom"))
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/geocode", params={"q": "London"})
+    assert resp.status_code == 502
+
+
+@respx.mock
+def test_maps_reverse_returns_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    respx.get(_NOMINATIM_REVERSE).mock(
+        return_value=httpx.Response(200, json={"display_name": "10 Downing St, London"})
+    )
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/reverse", params={"lat": "51.5", "lng": "-0.12"})
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "10 Downing St, London"
+
+
+def test_maps_reverse_bad_coords_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/reverse", params={"lat": "abc", "lng": "0"})
+    assert resp.status_code == 422
+
+
+@respx.mock
+def test_maps_route_returns_distance_duration_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    respx.route(host="router.project-osrm.org").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "routes": [
+                    {
+                        "distance": 343000.0,
+                        "duration": 12600.0,
+                        "geometry": {"coordinates": [[-0.12, 51.5], [2.35, 48.85]]},
+                    }
+                ]
+            },
+        )
+    )
+    with TestClient(_app()) as client:
+        resp = client.get(
+            "/maps/route",
+            params={"from_lat": "51.5", "from_lng": "-0.12", "to_lat": "48.85", "to_lng": "2.35"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["distance_km"] == 343.0
+    assert body["duration_min"] == 210
+    assert body["coordinates"][0] == [-0.12, 51.5]
+
+
+def test_maps_route_bad_coords_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    with TestClient(_app()) as client:
+        resp = client.get(
+            "/maps/route",
+            params={"from_lat": "x", "from_lng": "0", "to_lat": "0", "to_lng": "0"},
+        )
+    assert resp.status_code == 422

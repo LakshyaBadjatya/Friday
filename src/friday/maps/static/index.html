@@ -7,20 +7,19 @@
   <title>FRIDAY · Maps</title>
 
   <!--
-    No-build, no-bundler frontend. The Google Maps Platform JS API is loaded with
-    the official inline bootstrap loader, but the API KEY IS NEVER BAKED IN: this
-    page fetches it at runtime from `/maps/config` and only then calls
-    `google.maps.importLibrary(...)`. If maps is disabled or no key is set, the
-    page degrades to a friendly notice instead of crashing.
+    No-build, no-bundler frontend. Fully KEYLESS / no paid API: the map is
+    MapLibre GL rendering OpenStreetMap tiles (loaded from a CDN below), and
+    search / geocoding / routing are proxied from FRIDAY's own backend
+    (`/maps/geocode`, `/maps/route`, `/maps/weather`) which uses the free
+    Nominatim + OSRM + wttr.in services. The page checks `/maps/config` only to
+    learn whether the surface is enabled; if not, it shows a friendly notice.
 
-    Reference URLs (kept as plain strings so they are inspectable / testable):
-    the dynamic loader injects `https://maps.googleapis.com/maps/api/js?...`.
-
-    The map is a Photorealistic 3D globe (`gmp-map-3d` / Map3DElement). It idle-
-    rotates (flyCameraAround), supports "fly to <place>" (geocode -> flyCameraTo,
-    Google-Earth style) and "distance to <place>" (geocode + polyline + readout),
-    via the in-page Web Speech mic and the `?fly=` / `?to=` query params.
+    The map is an interactive OpenStreetMap globe (MapLibre globe projection). It
+    idle-rotates, supports "fly to <place>", "distance to <place>", place search,
+    routes, weather and multi-stop tours via the in-page Web Speech mic and the
+    `?fly=` / `?to=` / `?cmd=` query params.
   -->
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" />
 
   <style>
     :root { color-scheme: dark; }
@@ -54,7 +53,7 @@
     .pill.ok .dot { background: #36d399; }
     .pill.err .dot { background: #f87272; }
     #stage { position: relative; flex: 1; }
-    #map3d, gmp-map-3d { position: absolute; inset: 0; width: 100%; height: 100%; }
+    #map { position: absolute; inset: 0; width: 100%; height: 100%; }
     #fallback {
       position: absolute; inset: 0; display: none;
       align-items: center; justify-content: center; text-align: center;
@@ -135,14 +134,13 @@
     </header>
 
     <main id="stage">
-      <!-- The Photorealistic 3D map element is created at runtime by maps.js
-           (after the key is fetched), so no key/element is hardcoded here. -->
-      <div id="map3d"></div>
+      <!-- MapLibre GL renders into this container at runtime (no key needed). -->
+      <div id="map"></div>
 
       <div id="fallback">
         <div>
           <p id="fallback-msg">Maps is unavailable.</p>
-          <p style="opacity:0.6">Set <code>FRIDAY_GOOGLE_MAPS_API_KEY</code> and enable maps.</p>
+          <p style="opacity:0.6">Set <code>FRIDAY_ENABLE_MAPS=true</code> to enable the map (no API key needed).</p>
         </div>
       </div>
 
@@ -184,6 +182,8 @@
     </footer>
   </div>
 
+  <!-- MapLibre GL (keyless) — loaded before the module so window.maplibregl exists. -->
+  <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
   <script type="module" src="/maps/static/maps.js"></script>
 </body>
 </html>

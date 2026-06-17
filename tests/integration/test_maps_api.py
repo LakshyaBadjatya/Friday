@@ -26,7 +26,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -146,9 +148,82 @@ def test_maps_js_is_valid_javascript() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_maps_js_modules_are_valid_javascript() -> None:
+    """Every ES module under ``static/js/`` passes ``node --check`` (valid JS)."""
+    node = shutil.which("node")
+    if node is None:  # pragma: no cover - node is present in this environment
+        pytest.skip("node is not available")
+    modules = sorted((_STATIC_DIR / "js").glob("*.js"))
+    assert modules, "expected split maps modules under static/js/"
+    for module in modules:
+        result = subprocess.run([node, "--check", str(module)], capture_output=True, text=True)
+        assert result.returncode == 0, f"{module.name}: {result.stderr}"
+
+
 def test_maps_index_references_runtime_config() -> None:
     """The index HTML wires the runtime ``/maps/config`` fetch (no baked key)."""
     html = _INDEX_HTML.read_text(encoding="utf-8")
     assert "/maps/config" in html
     # The Maps JS API <script> is bootstrapped, not hardcoded with a key.
     assert "maps.googleapis.com" in html
+
+
+# --------------------------------------------------------------------------- #
+# GET /maps/weather — live conditions overlay (reuses the keyless WeatherTool)
+# --------------------------------------------------------------------------- #
+_KOTA_URL = "https://wttr.in/Kota"
+_KOTA_J1 = {
+    "current_condition": [
+        {
+            "temp_C": "38",
+            "FeelsLikeC": "41",
+            "humidity": "20",
+            "windspeedKmph": "12",
+            "weatherDesc": [{"value": "Sunny"}],
+        }
+    ],
+    "nearest_area": [{"areaName": [{"value": "Kota"}]}],
+}
+
+
+def test_maps_weather_disabled_404_even_without_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag-off returns 404 even for a missing location (no existence leak via 422)."""
+    monkeypatch.setattr(routes_maps, "get_settings", _disabled_settings)
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/weather")  # no location at all
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "maps disabled"
+
+
+def test_maps_weather_enabled_missing_location_is_422(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/weather")
+    assert resp.status_code == 422
+
+
+@respx.mock
+def test_maps_weather_enabled_returns_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    respx.get(_KOTA_URL).mock(return_value=httpx.Response(200, json=_KOTA_J1))
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/weather", params={"location": "Kota"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["location"] == "Kota"
+    assert body["temp_c"] == 38
+    assert body["wind_kph"] == 12
+    assert "Sunny" in body["description"]
+
+
+@respx.mock
+def test_maps_weather_upstream_failure_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_maps, "get_settings", lambda: _enabled_settings())
+    respx.get(_KOTA_URL).mock(return_value=httpx.Response(500, text="boom"))
+    with TestClient(_app()) as client:
+        resp = client.get("/maps/weather", params={"location": "Kota"})
+    assert resp.status_code == 502

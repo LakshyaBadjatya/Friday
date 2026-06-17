@@ -28,10 +28,16 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from friday.config import get_settings
 from friday.logging import get_logger
+from friday.tools.weather import WeatherArgs, WeatherTool
 
 logger = get_logger("friday.api.routes_maps")
 
 router = APIRouter()
+
+#: Keyless current-weather lookup (wttr.in) reused by ``GET /maps/weather`` so the
+#: globe can overlay live conditions without a new external integration. Stateless
+#: (holds only a timeout), so a single shared instance is safe.
+_weather_tool = WeatherTool()
 
 #: The no-build frontend asset directory for the maps surface.
 STATIC_DIR = Path(__file__).resolve().parent.parent / "maps" / "static"
@@ -101,3 +107,32 @@ async def maps_static(filename: str) -> FileResponse | JSONResponse:
         return JSONResponse(status_code=404, content={"detail": "not found"})
     media_type = _MEDIA_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
     return FileResponse(candidate, media_type=media_type)
+
+
+@router.get("/maps/weather", response_model=None)
+async def maps_weather(location: str = "") -> JSONResponse:
+    """Current weather for ``location`` (keyless wttr.in); 404 when maps disabled.
+
+    ``location`` is taken as a plain query param with an empty default (no
+    parameter-level validation) so the feature-flag check runs *first* — a
+    disabled feature returns 404 even for a missing/blank location rather than a
+    422 that would leak that the route exists. The keyless :class:`WeatherTool`
+    is reused, so this adds no new external integration or key.
+    """
+    if not _maps_enabled():
+        return _disabled()
+    loc = location.strip()
+    if not loc or len(loc) > 200:
+        return JSONResponse(
+            status_code=422, content={"detail": "a non-empty 'location' query param is required"}
+        )
+    try:
+        args = WeatherArgs(location=loc)
+    except ValueError:
+        return JSONResponse(status_code=422, content={"detail": "invalid location"})
+
+    result = await _weather_tool(args)
+    if not result.ok:
+        detail = result.error.message if result.error else "weather lookup failed"
+        return JSONResponse(status_code=502, content={"detail": detail})
+    return JSONResponse(status_code=200, content=result.data)

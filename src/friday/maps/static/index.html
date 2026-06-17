@@ -96,6 +96,33 @@
       max-width: 80%; z-index: 6;
     }
     #toast[hidden] { display: none; }
+    #cam-controls {
+      position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%);
+      display: flex; flex-direction: column; gap: 0.35rem; z-index: 5;
+    }
+    #cam-controls .btn { padding: 0.4rem 0.55rem; min-width: 2.4rem; text-align: center; }
+    #panel {
+      position: absolute; top: 0.75rem; right: 0.75rem; width: 16rem;
+      background: rgba(8, 11, 17, 0.92); border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 0.6rem; padding: 0.8rem 0.9rem; font-size: 0.85rem; z-index: 6;
+    }
+    #panel[hidden] { display: none; }
+    #panel h2 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+    .panel-row { display: flex; justify-content: space-between; gap: 0.75rem; padding: 0.15rem 0; }
+    .panel-row span { opacity: 0.6; }
+    .panel-close {
+      position: absolute; top: 0.35rem; right: 0.5rem; background: none; border: none;
+      color: inherit; font-size: 1.15rem; line-height: 1; cursor: pointer; opacity: 0.7;
+    }
+    #saved {
+      position: absolute; left: 0.75rem; bottom: 0.75rem; display: flex; gap: 0.4rem;
+      flex-wrap: wrap; max-width: 60%; z-index: 5;
+    }
+    #saved[hidden] { display: none; }
+    .chip {
+      padding: 0.3rem 0.6rem; border-radius: 999px; cursor: pointer; font-size: 0.8rem;
+      border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(8, 11, 17, 0.82); color: inherit;
+    }
   </style>
 </head>
 <body>
@@ -126,6 +153,18 @@
         <div class="hud-row"><span class="hud-key">status</span><span id="hud-status">ready</span></div>
       </div>
 
+      <div id="cam-controls" role="group" aria-label="Camera controls">
+        <button id="home" type="button" class="btn" title="Home / reset view">🌍</button>
+        <button id="zoom-in" type="button" class="btn" title="Zoom in">＋</button>
+        <button id="zoom-out" type="button" class="btn" title="Zoom out">－</button>
+        <button id="tilt-up" type="button" class="btn" title="Tilt up">▲</button>
+        <button id="tilt-down" type="button" class="btn" title="Tilt down">▼</button>
+      </div>
+
+      <aside id="panel" aria-live="polite" hidden></aside>
+
+      <div id="saved" aria-label="Saved places" hidden></div>
+
       <div id="toast" role="status" hidden></div>
     </main>
 
@@ -135,11 +174,12 @@
           id="cmd"
           name="cmd"
           type="text"
-          placeholder='Try "fly to Tokyo" or "distance to Paris"'
+          placeholder='Try "find coffee in Paris", "route from London to Rome", "weather in Cairo", "tour Paris, Rome, Cairo"'
           aria-label="Map command" />
         <button id="run" type="submit" class="btn btn-primary">Go</button>
         <button id="mic" type="button" class="btn" aria-pressed="false" title="Toggle voice">🎤 Voice</button>
         <button id="rotate" type="button" class="btn" aria-pressed="true" title="Idle rotation">Rotate</button>
+        <button id="save" type="button" class="btn" title="Save the current place">★ Save</button>
       </form>
     </footer>
   </div>

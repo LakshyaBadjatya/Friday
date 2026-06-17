@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from friday.config import Settings
+from friday.config import Settings, get_settings
 from friday.providers.stt import FakeSTT
 from friday.providers.tts import FakeTTS
 
@@ -28,6 +28,24 @@ if TYPE_CHECKING:
 # Environment variables that could otherwise bleed real configuration into the
 # isolated settings fixture.
 _LEAKY_ENV_PREFIXES = ("FRIDAY_", "NVIDIA_")
+
+
+@pytest.fixture(autouse=True)
+def _clear_settings_cache() -> Iterator[None]:
+    """Clear the process-global ``get_settings`` lru-cache around every test.
+
+    ``friday.config.get_settings`` is ``@lru_cache``d, so a :class:`Settings`
+    built by one test (e.g. an auth/RBAC test that sets ``FRIDAY_REQUIRE_AUTH``)
+    would otherwise survive in the cache and leak into the next test's
+    ``create_app()`` — wiring auth middleware where none is expected and turning a
+    ``404`` into a ``401``. Clearing before *and* after each test makes every test
+    read settings fresh from its own environment, killing this order-dependent
+    flakiness. Clearing is always safe: it just forces the next ``get_settings()``
+    to re-read the current env (which tests set before they call it).
+    """
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture

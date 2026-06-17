@@ -1,4 +1,4 @@
-<!-- Screenshots referenced below (assets/screenshots/*.png) are added post-build; the relative paths are stable and the images drop in later. -->
+<!-- Screenshots live in assets/screenshots/ — the no-build HUD cockpit, captured live. -->
 
 <div align="center">
 
@@ -7,7 +7,7 @@
 ### A local-first personal AI operating system — not a chatbot, an OS.
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
-[![tests](https://img.shields.io/badge/tests-1348%20passing-brightgreen.svg)](#-quality)
+[![tests](https://img.shields.io/badge/tests-1779%20passing-brightgreen.svg)](#-quality)
 [![mypy](https://img.shields.io/badge/mypy-strict-blue.svg)](#-quality)
 [![ruff](https://img.shields.io/badge/lint-ruff-black.svg)](https://github.com/astral-sh/ruff)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](#)
@@ -24,16 +24,36 @@
 
 <table>
   <tr>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/hud.png" alt="Command Centre HUD" width="100%"><br>
-      <sub><b>Command Centre HUD</b> — the arc-reactor cockpit: live roster, routing traces, audit & flags</sub>
+    <td align="center" width="33%">
+      <img src="assets/screenshots/hud.png" alt="Command view" width="100%"><br>
+      <sub><b>Command</b> — talk to FRIDAY; she routes to the right specialist (⌘K palette, theming)</sub>
     </td>
-    <td align="center" width="50%">
+    <td align="center" width="33%">
+      <img src="assets/screenshots/hud-system.png" alt="System telemetry" width="100%"><br>
+      <sub><b>System</b> — requests, by-mode, live route→dispatch→synth traces, verified audit chain</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="assets/screenshots/hud-agents.png" alt="Agents roster" width="100%"><br>
+      <sub><b>Agents</b> — the operator roster, each with its least-privilege tool allow-list</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img src="assets/screenshots/hud-arena.png" alt="Model Arena" width="100%"><br>
+      <sub><b>Arena</b> — pit free models against one prompt; an LLM judge picks the winner</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="assets/screenshots/hud-memory.png" alt="Memory & RAG" width="100%"><br>
+      <sub><b>Memory</b> — dossiers, knowledge sources, drop-a-file RAG ingestion, the graph</sub>
+    </td>
+    <td align="center" width="33%">
       <img src="assets/screenshots/studio.png" alt="3D Studio" width="100%"><br>
-      <sub><b>3D Studio</b> — describe a model, explore it by hand &amp; voice, export GLB/STL/OBJ</sub>
+      <sub><b>3D Studio</b> — describe a model, explore by hand &amp; voice, export GLB/STL/OBJ</sub>
     </td>
   </tr>
 </table>
+
+<sub>Also: a responsive mobile/PWA layout, an in-process terminal cockpit (<code>friday tui</code>), and a Manifest V3 quick-ask browser extension.</sub>
 
 </div>
 
@@ -50,7 +70,7 @@ permissions, and writes a **hash-chained, tamper-evident audit ledger**.
 - 🏠 **Local-first** — runs on your machine; nothing phones home unless you point it at a
   real provider on purpose.
 - 🔌 **100% provider-abstracted** — the language model sits behind a clean seam. A built-in
-  `FakeLLM` keeps the whole system (and its **1348 tests**) green with zero network and no
+  `FakeLLM` keeps the whole system (and its **1779 tests**) green with zero network and no
   keys; swap in NVIDIA NIM or Gemini when you want real replies.
 - 🧱 **Flag-gated by default** — every non-core capability is behind a `FRIDAY_ENABLE_*`
   flag, **default off**. The core boots tiny and dependency-light; you light up surfaces as
@@ -132,8 +152,9 @@ tamper-evident ledger
 
 ## 🧩 Capabilities
 
-Around 40 capabilities, every one behind a `FRIDAY_ENABLE_*` flag (**default off**), grouped
-by domain. The core chat/route/memory/broker loop is always on.
+Around 50 capabilities, almost every one behind a `FRIDAY_ENABLE_*` flag (**default off**),
+grouped by domain. The core chat/route/memory/broker loop — and the read-only observability
+views — are always on.
 
 <details>
 <summary><b>📖 Click to expand the full capability table</b></summary>
@@ -164,7 +185,17 @@ by domain. The core chat/route/memory/broker loop is always on.
 | Capability | What it does | Flag |
 |---|---|---|
 | Voice pipeline | Wake word → Whisper STT → orchestrator → TTS, with barge-in | `FRIDAY_ENABLE_VOICE` |
+| Wake & summon | "Hey FRIDAY" reveals the HUD and she greets you; "summon &lt;operator&gt;" switches operator, each with its own voice | `FRIDAY_ENABLE_WAKEWORD` |
 | Voiceprint | Speaker verification on the voice path | `FRIDAY_ENABLE_VOICEPRINT` |
+
+### 🖼️ Multimodal
+
+| Capability | What it does | Flag |
+|---|---|---|
+| Sentiment | Offline lexicon mood scoring over text, with negation (`POST /sentiment`) | `FRIDAY_ENABLE_SENTIMENT` |
+| Diarization | Who-spoke-when speaker segments for meeting capture (lazy `pyannote`) | `FRIDAY_ENABLE_DIARIZATION` |
+| Image generation | Text-to-image (`POST /imagegen`) — SVG placeholder offline, `diffusers` when installed | `FRIDAY_ENABLE_IMAGEGEN` |
+| PDF layout | Layout-aware PDF → pages of text blocks (`POST /pdf/layout`, lazy PyMuPDF) | `FRIDAY_ENABLE_PDF_LAYOUT` |
 
 ### 🧊 3D Studio
 
@@ -209,11 +240,23 @@ by domain. The core chat/route/memory/broker loop is always on.
 
 | Capability | What it does | Flag |
 |---|---|---|
-| HUD | The Command Centre heads-up surface | `FRIDAY_ENABLE_HUD` |
+| HUD | The Command Centre heads-up surface — themes, ⌘K palette, quick-ask | `FRIDAY_ENABLE_HUD` |
 | Desktop | Desktop automation surface | `FRIDAY_ENABLE_DESKTOP` |
+| System tray | A tray icon to open the HUD / notify (launched via `friday tray`) | `FRIDAY_ENABLE_TRAY` |
 | System automation | Drive system-level automation | `FRIDAY_ENABLE_SYSTEM_AUTOMATION` |
 | System monitor | Live system stats & health checks | `FRIDAY_ENABLE_SYSTEM_MONITOR` |
 | Secret self-check | Scan for plaintext secrets at startup | `FRIDAY_ENABLE_SECRET_SELF_CHECK` |
+| OpenTelemetry | Export finished traces to an OTLP collector (lazy SDK) | `FRIDAY_ENABLE_OTEL` |
+
+### 📊 Observability *(always on)*
+
+| Capability | What it does |
+|---|---|
+| Cost dashboard | Per-model token/dollar usage ledger — `GET /admin/usage` |
+| Turn replay | Recent turn transcripts to inspect & replay — `GET /admin/turns` |
+| Metrics / traces / audit | Request counters, per-turn span traces, redacted tool-call log — `GET /admin/{metrics,traces,audit}` |
+| Doctor & eval | One-shot health self-test (`friday doctor`) and an offline prompt-eval harness (`friday eval`) |
+| Encrypted backup | Authenticated local backup/restore of the memory DB + audit ledger (`friday backup`) |
 
 </details>
 
@@ -251,6 +294,11 @@ curl -s -X POST http://127.0.0.1:8000/chat \
 
 ```bash
 friday serve                 # run the ASGI app via uvicorn
+friday tui                   # in-process terminal cockpit (REPL over the core loop)
+friday doctor                # one-shot health self-test; non-zero exit if unhealthy
+friday eval cases.json       # run an offline prompt-eval suite; gate on a pass-rate
+friday backup create OUT     # encrypted backup of the memory DB + audit ledger (restore too)
+friday tray                  # launch the desktop tray icon
 friday audit verify          # walk the hash-chained ledger; non-zero exit on tamper
 friday secrets set NAME VAL  # store a secret in the configured vault
 friday secrets get NAME      # read it back
@@ -267,13 +315,16 @@ FRIDAY exposes many faces over one core. The flag-gated ones return `404` until 
 | Surface | Path | What it is |
 |---|---|---|
 | 💬 Chat | `POST /chat` | The text turn loop — the heart of the OS |
-| 🛰️ HUD | `GET /hud` | The Command Centre heads-up display |
+| 🛰️ HUD | `GET /hud` | The Command Centre heads-up display (themes, ⌘K palette, quick-ask) |
+| 🖥️ TUI | `friday tui` | An in-process terminal cockpit over the same core loop |
 | 🧊 Studio | `GET /studio` | The 3D Studio (Three.js + MediaPipe, no Node build step) |
 | 🗺️ Maps | `GET /maps` | Interactive map surface |
-| 🛠️ Admin | `/admin/*` | State, conversation log, audit, traces, metrics, flags |
+| 🛠️ Admin | `/admin/*` | State, audit, traces, metrics, **usage (cost)**, **turn replay**, flags |
+| 🖼️ Multimodal | `POST /sentiment`, `/imagegen`, `/pdf/layout` | Sentiment, text-to-image, layout-aware PDF |
 | 📱 PWA | `GET /` | Installable progressive web app (manifest, service worker, offline page) |
+| 🧩 Browser ext | `browser_ext/` | A Manifest V3 quick-ask popup for the local FRIDAY |
 | 📊 Dashboard | Streamlit | A separate operator console reading the admin surface |
-| 🎙️ Voice | `POST /voice`, `WS /ws/voice` | One spoken turn / streaming + barge-in scaffold |
+| 🎙️ Voice | `POST /voice`, `WS /ws/voice`, `WS /ws/wake` | One spoken turn / streaming + barge-in / wake + summon |
 
 The **Streamlit dashboard** is a *separate UI process* — never imported by the package or the
 test suite, its deps kept out of the lock:
@@ -310,11 +361,11 @@ make dashboard    # uv run streamlit run dashboard/app.py in another
 
 [![ruff](https://img.shields.io/badge/ruff-clean-black.svg)](https://github.com/astral-sh/ruff)
 [![mypy](https://img.shields.io/badge/mypy-strict-blue.svg)](#)
-[![tests](https://img.shields.io/badge/tests-1348%20passing-brightgreen.svg)](#)
+[![tests](https://img.shields.io/badge/tests-1779%20passing-brightgreen.svg)](#)
 
 </div>
 
-- ✅ **1348 tests passing** — the entire suite runs offline against `FakeLLM`: zero network,
+- ✅ **1779 tests passing** — the entire suite runs offline against `FakeLLM`: zero network,
   zero keys.
 - ✅ **`mypy --strict`** across the package and **`ruff`** for lint + format.
 - ✅ **Every feature flag-gated, default-off** — the core boots minimal; surfaces return
@@ -350,6 +401,11 @@ relevant outbound call.
 | n8n workflows | `FRIDAY_ENABLE_N8N=true` | a running n8n (Docker) + its REST API key |
 | Postgres memory | `FRIDAY_ENABLE_POSTGRES=true` | `FRIDAY_POSTGRES_DSN` |
 | Voice | `FRIDAY_ENABLE_VOICE=true` | `make install-voice` + a working **microphone** |
+| Wake word ("Hey FRIDAY") | `FRIDAY_ENABLE_WAKEWORD=true` | a trained `hey_friday.onnx` (the Colab notebook) + a **microphone** |
+| Image generation | `FRIDAY_ENABLE_IMAGEGEN=true` | optional `diffusers` (else a deterministic SVG placeholder) |
+| PDF layout | `FRIDAY_ENABLE_PDF_LAYOUT=true` | optional PyMuPDF (else a plain-text fallback) |
+| Diarization | `FRIDAY_ENABLE_DIARIZATION=true` | optional `pyannote.audio` (else a deterministic fake) |
+| OpenTelemetry export | `FRIDAY_ENABLE_OTEL=true` | an OTLP/HTTP collector at `FRIDAY_OTEL_ENDPOINT` |
 | Perception | `FRIDAY_ENABLE_PERCEPTION=true` | `make install-perception` + the `tesseract` binary + a **webcam** |
 | Presence | `FRIDAY_ENABLE_PRESENCE=true` | `FRIDAY_PRESENCE_KNOWN_DEVICES` |
 | Remote access | *(deployment)* | a **Tailscale** tailnet to reach your machine securely off-LAN |

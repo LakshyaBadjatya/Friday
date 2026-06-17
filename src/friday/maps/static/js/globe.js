@@ -21,18 +21,41 @@ const mlg = () => window.maplibregl;
 // ── Globe construction ────────────────────────────────────────────────────────
 export async function buildGlobe() {
   if (!mlg()) throw new Error("MapLibre GL is not loaded");
+  // A Google-Earth-style satellite globe — KEYLESS: Esri World Imagery for the
+  // imagery, a transparent Esri places/boundaries layer for labels, and free AWS
+  // "terrarium" DEM tiles for 3D terrain relief. No Google, no API key.
   const style = {
     version: 8,
     sources: {
-      osm: {
+      sat: {
         type: "raster",
-        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tiles: [
+          "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        ],
         tileSize: 256,
         maxzoom: 19,
-        attribution: "© OpenStreetMap contributors",
+        attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
+      },
+      labels: {
+        type: "raster",
+        tiles: [
+          "https://services.arcgisonline.com/arcgis/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        ],
+        tileSize: 256,
+        maxzoom: 19,
+      },
+      dem: {
+        type: "raster-dem",
+        tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+        encoding: "terrarium",
+        tileSize: 256,
+        maxzoom: 14,
       },
     },
-    layers: [{ id: "osm", type: "raster", source: "osm" }],
+    layers: [
+      { id: "sat", type: "raster", source: "sat" },
+      { id: "labels", type: "raster", source: "labels" },
+    ],
   };
   const map = new (mlg().Map)({
     container: "map",
@@ -43,12 +66,19 @@ export async function buildGlobe() {
   });
   state.map = map;
   await new Promise((resolve) => map.on("load", resolve));
-  // Globe projection landed in MapLibre v5; feature-detect so older builds just
-  // render a flat mercator map rather than crashing.
+  // Globe projection (MapLibre v5) + 3D terrain relief — both feature-detected so
+  // an older MapLibre or an unreachable DEM degrades gracefully (flat / no relief).
   try {
     map.setProjection({ type: "globe" });
   } catch (_e) {
     /* mercator fallback */
+  }
+  try {
+    if (typeof map.setTerrain === "function") {
+      map.setTerrain({ source: "dem", exaggeration: 1.3 });
+    }
+  } catch (_e) {
+    /* terrain optional */
   }
   wireClickToIdentify();
   setConn("ok", "connected");

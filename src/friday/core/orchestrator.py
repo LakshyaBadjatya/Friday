@@ -69,6 +69,7 @@ from friday.observability.tracing import Tracer
 from friday.observability.usage import UsageLedger
 from friday.protocols.runner import ProtocolResult, ProtocolRunner
 from friday.protocols.store import Protocol as ProtocolModel
+from friday.providers.emotion import Emotion, emotion_hint
 from friday.providers.llm import LLMProvider, LLMResponse, Message
 from friday.roster import Persona, RosterRegistry
 from friday.tools.registry import ToolRegistry
@@ -586,7 +587,7 @@ class Orchestrator:
                 "honest, and direct. Never fabricate capability or data."
             )
 
-    def _system_prompt(self) -> Message:
+    def _system_prompt(self, emotion: Emotion | None = None) -> Message:
         owner = get_settings().owner_address
         persona = self._persona_text()
         content = (
@@ -595,6 +596,8 @@ class Orchestrator:
             f"and never fabricate a capability, a fact, or a tool result you do "
             f"not have."
         )
+        if emotion is not None and get_settings().emotion_adapt:
+            content += "\n\n" + emotion_hint(emotion)
         return Message(role="system", content=content)
 
     # -- refusal ----------------------------------------------------------- #
@@ -613,7 +616,8 @@ class Orchestrator:
 
     # -- synthesis --------------------------------------------------------- #
     async def _synthesize(
-        self, history: list[Message], task: Message, session_id: str | None = None
+        self, history: list[Message], task: Message,
+        session_id: str | None = None, emotion: Emotion | None = None,
     ) -> str:
         """Call the LLM with persona + history + the turn's task message.
 
@@ -623,7 +627,7 @@ class Orchestrator:
         the session's turn budget and a hot turn downshifts the gateway's active
         model (see :meth:`_record_budget`).
         """
-        messages = [self._system_prompt(), *history, task]
+        messages = [self._system_prompt(emotion), *history, task]
         try:
             response = await self._llm.complete(messages, tools=None)
         except ProviderError as exc:
@@ -814,7 +818,8 @@ class Orchestrator:
     # -- conversation ------------------------------------------------------ #
     async def _converse(self, state: GraphState, history: list[Message]) -> str:
         task = Message(role="user", content=state.user_input)
-        return await self._synthesize(history, task, state.session_id)
+        return await self._synthesize(history, task, state.session_id,
+                                      emotion=state.emotion)
 
     # -- research ---------------------------------------------------------- #
     async def _research(self, state: GraphState, history: list[Message]) -> str:
@@ -901,7 +906,8 @@ class Orchestrator:
             "to dig further — do not invent facts or citations."
         )
         task = Message(role="user", content=task_content)
-        return await self._synthesize(history, task, state.session_id)
+        return await self._synthesize(history, task, state.session_id,
+                                      emotion=state.emotion)
 
     # -- clarify ----------------------------------------------------------- #
     def _clarify(self, state: GraphState) -> str:
@@ -1033,7 +1039,7 @@ class Orchestrator:
                 f"result does not contain:\n\n{draft}"
             ),
         )
-        messages = [self._system_prompt(), *history, task]
+        messages = [self._system_prompt(state.emotion), *history, task]
         try:
             response = await self._llm.complete(messages, tools=None)
         except ProviderError as exc:

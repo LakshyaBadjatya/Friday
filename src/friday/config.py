@@ -565,6 +565,25 @@ class Settings(BaseSettings):
     wakeword_model: str = ""
     # Detection threshold in [0, 1]; a frame scoring at/above this is a wake.
     wake_threshold: float = 0.5
+    # --- Voice emotion sensing (paralinguistic V/A/D; default off) ---
+    # When on, a sliding-window analyzer scores the captured utterance for
+    # valence/arousal/dominance and streams the mood to the HUD over the voice
+    # WebSocket. Off by default so no model is loaded and no audio dep is imported.
+    enable_emotion: bool = False
+    # Provider: "lite" (custom RAVDESS-trained head, shipped at the path below),
+    # "dim" (audeering wav2vec2 MSP-dim ONNX; needs a separate ~1 GB model), or
+    # "fake" (deterministic, model-free; for tests/dev).
+    emotion_provider: str = "lite"
+    # Path to the V/A/D emotion ONNX model for the "lite"/"dim" providers.
+    emotion_model: str = "models/emotion/emotion_head.onnx"
+    # P2: let the sensed emotion influence FRIDAY's replies / TTS tone.
+    emotion_adapt: bool = False
+    emotion_tts: bool = False
+    # P3: gate emotion on the voiceprint matching the owner.
+    emotion_owner_only: bool = False
+    # P3: path to a saved EmotionCalibration JSON (owner V/A/D recentring). Empty
+    # -> no personalization; the raw model output is used.
+    emotion_calibration: str = ""
 
     # --- Sentiment analysis (Wave C multimodal; default off) ---
     # Gates the offline lexicon sentiment seam (POST /sentiment). Off by default so

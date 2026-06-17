@@ -31,9 +31,11 @@ from pydantic import BaseModel
 
 from friday.core.orchestrator import Orchestrator
 from friday.core.state import GraphState, Mode
+from friday.providers.emotion import Emotion
 from friday.providers.stt import STTProvider
-from friday.providers.tts import TTSProvider, VoiceConfig
+from friday.providers.tts import TTSProvider, VoiceConfig, voice_for_emotion
 from friday.voice.capture import AudioCapture
+from friday.voice.emotion_stream import EmotionListener, EmotionStreamAnalyzer
 from friday.voice.vad import VAD
 from friday.voice.wake_word import WakeWordDetector
 
@@ -64,12 +66,15 @@ class VoiceTurn(BaseModel):
         response_text: The orchestrator's synthesized reply.
         mode: The final core :class:`~friday.core.state.Mode` for the turn.
         audio: The synthesized reply as audio bytes (never empty on success).
+        emotion: The paralinguistic emotion sensed during the turn, or ``None``
+            when emotion sensing is disabled.
     """
 
     transcript: str
     response_text: str
     mode: Mode
     audio: bytes
+    emotion: Emotion | None = None
 
 
 class VoicePipeline:
@@ -94,6 +99,8 @@ class VoicePipeline:
         orchestrator: Orchestrator,
         tts: TTSProvider,
         voice: VoiceConfig | None = None,
+        analyzer: EmotionStreamAnalyzer | None = None,
+        emotion_tts: bool = False,
     ) -> None:
         self._wake = wake
         self._capture = capture
@@ -102,10 +109,17 @@ class VoicePipeline:
         self._orchestrator = orchestrator
         self._tts = tts
         self._voice = voice if voice is not None else VoiceConfig()
+        self._analyzer = analyzer
+        self._emotion_tts = emotion_tts
         self._mode: Mode = Mode.IDLE
         self._listeners: list[ModeListener] = []
 
     # -- mode emission ----------------------------------------------------- #
+    def on_emotion(self, listener: EmotionListener) -> None:
+        """Register a listener for streamed Emotion readings (no-op if disabled)."""
+        if self._analyzer is not None:
+            self._analyzer.on_emotion(listener)
+
     def on_mode(self, listener: ModeListener) -> None:
         """Register ``listener`` to be called on every mode transition."""
         self._listeners.append(listener)
@@ -144,17 +158,24 @@ class VoicePipeline:
         self._set_mode(Mode.ROUTING)
         transcript = await self._stt.transcribe(utterance, lang=None)
 
+        emotion = self._analyzer.last() if self._analyzer is not None else None
+
         state = GraphState(session_id=session_id, user_input=transcript.text)
+        state.emotion = emotion
         result = await self._orchestrator.handle(state)
         response_text = result.response or ""
 
-        audio = await self._tts.synthesize(response_text, self._voice)
+        voice = self._voice
+        if self._emotion_tts and emotion is not None:
+            voice = voice_for_emotion(self._voice, emotion)
+        audio = await self._tts.synthesize(response_text, voice)
 
         return VoiceTurn(
             transcript=transcript.text,
             response_text=response_text,
             mode=result.mode,
             audio=audio,
+            emotion=emotion,
         )
 
     async def _await_wake(self, frames: AsyncIterator[bytes]) -> bool:
@@ -176,6 +197,8 @@ class VoicePipeline:
             if not self._vad.is_speech(frame):
                 break
             buffer.extend(frame)
+            if self._analyzer is not None:
+                await self._analyzer.push(frame)
         return bytes(buffer)
 
     # -- barge-in ---------------------------------------------------------- #

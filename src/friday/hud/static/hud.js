@@ -1755,6 +1755,45 @@
     });
   }
 
+  function emotionWsUrl() {
+    var base = resolveApiBase();
+    if (base && /^https?:/.test(base)) return base.replace(/^http/, "ws") + "/ws/emotion";
+    var scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return scheme + "//" + window.location.host + "/ws/emotion";
+  }
+
+  // Live mood readout: react to emotion frames pushed over /ws/emotion. Inert
+  // when emotion sensing is off (the socket is refused) — the chip stays hidden.
+  function connectEmotion() {
+    if (!("WebSocket" in window)) return;
+    var chip = el("mood");
+    if (!chip) return;
+    var ws;
+    try {
+      ws = new WebSocket(emotionWsUrl());
+    } catch (err) {
+      return;
+    }
+    ws.addEventListener("message", function (ev) {
+      var m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch (err) {
+        return; // ignore non-JSON
+      }
+      if (!m || m.type === "ready" || typeof m.valence !== "number") return;
+      // hue: 0=red (unpleasant) .. 120=green (pleasant); lightness from arousal.
+      var hue = Math.round(m.valence * 120);
+      var light = 30 + Math.round(m.arousal * 40);
+      chip.hidden = false;
+      chip.style.background = "hsl(" + hue + " 70% " + light + "%)";
+      chip.textContent = (m.label || "—") + " " + Math.round((m.intensity || 0) * 100) + "%";
+      chip.title =
+        "v" + m.valence.toFixed(2) + " a" + (m.arousal || 0).toFixed(2) +
+        " d" + (m.dominance || 0).toFixed(2);
+    });
+  }
+
   function wireVoice() {
     var btn = el("btn-mic");
     if (!btn) {
@@ -2276,6 +2315,7 @@
     wireGlobe();
     wireVoice();
     connectWake();
+    connectEmotion();
     wireDragDrop();
     wireReplay();
     wireBrain();

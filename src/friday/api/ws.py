@@ -16,6 +16,7 @@ No heavy voice library is imported here; this module only wires the transport.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -41,6 +42,12 @@ def _wakeword_enabled(websocket: WebSocket) -> bool:
     """Whether the wake word is enabled, read off the startup settings."""
     settings = getattr(websocket.app.state, "settings", None)
     return bool(getattr(settings, "enable_wakeword", False))
+
+
+def _emotion_enabled(websocket: WebSocket) -> bool:
+    """Whether emotion sensing is enabled, read off the startup settings."""
+    settings = getattr(websocket.app.state, "settings", None)
+    return bool(getattr(settings, "enable_emotion", False))
 
 
 @router.websocket("/ws/voice")
@@ -103,6 +110,52 @@ async def ws_wake(websocket: WebSocket) -> None:
                 await websocket.send_json(event.model_dump())
     except WebSocketDisconnect:  # pragma: no cover - exercised via client close
         logger.info("wake websocket disconnected")
+    finally:
+        if websocket.application_state != WebSocketState.DISCONNECTED:
+            await websocket.close()
+
+
+@router.websocket("/ws/emotion")
+async def ws_emotion(websocket: WebSocket) -> None:
+    """Stream live paralinguistic emotion to the HUD.
+
+    Guarded by ``FRIDAY_ENABLE_EMOTION``: when off, the socket is refused with a
+    policy-violation close. Otherwise the server sends ``{"type": "ready"}`` then
+    one JSON frame per smoothed :class:`~friday.providers.emotion.Emotion` emitted
+    by the shared :class:`~friday.voice.emotion_stream.EmotionStreamAnalyzer` on
+    ``app.state.emotion_analyzer``. Readings are forwarded across event loops with
+    :meth:`asyncio.AbstractEventLoop.call_soon_threadsafe` so a capture loop on a
+    different thread can drive the socket safely.
+    """
+    if not _emotion_enabled(websocket):
+        await websocket.accept()
+        await websocket.close(code=_POLICY_VIOLATION, reason="emotion disabled")
+        return
+
+    analyzer = getattr(websocket.app.state, "emotion_analyzer", None)
+    await websocket.accept()
+    await websocket.send_json({"type": "ready"})
+
+    if analyzer is None:
+        # No analyzer wired (e.g. provider build skipped): hold the socket open
+        # until the client disconnects rather than busy-looping.
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:  # pragma: no cover - exercised via client close
+            logger.info("emotion websocket disconnected")
+        return
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    analyzer.on_emotion(lambda e: loop.call_soon_threadsafe(queue.put_nowait, e))
+
+    try:
+        while True:
+            emotion = await queue.get()
+            await websocket.send_json(emotion.model_dump())
+    except WebSocketDisconnect:  # pragma: no cover - exercised via client close
+        logger.info("emotion websocket disconnected")
     finally:
         if websocket.application_state != WebSocketState.DISCONNECTED:
             await websocket.close()

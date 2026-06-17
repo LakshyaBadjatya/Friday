@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from friday.config import Settings
 from friday.errors import ProviderError
+from friday.providers.emotion import Emotion
 
 _PHASE_3_NOTE = (
     "Real TTS ({backend}) is deferred to Phase 3 (voice is flagged off this "
@@ -67,6 +68,17 @@ class VoiceConfig(BaseModel):
 
     voice_id: str = "default"
     speed: float = Field(default=1.0, gt=0)
+
+
+def voice_for_emotion(voice: VoiceConfig, emotion: Emotion) -> VoiceConfig:
+    """Nudge TTS ``speed`` from arousal; neutral arousal (0.5) is a no-op (P2).
+
+    arousal 0.5 -> x1.0, arousal 0.0 -> x0.8, arousal 1.0 -> x1.2, composed with
+    the incoming speed and clamped to [0.7, 1.3]. ``voice_id`` is preserved.
+    """
+    factor = 1.0 + (emotion.arousal - 0.5) * 0.4
+    speed = min(1.3, max(0.7, voice.speed * factor))
+    return voice.model_copy(update={"speed": speed})
 
 
 @runtime_checkable

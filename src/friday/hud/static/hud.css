@@ -1538,3 +1538,19 @@ select {
     transition: none !important;
   }
 }
+
+/* Live voice-mood chip (Phase 1 emotion sensing). Hidden until /ws/emotion
+   streams a reading; background hue encodes valence, lightness encodes arousal. */
+.mood {
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #04121a;
+  text-transform: capitalize;
+  text-align: center;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  transition: background 240ms ease;
+}

@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from friday.providers.emotion import Emotion
 from friday.providers.llm import Message
 
 
@@ -72,3 +73,5 @@ class GraphState(BaseModel):
     # Set when the user has explicitly confirmed a pending side-effecting action;
     # threaded into the registry confirm-step (build-spec §12).
     confirmed: bool = False
+    # Paralinguistic emotion sensed for this turn (None when the feature is off).
+    emotion: Emotion | None = None

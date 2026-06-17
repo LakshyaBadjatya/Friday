@@ -49,6 +49,7 @@ from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_comms import router as comms_router
 from friday.api.routes_email import router as email_router
+from friday.api.routes_emotion import router as emotion_router
 from friday.api.routes_ensemble import router as ensemble_router
 from friday.api.routes_export import router as export_router
 from friday.api.routes_graph import router as graph_router
@@ -194,6 +195,15 @@ from friday.tools.reminders import (
 from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
 from friday.tools.weather import WeatherTool
 from friday.tools.web_search import WebSearchTool
+from friday.providers.emotion import (
+    CalibratedEmotion,
+    DimEmotion,
+    EmotionCalibration,
+    EmotionProvider,
+    FakeEmotion,
+    LiteEmotion,
+)
+from friday.voice.emotion_stream import EmotionStreamAnalyzer
 from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity
 from friday.voice.wake_service import WakeService
 
@@ -2010,6 +2020,54 @@ def _wire_wake(app: FastAPI, settings: Settings) -> None:
     )
 
 
+def _build_emotion_provider(settings: Settings) -> EmotionProvider:
+    """Select the emotion provider from ``FRIDAY_EMOTION_PROVIDER``.
+
+    ``"fake"`` -> deterministic, model-free :class:`FakeEmotion`; ``"lite"`` ->
+    the custom Kaggle-trained :class:`LiteEmotion` head; otherwise the dimensional
+    :class:`DimEmotion`. The model is only loaded here, when emotion is enabled.
+    """
+    if settings.emotion_provider == "fake":
+        return FakeEmotion()
+    if settings.emotion_provider == "lite":
+        return LiteEmotion(model_path=settings.emotion_model)
+    return DimEmotion(model_path=settings.emotion_model)
+
+
+def _wire_emotion(app: FastAPI, settings: Settings) -> None:
+    """Stash an :class:`EmotionStreamAnalyzer` on ``app.state`` when enabled.
+
+    The ``/ws/emotion`` socket reads ``app.state.emotion_analyzer``. Off by default
+    so the offline build loads no model. A missing/unloadable model is logged and
+    skipped rather than crashing startup.
+    """
+    if not settings.enable_emotion:
+        return
+    try:
+        provider = _build_emotion_provider(settings)
+    except ProviderError as exc:
+        logger.warning("emotion sensing disabled: %s", exc)
+        return
+    # The base (uncalibrated) provider, exposed for /emotion/enroll.
+    app.state.emotion_base_provider = provider
+    # Personalize to the owner's baseline when a calibration file is configured.
+    cal_path = getattr(settings, "emotion_calibration", "")
+    if cal_path and Path(cal_path).is_file():
+        try:
+            calibration = EmotionCalibration.model_validate_json(
+                Path(cal_path).read_text(encoding="utf-8")
+            )
+            provider = CalibratedEmotion(provider, calibration)
+            logger.info("emotion personalization loaded from %s", cal_path)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("emotion calibration unreadable (%s): %s", cal_path, exc)
+    # Gate the signal to the owner's voice when requested and recognition exists.
+    owner = _build_owner_identity(settings) if settings.emotion_owner_only else None
+    app.state.emotion_analyzer = EmotionStreamAnalyzer(
+        provider, owner=owner, owner_only=bool(owner is not None),
+    )
+
+
 def _build_studio_hifi(settings: Settings) -> Text3DProvider | None:
     """Build the optional high-fidelity text-to-3D provider, or ``None``.
 
@@ -2464,6 +2522,7 @@ def create_app() -> FastAPI:
         _install_runtime(app, settings)
         _wire_voice(app, settings)
         _wire_wake(app, settings)
+        _wire_emotion(app, settings)
         scheduler_task = _start_scheduler_loop(app, settings)
         try:
             yield
@@ -2500,6 +2559,7 @@ def create_app() -> FastAPI:
     # 404, so the offline fake build exposes no model surface.
     app.include_router(models_router)
     app.include_router(ensemble_router)
+    app.include_router(emotion_router)
     app.include_router(planner_router)
     app.include_router(memory_router)
     app.include_router(export_router)
@@ -2626,6 +2686,7 @@ def create_app() -> FastAPI:
     _install_runtime(app, settings)
     _wire_voice(app, settings)
     _wire_wake(app, settings)
+    _wire_emotion(app, settings)
     _mount_studio_static(app, settings)
 
     return app

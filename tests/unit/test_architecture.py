@@ -53,3 +53,19 @@ def test_no_llm_sdk_in_business_logic() -> None:
         "architecture guard scanned no files; the agents/core package layout "
         "may have moved"
     )
+
+
+def test_emotion_provider_module_has_no_top_level_model_import() -> None:
+    """The emotion provider must not pull a model backend at import time.
+
+    ``onnxruntime``/``torch`` are imported lazily inside ``DimEmotion.__init__``;
+    everything before the ``class DimEmotion`` line must stay backend-free so
+    ``import friday.providers.emotion`` is cheap (mirrors the FasterWhisperSTT
+    discipline).
+    """
+    src = (_project_root() / "src/friday/providers/emotion.py").read_text(
+        encoding="utf-8"
+    )
+    head = src.split("class DimEmotion", 1)[0]
+    assert "import onnxruntime" not in head
+    assert "import torch" not in head

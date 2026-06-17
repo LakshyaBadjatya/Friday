@@ -58,6 +58,22 @@ def _disabled() -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": "hud disabled"})
 
 
+#: The command-palette catalog the HUD offers (and a reusable surface contract:
+#: the TUI and any other front-end can read the same list rather than hard-coding
+#: it). Kept in sync with the ``COMMANDS`` array in ``hud.js``.
+HUD_COMMANDS: tuple[dict[str, str], ...] = (
+    {"id": "ask", "title": "Ask FRIDAY", "hint": "POST /chat"},
+    {"id": "dossier", "title": "Open dossier", "hint": "POST /chat"},
+    {"id": "roster", "title": "Show roster", "hint": "GET /roster"},
+    {"id": "theme", "title": "Cycle theme", "hint": "appearance"},
+    {"id": "view-command", "title": "Go to Command", "hint": "view"},
+    {"id": "view-arena", "title": "Go to Arena", "hint": "view"},
+    {"id": "view-agents", "title": "Go to Agents", "hint": "view"},
+    {"id": "view-memory", "title": "Go to Memory", "hint": "view"},
+    {"id": "view-system", "title": "Go to System", "hint": "view"},
+)
+
+
 @router.get("/hud", response_model=None)
 async def hud_index() -> FileResponse | JSONResponse:
     """Serve the HUD ``index.html`` cockpit page; 404 when disabled/missing."""
@@ -69,6 +85,14 @@ async def hud_index() -> FileResponse | JSONResponse:
             content={"detail": "hud UI not found (frontend assets missing)"},
         )
     return FileResponse(INDEX_PATH, media_type="text/html")
+
+
+@router.get("/hud/commands", response_model=None)
+async def hud_commands() -> JSONResponse:
+    """Return the command-palette catalog (id/title/hint); 404 when HUD disabled."""
+    if not _hud_enabled():
+        return _disabled()
+    return JSONResponse(status_code=200, content={"commands": list(HUD_COMMANDS)})
 
 
 @router.get("/hud/static/{filename:path}", response_model=None)

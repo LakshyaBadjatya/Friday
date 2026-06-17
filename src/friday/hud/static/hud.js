@@ -1894,6 +1894,46 @@
   }
 
   // ==========================================================================
+  // THEMES — re-skin via data-theme on <html>; choice persists in localStorage.
+  // ==========================================================================
+  var THEMES = ["default", "amber", "crimson", "emerald", "light"];
+  var THEME_KEY = "friday-theme";
+
+  function applyTheme(name) {
+    var theme = THEMES.indexOf(name) >= 0 ? name : "default";
+    if (theme === "default") {
+      document.documentElement.removeAttribute("data-theme");
+    } else {
+      document.documentElement.setAttribute("data-theme", theme);
+    }
+    try {
+      window.localStorage.setItem(THEME_KEY, theme);
+    } catch (e) {
+      /* localStorage may be unavailable (private mode) — theme still applies */
+    }
+    return theme;
+  }
+
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") || "default";
+  }
+
+  function cycleTheme() {
+    var idx = THEMES.indexOf(currentTheme());
+    return applyTheme(THEMES[(idx + 1) % THEMES.length]);
+  }
+
+  function applyStoredTheme() {
+    var saved = "default";
+    try {
+      saved = window.localStorage.getItem(THEME_KEY) || "default";
+    } catch (e) {
+      /* ignore */
+    }
+    applyTheme(saved);
+  }
+
+  // ==========================================================================
   // COMMAND PALETTE (Cmd/Ctrl-K) — actions + view switches.
   // ==========================================================================
   var COMMANDS = [
@@ -1934,6 +1974,7 @@
     { id: "view-agents", title: "Go to Agents", hint: "view", glyph: "❖", run: async function () { showView("agents"); closePalette(); return ""; } },
     { id: "view-memory", title: "Go to Memory", hint: "view", glyph: "▤", run: async function () { showView("memory"); closePalette(); return ""; } },
     { id: "view-system", title: "Go to System", hint: "view", glyph: "⌁", run: async function () { showView("system"); closePalette(); return ""; } },
+    { id: "theme", title: "Cycle theme", hint: "appearance", glyph: "◐", run: async function () { var t = cycleTheme(); closePalette(); return "Theme: " + t; } },
     {
       id: "roster",
       title: "Show roster",
@@ -2225,6 +2266,7 @@
   // BOOTSTRAP.
   // ==========================================================================
   function init() {
+    applyStoredTheme();
     startParticles();
     wireRail();
     wirePalette();

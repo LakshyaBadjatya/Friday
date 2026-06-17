@@ -111,6 +111,37 @@ def test_hud_static_path_traversal_is_404(monkeypatch: pytest.MonkeyPatch) -> No
     assert resp.status_code == 404
 
 
+def test_hud_commands_disabled_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command catalog is absent when the flag is off."""
+    monkeypatch.setattr(routes_hud, "get_settings", _disabled_settings)
+    with TestClient(_app()) as client:
+        resp = client.get("/hud/commands")
+    assert resp.status_code == 404
+
+
+def test_hud_commands_enabled_returns_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enabled ``GET /hud/commands`` returns the palette catalog (id/title/hint)."""
+    monkeypatch.setattr(routes_hud, "get_settings", _enabled_settings)
+    with TestClient(_app()) as client:
+        resp = client.get("/hud/commands")
+    assert resp.status_code == 200
+    commands = resp.json()["commands"]
+    ids = {c["id"] for c in commands}
+    assert {"ask", "theme", "roster", "view-system"} <= ids
+    assert all({"id", "title", "hint"} <= set(c) for c in commands)
+
+
+def test_hud_js_defines_theme_switching() -> None:
+    """The cockpit JS wires theme cycling + persistence (Wave G themes)."""
+    js = _HUD_JS.read_text(encoding="utf-8")
+    assert "applyTheme" in js
+    assert "cycleTheme" in js
+    assert "friday-theme" in js  # localStorage key
+    css = _HUD_CSS.read_text(encoding="utf-8")
+    assert '[data-theme="amber"]' in css
+    assert '[data-theme="light"]' in css
+
+
 def test_hud_js_is_valid_javascript() -> None:
     """``hud.js`` passes ``node --check`` (parses as valid JavaScript)."""
     node = shutil.which("node")

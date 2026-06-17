@@ -70,6 +70,49 @@
     "Liberation Mono", monospace;
 }
 
+/* --- Theme variants -------------------------------------------------------- *
+ * Applied via data-theme on <html> (hud.js persists the choice in
+ * localStorage). The default — no attribute — is the cyan arc-reactor palette
+ * in :root above; each variant only re-points the accent + (for "light") the
+ * surface tokens, so every component re-skins through the existing var()s. */
+[data-theme="amber"] {
+  --cyan: #ffce73;
+  --cyan-2: #d9a441;
+  --cyan-soft: rgba(255, 206, 115, 0.4);
+  --cyan-faint: rgba(255, 206, 115, 0.12);
+  --gold: #4fe3ff;
+  --gold-soft: rgba(79, 227, 255, 0.4);
+}
+[data-theme="crimson"] {
+  --cyan: #ff6b78;
+  --cyan-2: #d6445a;
+  --cyan-soft: rgba(255, 107, 120, 0.4);
+  --cyan-faint: rgba(255, 107, 120, 0.12);
+  --gold: #ffce73;
+}
+[data-theme="emerald"] {
+  --cyan: #5fe6a6;
+  --cyan-2: #2bb784;
+  --cyan-soft: rgba(95, 230, 166, 0.4);
+  --cyan-faint: rgba(95, 230, 166, 0.12);
+}
+[data-theme="light"] {
+  --bg: #eef3fb;
+  --bg-2: #e4ecf7;
+  --surface: #ffffff;
+  --surface-2: #f3f7fd;
+  --surface-3: #e9f0fa;
+  --ink: #0b1220;
+  --ink-2: #34465c;
+  --ink-dim: #6a7d93;
+  --cyan: #0a84c7;
+  --cyan-2: #086a9f;
+  --cyan-soft: rgba(10, 132, 199, 0.35);
+  --cyan-faint: rgba(10, 132, 199, 0.1);
+  --line: #cdd9ea;
+  --line-2: #b6c6dd;
+}
+
 * {
   box-sizing: border-box;
 }

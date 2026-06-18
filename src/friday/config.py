@@ -606,6 +606,20 @@ class Settings(BaseSettings):
     # the real PyMuPDF backend is lazy/optional. Gates POST /pdf/layout.
     enable_pdf_layout: bool = False
 
+    # --- Siri front door (default off) ---
+    # Gates ``POST /siri/ask`` — the Siri Shortcuts entry into the core loop. Off
+    # by default so the route 404s; when on it runs the spoken query through the
+    # same orchestrator as ``/chat``. Public/tunnelled deployments MUST pair this
+    # with ``require_auth`` + an ``api_keys`` token (the route has full power).
+    enable_siri: bool = False
+
+    # --- Circle (friends groups; default off) ---
+    # Gates the ``/circle`` REST surface (groups, invites, members, status). Off by
+    # default so the routes 404; identity comes from the bearer-token map on app
+    # state (Firebase ID-token verification replaces it later). Services fall back
+    # to in-memory stores until a persistent backend is wired.
+    enable_circle: bool = False
+
     # --- 3D Studio (Phase 7; default off) ---
     # The whole studio feature (router + static UI) is gated behind this flag; off
     # by default so the offline build exposes no studio surface (route -> 404).

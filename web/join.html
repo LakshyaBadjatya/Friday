@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Join</title>
+  <style>
+    :root { color-scheme: dark light; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      max-width: 26rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5;
+    }
+    h1 { font-size: 1.4rem; }
+    input, button { font: inherit; padding: 0.55rem 0.7rem; border-radius: 0.5rem; }
+    input { width: 100%; box-sizing: border-box; margin: 0.3rem 0; border: 1px solid #8884; }
+    button { cursor: pointer; border: 1px solid #8884; background: #4f46e5; color: #fff; }
+    button.ghost { background: transparent; color: inherit; }
+    .row { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    .row button { flex: 1; }
+    .muted { color: #8888; font-size: 0.95rem; }
+    .ok { color: #16a34a; } .err { color: #dc2626; }
+    #status { min-height: 1.4rem; margin-top: 0.8rem; }
+    #accept { width: 100%; background: #16a34a; border-color: #16a34a; padding: 0.65rem; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Join a circle</h1>
+  <p id="invite-info" class="muted">Opening your invite…</p>
+
+  <section id="join-signed-out" hidden>
+    <p>Sign in to accept your invite.</p>
+    <input id="email" type="email" placeholder="email" autocomplete="email" />
+    <input id="password" type="password" placeholder="password" autocomplete="current-password" />
+    <div class="row">
+      <button id="login">Sign in</button>
+      <button id="register" class="ghost">Create account</button>
+    </div>
+    <div class="row">
+      <button id="google" class="ghost">Continue with Google</button>
+    </div>
+  </section>
+
+  <section id="join-signed-in" hidden>
+    <p>Signed in as <strong id="who"></strong>.</p>
+    <button id="accept">Join <span id="grp">circle</span></button>
+  </section>
+
+  <div id="status" aria-live="polite"></div>
+
+  <script type="module" src="./join.js"></script>
+</body>
+</html>

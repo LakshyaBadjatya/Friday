@@ -1,14 +1,121 @@
 rules_version = '2';
 
+// Firestore security rules for project "lakufriday" — keyless, client-direct model.
+//
+// The browser talks to Firestore directly (no backend service account), so THESE
+// RULES are the entire access-control layer. Principle: deny by default; a person
+// sees a group's data only while they are a member of it; messages are end-to-end
+// encrypted (ciphertext only) and writable only by a member writing as themselves.
+//
+// Membership = existence of groups/{gid}/members/{uid}. Joining is gated by a valid,
+// unexpired, non-revoked invite whose code the joiner carries in their member doc.
+//
+// Deploy:  npx firebase-tools deploy --only firestore:rules --project lakufriday
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // A signed-in user may read and write only their own profile document.
-    match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+    function signedIn() {
+      return request.auth != null;
+    }
+    function uid() {
+      return request.auth.uid;
+    }
+    function isMember(gid) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/groups/$(gid)/members/$(uid()));
+    }
+    function groupAdmin(gid) {
+      return get(/databases/$(database)/documents/groups/$(gid)).data.adminUid;
+    }
+    function invite(code) {
+      return get(/databases/$(database)/documents/invites/$(code)).data;
     }
 
-    // Everything else is denied by default. As circle collections (groups,
-    // members, status) move into Firestore, add their consent-scoped rules here.
+    // --- User profile + the user's own membership index ---
+    match /users/{userId} {
+      allow read: if signedIn() && uid() == userId;
+      allow create, update: if signedIn() && uid() == userId
+                            && request.resource.data.uid == userId;
+      allow delete: if false;
+
+      // A private reverse-index of "groups I'm in" (the user maintains their own).
+      match /memberships/{gid} {
+        allow read, write: if signedIn() && uid() == userId;
+      }
+    }
+
+    // --- Groups ---
+    match /groups/{gid} {
+      allow read: if isMember(gid);
+      // The creator makes the group as its admin; no foreign fields.
+      allow create: if signedIn()
+                    && request.resource.data.adminUid == uid()
+                    && request.resource.data.keys().hasOnly(
+                         ['name', 'adminUid', 'createdAt']);
+      // Only the admin may edit, and may not transfer admin away from themselves.
+      allow update: if isMember(gid)
+                    && resource.data.adminUid == uid()
+                    && request.resource.data.adminUid == uid();
+      allow delete: if false;
+
+      // --- Members ---
+      match /members/{memberUid} {
+        allow read: if isMember(gid);
+        // You may create only your OWN membership, and only if either you are the
+        // group's admin (seeding yourself at creation) or you present a valid invite
+        // for this group.
+        allow create: if signedIn()
+                      && memberUid == uid()
+                      && request.resource.data.uid == uid()
+                      && (
+                        groupAdmin(gid) == uid()
+                        || (
+                          request.resource.data.inviteCode is string
+                          && exists(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode))
+                          && invite(request.resource.data.inviteCode).groupId == gid
+                          && invite(request.resource.data.inviteCode).revoked == false
+                          && request.time < invite(request.resource.data.inviteCode).expiresAt
+                        )
+                      );
+        // Edit only your own record; leave (or be removed by the admin).
+        allow update: if signedIn() && memberUid == uid()
+                      && request.resource.data.uid == uid();
+        allow delete: if signedIn()
+                      && (memberUid == uid() || groupAdmin(gid) == uid());
+      }
+
+      // --- Messages (E2EE: ciphertext only) ---
+      match /messages/{mid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid)
+                      && request.resource.data.senderUid == uid()
+                      && request.resource.data.keys().hasOnly(
+                           ['senderUid', 'ciphertext', 'nonce', 'createdAt']);
+        allow update, delete: if false;
+      }
+    }
+
+    // --- Invites ---
+    // Opaque random codes. Any signed-in user may read one (to preview the group
+    // name, denormalised onto the invite). Only a group's admin may mint one; a
+    // joiner may mark it accepted (best-effort single-use).
+    match /invites/{code} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+                    && request.resource.data.createdBy == uid()
+                    && groupAdmin(request.resource.data.groupId) == uid();
+      allow update: if signedIn()
+                    && request.resource.data.diff(resource.data)
+                         .affectedKeys().hasOnly(['accepted', 'acceptedBy'])
+                    && request.resource.data.acceptedBy == uid();
+      allow delete: if signedIn()
+                    && groupAdmin(resource.data.groupId) == uid();
+    }
+
+    // --- Default deny ---
+    match /{document=**} {
+      allow read, write: if false;
+    }
   }
 }

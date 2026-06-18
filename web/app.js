@@ -26,11 +26,16 @@ import {
   isSupported as analyticsSupported,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-analytics.js";
 import { firebaseConfig } from "./firebase-config.js";
+import { initCircle } from "./circle.js";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const googleProvider = new GoogleAuthProvider();
+
+// Wire the circle UI (groups, invites, E2EE chat). Listeners attach once here; the
+// group list is refreshed each time a user signs in (below). Client-direct Firestore.
+const circle = initCircle(auth, db);
 
 // Firebase Analytics — initialise only where the browser supports it (needs a
 // measurementId and a supporting environment); never let it break the app.
@@ -143,6 +148,7 @@ onAuthStateChanged(auth, async (user) => {
     } catch (err) {
       $("profile").textContent = `Firestore read failed: ${friendly(err)}`;
     }
+    circle.refreshGroups();
   } else {
     signedOut.hidden = false;
     signedIn.hidden = true;

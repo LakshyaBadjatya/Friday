@@ -1,14 +1,35 @@
 rules_version = '2';
 
+// Firestore security rules for project "lakufriday".
+//
+// Principle: deny by default; grant the narrowest access the app needs. A signed-
+// in user owns exactly their own profile document and nothing else. Everything
+// else is denied until its data model + consent rules are defined here.
+//
+// Deploy:  npx firebase-tools deploy --only firestore:rules --project lakufriday
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // A signed-in user may read and write only their own profile document.
+    // --- User profiles: users/{uid} ---
+    // A user may read their own profile, and create/update it only when the
+    // document's `uid` field matches their authenticated uid (prevents writing
+    // someone else's record or spoofing the owner). Profiles are not deleted from
+    // the client.
     match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if request.auth != null
+                            && request.auth.uid == uid
+                            && request.resource.data.uid == uid;
+      allow delete: if false;
     }
 
-    // Everything else is denied by default. As circle collections (groups,
-    // members, status) move into Firestore, add their consent-scoped rules here.
+    // --- Default deny ---
+    // Any path not explicitly matched above is denied. When circle collections
+    // (groups, members, status, messages) move into Firestore, add their
+    // consent-scoped rules ABOVE this catch-all.
+    match /{document=**} {
+      allow read, write: if false;
+    }
   }
 }

@@ -56,6 +56,7 @@ module = [
   "resemblyzer", "resemblyzer.*",
   "sounddevice", "sounddevice.*",
   "faster_whisper", "faster_whisper.*",
+  "firebase_admin", "firebase_admin.*",
 ]
 ignore_missing_imports = true
 

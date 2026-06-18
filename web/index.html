@@ -21,6 +21,12 @@
     .ok { color: #16a34a; } .err { color: #dc2626; }
     #status { min-height: 1.4rem; margin-top: 0.8rem; }
     hr { border: none; border-top: 1px solid #8883; margin: 1.2rem 0; }
+    #links { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1.6rem; }
+    #links a {
+      font-size: 0.9rem; text-decoration: none; color: inherit;
+      padding: 0.45rem 0.8rem; border: 1px solid #8884; border-radius: 0.5rem;
+    }
+    #links a.dl { background: #4f46e5; color: #fff; border-color: #4f46e5; }
   </style>
 </head>
 <body>
@@ -45,6 +51,13 @@
   </section>
 
   <div id="status" aria-live="polite"></div>
+
+  <nav id="links" aria-label="Friday">
+    <a href="http://localhost:8800/hud">HUD</a>
+    <a href="http://localhost:8800/maps">Maps</a>
+    <a href="http://localhost:8800/studio">Studio</a>
+    <a class="dl" href="./friday.shortcut" download="friday.shortcut">Download Siri Shortcut</a>
+  </nav>
 
   <script type="module" src="./app.js"></script>
 </body>

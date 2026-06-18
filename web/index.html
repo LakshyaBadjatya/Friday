@@ -27,6 +27,7 @@
       padding: 0.45rem 0.8rem; border: 1px solid #8884; border-radius: 0.5rem;
     }
     #links a.dl { background: #4f46e5; color: #fff; border-color: #4f46e5; }
+    #links a.big { flex-basis: 100%; text-align: center; font-weight: 600; background: #16a34a; color: #fff; border-color: #16a34a; padding: 0.6rem; }
   </style>
 </head>
 <body>
@@ -47,17 +48,16 @@
   <section id="signed-in" hidden>
     <p>Signed in as <strong id="who"></strong>.</p>
     <p id="profile"></p>
+    <nav id="links" aria-label="Menu">
+      <a class="big" href="https://friday-backend-oj8h.onrender.com/hud" target="_blank" rel="noopener">Open HUD</a>
+      <a href="https://friday-backend-oj8h.onrender.com/maps" target="_blank" rel="noopener">Maps</a>
+      <a href="https://friday-backend-oj8h.onrender.com/studio" target="_blank" rel="noopener">Studio</a>
+      <a class="dl" href="./friday.shortcut" download="friday.shortcut">Download Siri Shortcut</a>
+    </nav>
     <button id="logout" class="ghost">Sign out</button>
   </section>
 
   <div id="status" aria-live="polite"></div>
-
-  <nav id="links" aria-label="Friday">
-    <a href="https://friday-backend-oj8h.onrender.com/hud" target="_blank" rel="noopener">HUD</a>
-    <a href="https://friday-backend-oj8h.onrender.com/maps" target="_blank" rel="noopener">Maps</a>
-    <a href="https://friday-backend-oj8h.onrender.com/studio" target="_blank" rel="noopener">Studio</a>
-    <a class="dl" href="./friday.shortcut" download="friday.shortcut">Download Siri Shortcut</a>
-  </nav>
 
   <script type="module" src="./app.js"></script>
 </body>

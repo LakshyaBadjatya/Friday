@@ -51,3 +51,6 @@ FRIDAY-build-spec.md
 # Agent / local working dirs — kept locally, never published
 .claude/
 seo-deliverables/
+
+# Firebase web config (public key, but kept out of git per request)
+web/firebase-config.js

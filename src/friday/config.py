@@ -719,6 +719,17 @@ class Settings(BaseSettings):
     # DAG of steps and render it for confirmation (planning only — execution stays
     # a separate, broker-gated action). Off by default so the route 404s.
     enable_planner: bool = False
+    # Gates the Flow Engine (``/flows``): run a planned goal as a resumable,
+    # checkpointed, broker-gated, audited multi-step workflow. Off by default so
+    # the routes 404 and no engine/store is constructed.
+    enable_flows: bool = False
+    flow_max_steps: int = 50
+    flow_max_replans: int = 3
+    flow_step_timeout_s: float = 120.0
+    flow_default_budget_tokens: int = 200_000
+    # Durable SQLite home for flow checkpoints. ``data/`` is gitignored; tests use
+    # ``":memory:"`` and never touch this real path.
+    flow_db_path: str = "data/flows.db"
     # Gates context compaction: once a session's short-term history grows past a
     # threshold, the orchestrator folds the older turns into one summary message
     # and keeps a recent tail (one bounded, non-fatal LLM pass). Off by default so

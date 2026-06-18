@@ -61,6 +61,7 @@ from friday.api.routes_models import router as models_router
 from friday.api.routes_multimodal import router as multimodal_router
 from friday.api.routes_n8n import router as n8n_router
 from friday.api.routes_perception import router as perception_router
+from friday.api.routes_flows import router as flows_router
 from friday.api.routes_planner import router as planner_router
 from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
@@ -84,6 +85,10 @@ from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
 from friday.core.ensemble import Ensemble
 from friday.core.orchestrator import ForgettableVectorStore, Orchestrator
 from friday.core.planner import Planner
+from friday.flows.engine import FlowEngine
+from friday.flows.replan import Replanner
+from friday.flows.store import SQLiteFlowStore
+from friday.flows.templates import FlowTemplateStore
 from friday.desktop import AuditedDesktop, DesktopAction, FakeDesktop
 from friday.errors import ProviderError
 from friday.family import router as family_router
@@ -2134,6 +2139,48 @@ def _wire_planner(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     app.state.planner = Planner(llm)
 
 
+def _wire_flows(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
+    """Stash a :class:`FlowEngine` on ``app.state`` when the Flow Engine is enabled.
+
+    The ``/flows`` routes read ``app.state.flow_engine`` and 404 when absent. The
+    engine reuses the same planner LLM, the fail-closed broker, and the
+    hash-chained ledger the rest of the app already wired, and persists
+    checkpoints to ``flow_db_path``. A flow's steps may invoke only tools already
+    registered in the shared registry (no arbitrary execution). Off by default so
+    the offline build constructs no engine/store.
+    """
+    if not settings.enable_flows:
+        return
+    store = SQLiteFlowStore(settings.flow_db_path)
+    engine = FlowEngine(
+        planner=Planner(runtime.llm),
+        broker=runtime.broker,
+        store=store,
+        audit=runtime.hash_audit,
+        llm=runtime.llm,
+        allowed_tools=_registered_tool_names(runtime.registry),
+        replanner=Replanner(Planner(runtime.llm)),
+        max_replans=settings.flow_max_replans,
+        templates=FlowTemplateStore(),
+        max_steps=settings.flow_max_steps,
+    )
+    app.state.flow_engine = engine
+    # Background execution: a scheduler trigger with action ``flow.resume`` picks
+    # up any flow left RUNNING by a restart (crash recovery / scheduled sweeps),
+    # reusing the existing tick loop. Registered idempotently; absent scheduler is
+    # tolerated (the engine still serves the synchronous /flows routes).
+    scheduler = getattr(runtime, "scheduler", None)
+    if scheduler is not None:
+
+        async def _resume_flows(_trigger: object) -> None:
+            await engine.resume_all()
+
+        try:
+            scheduler.register_action("flow.resume", _resume_flows)
+        except ValueError:
+            pass
+
+
 def _wire_contradiction(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     """Stash a :class:`ContradictionDetector` on ``app.state`` when enabled.
 
@@ -2451,6 +2498,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_studio(app, settings, runtime.llm)
     _wire_ensemble(app, settings, runtime.llm)
     _wire_planner(app, settings, runtime.llm)
+    _wire_flows(app, settings, runtime)
     _wire_contradiction(app, settings, runtime.llm)
     _wire_autotag(app, settings, runtime.llm)
     _wire_approvals(app, settings)
@@ -2588,6 +2636,7 @@ def create_app() -> FastAPI:
     app.include_router(ensemble_router)
     app.include_router(emotion_router)
     app.include_router(planner_router)
+    app.include_router(flows_router)
     app.include_router(memory_router)
     app.include_router(export_router)
     app.include_router(automation_router)

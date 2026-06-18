@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<!-- © Lakshya Badjatya — Author -->
+<!-- Flow Engine "Mission Board": a no-build, self-contained live view of flows.
+     Served at /hud/static/missions.html when the HUD is enabled; it reads the
+     /flows API and steers flows (run / pause / cancel / simulate). It touches no
+     other cockpit file, so it is purely additive. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FRIDAY · Missions</title>
+  <style>
+    :root { --bg:#070b14; --card:#0e1626; --line:#1c2a44; --ink:#cfe3ff; --dim:#7e93b8;
+            --ok:#39d98a; --run:#3aa0ff; --warn:#ffcc4d; --bad:#ff6b6b; --idle:#54618a; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:radial-gradient(1200px 600px at 50% -10%, #0d1a30, var(--bg));
+           color:var(--ink); font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    header { padding:18px 22px; border-bottom:1px solid var(--line); display:flex;
+             align-items:center; gap:12px; }
+    header h1 { font-size:16px; margin:0; letter-spacing:.14em; text-transform:uppercase; }
+    header .sub { color:var(--dim); font-size:12px; }
+    .wrap { padding:18px 22px; display:grid; gap:14px;
+            grid-template-columns:repeat(auto-fill, minmax(340px, 1fr)); }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+            padding:14px 16px; }
+    .card h2 { font-size:14px; margin:0 0 4px; }
+    .goal { color:var(--dim); font-size:12px; margin-bottom:10px; word-break:break-word; }
+    .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px;
+            text-transform:uppercase; letter-spacing:.08em; border:1px solid currentColor; }
+    .s-succeeded{color:var(--ok);} .s-running{color:var(--run);} .s-failed{color:var(--bad);}
+    .s-planned{color:var(--idle);} .s-cancelled{color:var(--dim);}
+    .s-awaiting_approval,.s-needs_confirmation,.s-paused{color:var(--warn);}
+    ol { margin:10px 0 0; padding-left:18px; }
+    li { margin:2px 0; color:var(--dim); }
+    li b { color:var(--ink); font-weight:600; }
+    .why { color:var(--idle); font-style:italic; }
+    .row { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+    button { background:#13213a; color:var(--ink); border:1px solid var(--line);
+             border-radius:8px; padding:5px 10px; font:inherit; font-size:12px; cursor:pointer; }
+    button:hover { border-color:var(--run); }
+    .empty { color:var(--dim); padding:40px; text-align:center; }
+    .err { color:var(--bad); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🛰️ Missions</h1>
+    <span class="sub" id="meta">connecting…</span>
+  </header>
+  <div class="wrap" id="board"><div class="empty">Loading flows…</div></div>
+
+  <script>
+    const board = document.getElementById('board');
+    const meta = document.getElementById('meta');
+
+    async function api(path, method = 'GET', body) {
+      const opt = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body !== undefined) opt.body = JSON.stringify(body);
+      const r = await fetch(path, opt);
+      if (!r.ok) throw new Error(path + ' → ' + r.status);
+      return r.json();
+    }
+
+    async function steer(id, action) {
+      try {
+        if (action === 'run') await api(`/flows/${id}/run`, 'POST', { confirmed: false });
+        else if (action === 'simulate') await api(`/flows/${id}/simulate`, 'POST');
+        else await api(`/flows/${id}/${action}`, 'POST');
+      } catch (e) { meta.textContent = String(e); meta.className = 'sub err'; }
+      refresh();
+    }
+
+    function step(s) {
+      const why = s.rationale ? ` <span class="why">— ${escape(s.rationale)}</span>` : '';
+      return `<li><b>${escape(s.id)}</b> [${escape(s.status)}] ${escape(s.description)}${why}</li>`;
+    }
+
+    function card(f) {
+      const steps = (f.steps || []).map(step).join('');
+      const spent = f.budget_tokens ? ` · ${f.spent_tokens}/${f.budget_tokens} tok` : '';
+      return `<div class="card">
+        <h2>${escape(f.goal)}</h2>
+        <div class="goal">${escape(f.id)}${spent}</div>
+        <span class="pill s-${escape(f.status)}">${escape(f.status)}</span>
+        <ol>${steps}</ol>
+        <div class="row">
+          <button onclick="steer('${f.id}','run')">▶ run</button>
+          <button onclick="steer('${f.id}','simulate')">◐ dry-run</button>
+          <button onclick="steer('${f.id}','pause')">⏸ pause</button>
+          <button onclick="steer('${f.id}','approve')">✓ approve</button>
+          <button onclick="steer('${f.id}','cancel')">✕ cancel</button>
+        </div>
+      </div>`;
+    }
+
+    function escape(v) {
+      return String(v ?? '').replace(/[&<>"]/g, c =>
+        ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+    }
+
+    async function refresh() {
+      try {
+        const data = await api('/flows');
+        const flows = data.flows || [];
+        meta.className = 'sub';
+        meta.textContent = `${flows.length} flow(s) · ${new Date().toLocaleTimeString()}`;
+        board.innerHTML = flows.length
+          ? flows.map(card).join('')
+          : '<div class="empty">No flows yet. POST a goal to /flows to begin.</div>';
+      } catch (e) {
+        meta.className = 'sub err';
+        meta.textContent = 'flows disabled or unreachable (' + e.message + ')';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 4000);
+  </script>
+</body>
+</html>

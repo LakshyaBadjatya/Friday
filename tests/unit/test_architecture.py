@@ -23,6 +23,7 @@ _BANNED_IMPORT = re.compile(
 _GUARDED_ROOTS = (
     pathlib.Path("src/friday/agents"),
     pathlib.Path("src/friday/core"),
+    pathlib.Path("src/friday/flows"),
 )
 
 

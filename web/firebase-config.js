@@ -9,10 +9,11 @@
 // access is controlled by Firebase Auth + Firestore Security Rules, not by hiding
 // this object.
 export const firebaseConfig = {
-  apiKey: "REPLACE_WITH_API_KEY",
-  authDomain: "REPLACE_PROJECT_ID.firebaseapp.com",
-  projectId: "REPLACE_WITH_PROJECT_ID",
-  storageBucket: "REPLACE_PROJECT_ID.appspot.com",
+  apiKey: "AIzaSyA8ncX3lFQbcnaGwd8KIFFYMBSA-Cw30os",
+  authDomain: "lakufriday.firebaseapp.com",
+  projectId: "lakufriday",
+  storageBucket: "lakufriday.firebasestorage.app",
   messagingSenderId: "367861861540",
-  appId: "REPLACE_WITH_APP_ID",
+  appId: "1:367861861540:web:da8561a4c205a310c32a31",
+  measurementId: "G-43BKLYK65W",
 };

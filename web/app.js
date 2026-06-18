@@ -21,12 +21,24 @@ import {
   getDoc,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+import {
+  getAnalytics,
+  isSupported as analyticsSupported,
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-analytics.js";
 import { firebaseConfig } from "./firebase-config.js";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const googleProvider = new GoogleAuthProvider();
+
+// Firebase Analytics — initialise only where the browser supports it (needs a
+// measurementId and a supporting environment); never let it break the app.
+analyticsSupported()
+  .then((ok) => {
+    if (ok) getAnalytics(app);
+  })
+  .catch(() => {});
 
 const $ = (id) => document.getElementById(id);
 

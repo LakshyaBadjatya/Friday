@@ -68,6 +68,8 @@ from friday.api.routes_protocols import router as protocols_router
 from friday.api.routes_rag import router as rag_router
 from friday.api.routes_reminders import router as reminders_router
 from friday.api.routes_roster import router as roster_router
+from friday.api.routes_circle import router as circle_router
+from friday.api.routes_siri import router as siri_router
 from friday.api.routes_schedules import router as schedules_router
 from friday.api.routes_security import router as security_router
 from friday.api.routes_sentiment import router as sentiment_router
@@ -2653,6 +2655,8 @@ def create_app() -> FastAPI:
     # The persona roster listing (Stage 2) — always available (no flag); a pure
     # read-only listing of FRIDAY + the eight least-privilege specialists.
     app.include_router(roster_router)
+    app.include_router(siri_router)
+    app.include_router(circle_router)
     # The 3D Studio (Phase 7) — always registered but self-guards on
     # FRIDAY_ENABLE_STUDIO (404 when off), so the offline default exposes no
     # studio surface. The StaticFiles mount is added below only when enabled.

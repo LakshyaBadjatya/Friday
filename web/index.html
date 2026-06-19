@@ -34,8 +34,12 @@
     #circle h3 { font-size: 1rem; margin: 1rem 0 0.4rem; }
     #groups-list { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.6rem 0; }
     .group-pill { padding: 0.4rem 0.7rem; }
-    #members { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.4rem 0; }
+    #members { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.4rem 0; }
     .member-pill { font-size: 0.85rem; padding: 0.25rem 0.6rem; border: 1px solid #8884; border-radius: 1rem; }
+    .member-row { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; font-size: 0.9rem; }
+    .member-name { font-weight: 600; }
+    .member-meta { color: #8889; font-size: 0.82rem; }
+    .member-map { font-size: 0.8rem; text-decoration: none; }
     #invite-out textarea { width: 100%; box-sizing: border-box; font-size: 0.8rem; }
     .messages { border: 1px solid #8884; border-radius: 0.6rem; padding: 0.6rem; height: 16rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.4rem; margin: 0.6rem 0; }
     .msg { display: flex; }
@@ -69,6 +73,9 @@
       <a href="https://friday-backend-oj8h.onrender.com/studio" target="_blank" rel="noopener">Studio</a>
       <a class="dl" href="./friday.shortcut" download="friday.shortcut">Download Siri Shortcut</a>
     </nav>
+    <div class="row">
+      <button id="siri-token" class="ghost">Copy my Siri token</button>
+    </div>
 
     <hr class="sep" />
     <section id="circle">

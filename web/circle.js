@@ -107,16 +107,56 @@ export function initCircle(auth, db) {
     });
   }
 
+  function localTimeLabel(tz) {
+    if (!tz) return "";
+    try {
+      const now = new Date();
+      const time = new Intl.DateTimeFormat(undefined, {
+        timeZone: tz,
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(now);
+      const hour = Number(
+        new Intl.DateTimeFormat("en-US", {
+          timeZone: tz,
+          hour: "numeric",
+          hour12: false,
+        }).format(now),
+      );
+      const asleep = hour >= 23 || hour < 7;
+      return `${time} their time${asleep ? " · 😴 likely asleep" : ""}`;
+    } catch {
+      return "";
+    }
+  }
+
   async function renderMembers(groupId) {
     const box = $("members");
     box.innerHTML = "";
     try {
       const members = await data.members(groupId);
       for (const m of members) {
-        const span = document.createElement("span");
-        span.className = "member-pill";
-        span.textContent = `${m.displayName}${m.role === "admin" ? " ★" : ""}`;
-        box.appendChild(span);
+        const row = document.createElement("div");
+        row.className = "member-row";
+        const name = document.createElement("div");
+        name.className = "member-name";
+        const dot = m.presence === "active" ? "🟢" : "⚪";
+        name.textContent = `${dot} ${m.displayName}${m.role === "admin" ? " ★" : ""}`;
+        row.appendChild(name);
+        const meta = document.createElement("div");
+        meta.className = "member-meta";
+        meta.textContent = localTimeLabel(m.tz);
+        row.appendChild(meta);
+        if (m.location && m.uid !== myUid()) {
+          const link = document.createElement("a");
+          link.className = "member-map";
+          link.href = `https://www.google.com/maps?q=${m.location.lat},${m.location.lng}`;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = "📍 map";
+          row.appendChild(link);
+        }
+        box.appendChild(row);
       }
     } catch (err) {
       box.textContent = "Couldn't load members: " + err.message;

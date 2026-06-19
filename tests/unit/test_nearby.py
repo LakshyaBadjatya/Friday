@@ -78,3 +78,68 @@ def test_classify_nearby_handles_garbage() -> None:
 
 def test_classify_nearby_no_llm() -> None:
     assert asyncio.run(nearby.classify_nearby(None, "food")) is None
+
+
+def test_looks_like_junk() -> None:
+    # OSM vandalism/test entries (no lowercase, short) are dropped...
+    assert nearby._looks_like_junk("MKLJFAL")
+    assert nearby._looks_like_junk("PA 1")
+    assert nearby._looks_like_junk("POI")
+    # ...real names are kept.
+    assert not nearby._looks_like_junk("Kota zoo")
+    assert not nearby._looks_like_junk("Seven Wonders Park")
+
+
+def test_attractions_lead_with_famous_places(monkeypatch) -> None:  # noqa: ANN001
+    # Wikipedia supplies famous, notable places; OSM adds junk + a colony park.
+    monkeypatch.setattr(
+        nearby, "_wikipedia_nearby", lambda lat, lon: [(0.4, "Umed Bhawan Palace")]
+    )
+    monkeypatch.setattr(
+        nearby,
+        "_overpass",
+        lambda f, lat, lon: [
+            {"lat": 25.2, "lon": 75.86, "tags": {"name": "MKLJFAL"}},
+            {"lat": 25.21, "lon": 75.87, "tags": {"name": "Chambal Garden"}},
+        ],
+    )
+    out = nearby.nearby_from_filter("[whatever]", "attractions", 25.21, 75.86)
+    assert out is not None
+    spoken, _share = out
+    assert "Umed Bhawan Palace" in spoken  # famous, nearest -> first
+    assert "Chambal Garden" in spoken
+    assert "MKLJFAL" not in spoken  # vandalism dropped
+
+
+def test_wikipedia_filters_admin_and_keeps_attractions(monkeypatch) -> None:  # noqa: ANN001
+    import json as _json
+
+    payload = _json.dumps(
+        {
+            "query": {
+                "geosearch": [
+                    {"title": "Garh Palace", "dist": 500.0},
+                    {"title": "Kota North Assembly constituency", "dist": 800.0},
+                    {"title": "Kota Junction railway station", "dist": 1900.0},
+                    {"title": "Some Residential Colony", "dist": 300.0},
+                ]
+            }
+        }
+    ).encode()
+
+    class _Resp:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *a):  # noqa: ANN002, ANN204
+            return False
+
+        def read(self):  # noqa: ANN201
+            return payload
+
+    monkeypatch.setattr(nearby.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    out = nearby._wikipedia_nearby(25.21, 75.86)
+    names = [n for _d, n in out]
+    assert "Garh Palace" in names  # attraction kept
+    assert all("constituency" not in n and "railway" not in n for n in names)
+    assert "Some Residential Colony" not in names  # no attraction keyword -> dropped

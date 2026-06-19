@@ -140,20 +140,42 @@ def nearby_reply(query: str, lat: float, lon: float) -> tuple[str, str] | None:
     return nearby_from_filter(filt, label, lat, lon)
 
 
-def nearby_from_filter(
-    filt: str, label: str, lat: float, lon: float
-) -> tuple[str, str] | None:
-    """Search Overpass for ``filt`` near ``lat``/``lon`` and format the reply.
+#: Labels that mean "sightseeing" — these pull famous places from Wikipedia, not
+#: just OSM tags (OSM is sparse and vandalised in many Indian cities).
+_ATTRACTION_LABELS = {"attractions", "sights"}
+_WIKI_API = "https://en.wikipedia.org/w/api.php"
+#: Wikipedia geosearch returns ALL notable articles nearby — drop the ones that
+#: aren't tourist attractions (admin areas, transport, institutions).
+_WIKI_DENY = re.compile(
+    r"constituency|railway station|\bjunction\b|assembly|lok sabha|vidhan|"
+    r"\bdistrict\b|tehsil|mandal|\bblock\b|airport|bus stand|bus station|"
+    r"universit|\bcollege\b|institute|\bschool\b|hospital|cantonment|\bward\b",
+    re.IGNORECASE,
+)
+#: Positive signal that a notable place is a real tourist attraction (so a famous
+#: palace/lake/fort is kept, while a residential colony or village is dropped).
+_ATTRACTION_HINT = re.compile(
+    r"palace|fort|mandir|temple|masjid|church|gurudwara|lake|sagar|jheel|talab|"
+    r"garden|udyaan|bagh|\bpark\b|museum|riverfront|mahal|garh|\bdam\b|barrage|"
+    r"zoo|wonder|haveli|fountain|memorial|monument|stadium|tomb|cenotaph|chhatri|"
+    r"\bgate\b|minar|mahadev|dham|fall|safari|sanctuary|view\s?point|ghat",
+    re.IGNORECASE,
+)
 
-    The shared back half of both the heuristic (:func:`nearby_reply`) and the AI
-    (:func:`classify_nearby`) paths, so both speak identically.
-    """
-    elements = _overpass(filt, lat, lon)
 
+def _looks_like_junk(name: str) -> bool:
+    """True for OSM vandalism/test names — short tokens with no lowercase letters
+    (e.g. ``POI``, ``MKLJFAL``, ``PA 1``, ``P 6``). Real names have lowercase."""
+    stripped = name.strip()
+    return len(stripped) <= 7 and not any(c.islower() for c in stripped)
+
+
+def _overpass_named(filt: str, lat: float, lon: float) -> list[tuple[float, str]]:
+    """Named OSM POIs for ``filt`` as ``(distance_km, name)``, junk filtered."""
     named: list[tuple[float, str]] = []
-    for el in elements:
+    for el in _overpass(filt, lat, lon):
         name = (el.get("tags") or {}).get("name")
-        if not name:
+        if not name or _looks_like_junk(str(name)):
             continue
         center = el if "lat" in el else el.get("center") or {}
         elat, elon = center.get("lat"), center.get("lon")
@@ -163,10 +185,66 @@ def nearby_from_filter(
             else 9999.0
         )
         named.append((dist, str(name)))
-    if not named:
+    return named
+
+
+def _wikipedia_nearby(lat: float, lon: float) -> list[tuple[float, str]]:
+    """Famous attraction-type places near ``lat``/``lon`` via Wikipedia geosearch.
+
+    Notability is the filter the user wants ("big attractions the city is famous
+    for") — every result has its own Wikipedia article. Admin/transport pages are
+    dropped and a positive attraction-keyword test keeps colonies/villages out.
+    """
+    url = (
+        f"{_WIKI_API}?action=query&list=geosearch&gscoord={lat}%7C{lon}"
+        "&gsradius=10000&gslimit=30&format=json"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "FridayAssistant/1.0 (near-me)"})
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 - degrade to empty
+        return []
+    results: list[tuple[float, str]] = []
+    for geo in (data.get("query", {}) or {}).get("geosearch", []):
+        title = str(geo.get("title", "")).strip()
+        if not title or _WIKI_DENY.search(title) or not _ATTRACTION_HINT.search(title):
+            continue
+        try:
+            dist_km = float(geo.get("dist", 9999.0)) / 1000.0
+        except (TypeError, ValueError):
+            dist_km = 9999.0
+        results.append((dist_km, title))
+    return results
+
+
+def nearby_from_filter(
+    filt: str, label: str, lat: float, lon: float
+) -> tuple[str, str] | None:
+    """Format the nearby reply, merging sources by distance.
+
+    Shared back half of the heuristic (:func:`nearby_reply`) and AI
+    (:func:`classify_nearby`) paths. For sightseeing it leads with Wikipedia's
+    famous places, then OSM; functional categories (food, fuel, …) use OSM only.
+    """
+    candidates: list[tuple[float, str]] = []
+    if label in _ATTRACTION_LABELS:
+        candidates.extend(_wikipedia_nearby(lat, lon))
+    candidates.extend(_overpass_named(filt, lat, lon))
+    if not candidates:
         return None
-    named.sort(key=lambda x: x[0])
-    top = [name for _d, name in named[:5]]
+
+    candidates.sort(key=lambda x: x[0])
+    top: list[str] = []
+    seen: set[str] = set()
+    for _dist, name in candidates:
+        key = name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        top.append(name)
+        if len(top) >= 6:
+            break
 
     maps = (
         f"https://www.google.com/maps/search/"

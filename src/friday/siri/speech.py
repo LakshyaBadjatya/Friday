@@ -25,6 +25,65 @@ _WHITESPACE = re.compile(r"\s+")
 #: Sentence-ending punctuation used to pick a clean truncation point.
 _SENTENCE_END = re.compile(r"[.!?]")
 
+# --- Spoken maths/science notation ------------------------------------------ #
+# So a formula is READ, not mangled: "E = mc²" -> "E equals m c squared", not
+# "E mc 2". Symbols map to their spoken names; powers become "squared"/"cubed"/
+# "to the power of N" for every other exponent.
+_SUPERSCRIPT = {
+    "⁰": "0", "¹": "1", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8",
+    "⁹": "9", "ⁿ": "n", "ⁱ": "i", "⁺": "plus", "⁻": "minus",
+}
+_SUBSCRIPT = {
+    "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4", "₅": "5", "₆": "6",
+    "₇": "7", "₈": "8", "₉": "9",
+}
+#: Single-character maths/science symbols -> spoken words (Greek + operators).
+_SYMBOLS = {
+    "√": " square root of ", "∛": " cube root of ", "±": " plus or minus ",
+    "∓": " minus or plus ", "×": " times ", "⋅": " times ", "·": " times ",
+    "÷": " divided by ", "≈": " approximately ", "≅": " approximately ",
+    "≠": " not equal to ", "≤": " less than or equal to ",
+    "≥": " greater than or equal to ", "≡": " is identical to ",
+    "∝": " proportional to ", "→": " gives ", "⇒": " implies ", "∞": " infinity ",
+    "∑": " the sum of ", "∏": " the product of ", "∫": " the integral of ",
+    "∂": " partial ", "∇": " del ", "°": " degrees ", "′": " prime ",
+    "α": " alpha ", "β": " beta ", "γ": " gamma ", "δ": " delta ", "Δ": " delta ",
+    "ε": " epsilon ", "ζ": " zeta ", "η": " eta ", "θ": " theta ", "κ": " kappa ",
+    "λ": " lambda ", "μ": " mu ", "ν": " nu ", "ξ": " xi ", "π": " pi ",
+    "ρ": " rho ", "σ": " sigma ", "Σ": " sigma ", "τ": " tau ", "φ": " phi ",
+    "ϕ": " phi ", "χ": " chi ", "ψ": " psi ", "ω": " omega ", "Ω": " omega ",
+}
+#: ``^2`` / ``^(n+1)`` / ``^9`` style powers.
+_CARET = re.compile(r"\^\(?\s*([A-Za-z0-9+\-*/. ]+?)\s*\)?(?=[\s,.;)\]]|$)")
+#: A run of unicode superscript characters (other than ² / ³, handled inline).
+_SUP_RUN = re.compile(r"[⁰¹⁴⁵⁶⁷⁸⁹ⁿⁱ⁺⁻]+")
+
+
+def _power_words(exponent: str) -> str:
+    exponent = exponent.strip()
+    if exponent == "2":
+        return " squared"
+    if exponent == "3":
+        return " cubed"
+    return f" to the power of {exponent}"
+
+
+def _spoken_math(text: str) -> str:
+    """Rewrite maths/science notation into words a TTS voice reads correctly."""
+    text = _CARET.sub(lambda m: _power_words(m.group(1)), text)
+    text = text.replace("²", " squared").replace("³", " cubed")
+    text = _SUP_RUN.sub(
+        lambda m: " to the power of "
+        + "".join(_SUPERSCRIPT.get(c, c) for c in m.group()),
+        text,
+    )
+    text = "".join(_SUBSCRIPT.get(ch, ch) for ch in text)
+    for symbol, word in _SYMBOLS.items():
+        text = text.replace(symbol, word)
+    # "=" reads as "equals" (almost always a formula in this context).
+    text = re.sub(r"\s*=\s*", " equals ", text)
+    return text
+
 
 def for_speech(text: str, max_chars: int = 600) -> str:
     """Return ``text`` reduced to a clean, bounded line suitable for TTS.
@@ -49,6 +108,9 @@ def for_speech(text: str, max_chars: int = 600) -> str:
     cleaned = " ".join(stripped_lines)
     cleaned = _LINK.sub(r"\1", cleaned)
     cleaned = _MARKUP.sub("", cleaned)
+    cleaned = _WHITESPACE.sub(" ", cleaned).strip()
+    # Read formulas/symbols as words ("x²" -> "x squared", "√" -> "square root of").
+    cleaned = _spoken_math(cleaned)
     cleaned = _WHITESPACE.sub(" ", cleaned).strip()
 
     if len(cleaned) <= max_chars:

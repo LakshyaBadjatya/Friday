@@ -107,6 +107,42 @@ def _creator_reply(query: str) -> str | None:
     return None
 
 
+#: Formula / theory / "explain" questions get a teach-me-simply instruction so the
+#: model defines symbols, gives intuition, and flags uncertainty instead of guessing.
+_TEACH_TRIGGERS = (
+    "formula",
+    "equation",
+    "theorem",
+    "theory",
+    "law of",
+    "principle",
+    "derive",
+    "derivation",
+    "prove",
+    "explain",
+    "definition",
+    "define ",
+    "concept",
+    "how does",
+    "why does",
+    "how do you calculate",
+)
+_TEACH_INSTR = (
+    " (Answer accurately and simply, in plain spoken words a beginner follows. If "
+    "there's a formula, state it naming each symbol in words like 'E equals m c "
+    "squared', say what each symbol means, and give a one-line intuition. Be precise; "
+    "if you're not certain, say so rather than guess.)"
+)
+
+
+def _augment_teaching(query: str) -> str:
+    """Append the explain-simply-and-accurately instruction to teaching questions."""
+    low = query.lower()
+    if any(trigger in low for trigger in _TEACH_TRIGGERS):
+        return query + _TEACH_INSTR
+    return query
+
+
 def _siri_enabled(request: Request) -> bool:
     """Whether the Siri surface is enabled, read off startup settings on app state."""
     settings = getattr(request.app.state, "settings", None)
@@ -281,7 +317,7 @@ async def siri_ask(request: Request) -> Any:
         logger.error("siri ask: orchestrator missing on app.state")
         return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
 
-    state = GraphState(session_id=session_id, user_input=query)
+    state = GraphState(session_id=session_id, user_input=_augment_teaching(query))
     try:
         result = await orchestrator.handle(state)
     except FridayError as exc:

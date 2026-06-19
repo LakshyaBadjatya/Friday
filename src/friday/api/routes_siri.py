@@ -146,6 +146,29 @@ def _caller_uid(request: Request) -> str | None:
     return uid if isinstance(uid, str) else None
 
 
+def _try_firestore_circle(request: Request, query: str) -> str | None:
+    """Act on the app's real Firestore as the caller (presence, reminders, nudges…).
+
+    Tried first when the bearer looks like a real Firebase credential (an ID-token
+    JWT or a long refresh token); short dev tokens are skipped so offline tests never
+    touch the network. ANY failure returns ``None`` so the request falls through to
+    the in-memory circle / orchestrator — the live endpoint can never break.
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    if token.count(".") != 2 and len(token) < 100:
+        return None  # not a plausible Firebase ID/refresh token (skip dev tokens)
+    try:
+        from friday.circle.siri_circle import handle as _handle  # noqa: PLC0415
+
+        return _handle(token, query, datetime.now(UTC))
+    except Exception:  # noqa: BLE001 - never break the live endpoint
+        logger.warning("siri firestore-circle path failed", exc_info=False)
+        return None
+
+
 def _try_circle(request: Request, query: str) -> str | None:
     """Handle a circle status intent if one is present and the caller is known.
 
@@ -185,6 +208,14 @@ async def siri_ask(request: Request) -> Any:
     if query.lower() in _PLACEHOLDER_LABELS:
         return _respond(
             _PLACEHOLDER_HINT, raw=_PLACEHOLDER_HINT, mode="hint", want_json=want_json
+        )
+
+    # Firestore-linked circle (acts on the app's real data as the caller) wins first
+    # when a real token is present; then the in-memory circle; else the orchestrator.
+    fs_reply = _try_firestore_circle(request, query)
+    if fs_reply is not None:
+        return _respond(
+            for_speech(fs_reply), raw=fs_reply, mode="circle", want_json=want_json
         )
 
     # Circle status intents ("what's X doing", "set my status…") win when the

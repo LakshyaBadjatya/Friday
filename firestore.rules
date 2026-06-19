@@ -94,6 +94,35 @@ service cloud.firestore {
                            ['senderUid', 'ciphertext', 'nonce', 'createdAt']);
         allow update, delete: if false;
       }
+
+      // --- Siri-written metadata: nudges, reminders, SOS alerts ---
+      // Members only; the author writes as themselves; append-only.
+      match /nudges/{nid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid) && request.resource.data.fromUid == uid();
+        allow update, delete: if false;
+      }
+      match /reminders/{rid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid) && request.resource.data.fromUid == uid();
+        allow update, delete: if false;
+      }
+      match /alerts/{aid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid) && request.resource.data.fromUid == uid();
+        allow update, delete: if false;
+      }
+
+      // --- Voice notes (plaintext, Siri-readable) ---
+      // Only allowed when the circle has opted in via `siriReadAloud` — that's the
+      // explicit, per-circle trade of E2EE for "Siri can read these aloud".
+      match /voicenotes/{vid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid)
+                      && request.resource.data.fromUid == uid()
+                      && get(/databases/$(database)/documents/groups/$(gid)).data.siriReadAloud == true;
+        allow update, delete: if false;
+      }
     }
 
     // --- Invites ---

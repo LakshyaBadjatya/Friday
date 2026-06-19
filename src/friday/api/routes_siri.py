@@ -352,13 +352,35 @@ async def siri_ask(request: Request) -> Any:
     return _respond(speech, raw=raw_text, mode=mode, want_json=want_json)
 
 
+def _discover_chat_id(token: str) -> str:
+    """Find the most recent chat that messaged the bot (so no chat_id env needed)."""
+    import json  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:  # noqa: S310
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return ""
+    for update in reversed(data.get("result", []) if isinstance(data, dict) else []):
+        chat = (update.get("message") or update.get("channel_post") or {}).get("chat", {})
+        if chat.get("id"):
+            return str(chat["id"])
+    return ""
+
+
 def _send_telegram(request: Request, text: str) -> bool:
-    """Send ``text`` to the configured Telegram chat; False if not set up/failed."""
+    """Send ``text`` to the configured (or auto-discovered) Telegram chat."""
     settings = getattr(request.app.state, "settings", None)
     secret = getattr(settings, "telegram_bot_token", None)
     chat_id = getattr(settings, "telegram_chat_id", "") or ""
     token = secret.get_secret_value() if secret is not None else ""
-    if not token or not chat_id:
+    if not token:
+        return False
+    if not chat_id:
+        chat_id = _discover_chat_id(token)  # whoever last messaged the bot
+    if not chat_id:
         return False
     import urllib.parse  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415

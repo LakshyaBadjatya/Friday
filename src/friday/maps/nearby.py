@@ -20,7 +20,12 @@ _OVERPASS = "https://overpass-api.de/api/interpreter"
 _TIMEOUT = 14
 _RADIUS_M = 7000
 
-_NEAR = re.compile(r"\b(near me|nearby|near here|around me|around here|close by|closest)\b")
+_NEAR = re.compile(
+    r"\b(near ?by|near me|near here|near my|near the|around me|around here|"
+    r"close by|closest|nearest|in the area|walking distance|close to me|"
+    r"by me|where can i|where to|find me a?|find a|show me|recommend|"
+    r"suggest|good places?|best places?|somewhere to|any good)\b"
+)
 
 #: query keyword -> (Overpass tag filter, spoken category label)
 _CATEGORIES: tuple[tuple[str, str, str], ...] = (
@@ -47,11 +52,31 @@ _CATEGORIES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+#: loose intent words -> a category keyword (so "I'm hungry" finds food, etc.)
+_INTENT_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("hungry", "eat", "food", "lunch", "dinner", "breakfast", "meal"), "food"),
+    (("thirsty", "coffee", "drink"), "cafe"),
+    (("sleep", "stay", "night", "room", "lodge"), "hotel"),
+    (("cash", "withdraw", "money"), "atm"),
+    (("sick", "doctor", "emergency", "clinic"), "hospital"),
+    (("medicine", "chemist", "drugstore"), "pharmacy"),
+    (("petrol", "diesel", "gas", "fuel", "refuel"), "fuel"),
+    (("pray", "worship", "darshan"), "temple"),
+    (("shopping", "buy"), "mall"),
+)
+
+
 def _category(low: str) -> tuple[str, str] | None:
     for keyword, filt, label in _CATEGORIES:
         if keyword in low:
             return filt, label
-    if any(w in low for w in ("places", "visit", "see", "explore", "things to do")):
+    for words, keyword in _INTENT_HINTS:
+        if any(w in low for w in words):
+            return _category(keyword)
+    if any(
+        w in low
+        for w in ("places", "visit", "see", "explore", "things to do", "sightsee", "tourist")
+    ):
         return _CATEGORIES[0][1], "attractions"
     return None
 
@@ -86,7 +111,12 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def nearby_reply(query: str, lat: float, lon: float) -> tuple[str, str] | None:
-    """Return ``(spoken, share_text)`` for a "… near me" query, or ``None``."""
+    """Return ``(spoken, share_text)`` for a "… near me" query, or ``None``.
+
+    Fast, network-free gate: the phrasing must read like a find-places request
+    (``_NEAR``) and name a recognisable category (``_category``). When neither
+    fires the caller can still fall back to :func:`classify_nearby` (AI).
+    """
     low = query.strip().lower()
     if not _NEAR.search(low):
         return None
@@ -94,6 +124,17 @@ def nearby_reply(query: str, lat: float, lon: float) -> tuple[str, str] | None:
     if category is None:
         return None
     filt, label = category
+    return nearby_from_filter(filt, label, lat, lon)
+
+
+def nearby_from_filter(
+    filt: str, label: str, lat: float, lon: float
+) -> tuple[str, str] | None:
+    """Search Overpass for ``filt`` near ``lat``/``lon`` and format the reply.
+
+    The shared back half of both the heuristic (:func:`nearby_reply`) and the AI
+    (:func:`classify_nearby`) paths, so both speak identically.
+    """
     elements = _overpass(filt, lat, lon)
 
     named: list[tuple[float, str]] = []
@@ -125,3 +166,71 @@ def nearby_reply(query: str, lat: float, lon: float) -> tuple[str, str] | None:
         + f"\n\nMap: {maps}"
     )
     return spoken, share
+
+
+#: AI category key -> (Overpass filter, spoken label). The model is constrained
+#: to these keys so the result is always a valid Overpass query.
+_FILTER_BY_KEY: dict[str, tuple[str, str]] = {
+    "tourist": (
+        '["tourism"~"attraction|museum|viewpoint|gallery|zoo|theme_park"]',
+        "attractions",
+    ),
+    "restaurant": ('["amenity"~"restaurant|fast_food"]', "places to eat"),
+    "cafe": ('["amenity"="cafe"]', "cafes"),
+    "hotel": ('["tourism"~"hotel|guest_house"]', "hotels"),
+    "atm": ('["amenity"="atm"]', "ATMs"),
+    "bank": ('["amenity"="bank"]', "banks"),
+    "hospital": ('["amenity"~"hospital|clinic|doctors"]', "hospitals"),
+    "pharmacy": ('["amenity"="pharmacy"]', "pharmacies"),
+    "fuel": ('["amenity"="fuel"]', "petrol pumps"),
+    "park": ('["leisure"="park"]', "parks"),
+    "temple": ('["amenity"="place_of_worship"]', "places of worship"),
+    "mall": ('["shop"="mall"]', "malls"),
+    "market": ('["amenity"="marketplace"]', "markets"),
+    "shop": ('["shop"]', "shops"),
+    "bar": ('["amenity"~"bar|pub"]', "bars"),
+}
+
+
+def _extract_json(text: str) -> dict[str, Any] | None:
+    """Pull the first ``{...}`` object out of a model reply (tolerates fences)."""
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        obj = json.loads(text[start : end + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+async def classify_nearby(llm: Any, query: str) -> tuple[str, str] | None:
+    """AI fallback: decide if ``query`` seeks nearby places and infer a category.
+
+    Returns ``(overpass_filter, spoken_label)`` to hand to
+    :func:`nearby_from_filter`, or ``None`` when it is not a find-places request
+    (or the model/parse fails — the caller then falls back to the assistant).
+    """
+    if llm is None:
+        return None
+    from friday.providers.llm import Message  # noqa: PLC0415
+
+    keys = ", ".join(_FILTER_BY_KEY)
+    prompt = (
+        "Decide if the user wants to FIND PLACES NEAR THEIR CURRENT LOCATION "
+        "(food, attractions, hotels, ATMs, fuel, hospitals, shops, etc.).\n"
+        f'User said: "{query}"\n'
+        "Reply with ONLY a compact JSON object and nothing else:\n"
+        '{"nearby": true|false, "category": "<KEY>"}\n'
+        f"where <KEY> is exactly one of: {keys}. "
+        'If it is not a find-nearby-places request, reply {"nearby": false}.'
+    )
+    try:
+        resp = await llm.complete([Message(role="user", content=prompt)])
+    except Exception:  # noqa: BLE001 - degrade to no-match
+        return None
+    data = _extract_json((getattr(resp, "text", "") or "").strip())
+    if not data or not data.get("nearby"):
+        return None
+    key = str(data.get("category", "")).strip().lower()
+    return _FILTER_BY_KEY.get(key)

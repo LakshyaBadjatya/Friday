@@ -642,6 +642,13 @@ class Settings(BaseSettings):
     # chat id. Empty => the share endpoint reports it's not set up (no integration).
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str = ""
+    # Daily digest (weather forecast + news headlines) pushed to Telegram by an
+    # external cron hitting ``GET /siri/digest?key=…&lat=…&lon=…`` (e.g. 6 AM).
+    # ``digest_key`` gates that endpoint (empty => open); ``digest_lat``/``lon``
+    # default the forecast location when the cron URL omits them.
+    digest_key: str = ""
+    digest_lat: str = ""
+    digest_lon: str = ""
 
     # --- 3D Studio (Phase 7; default off) ---
     # The whole studio feature (router + static UI) is gated behind this flag; off

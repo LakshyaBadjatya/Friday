@@ -2460,6 +2460,10 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     runtime = build_runtime(settings)
     app.state.settings = settings
     app.state.orchestrator = runtime.orchestrator
+    # The bare LLM provider, exposed for lightweight one-shot classifications that
+    # must not pay for the full orchestrator graph (Siri near-me auto-detect and
+    # the smart-Telegram summariser both call it directly).
+    app.state.llm = runtime.llm
     app.state.tracer = runtime.tracer
     app.state.audit = runtime.audit
     app.state.metrics = runtime.metrics

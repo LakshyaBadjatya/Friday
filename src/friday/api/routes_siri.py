@@ -194,6 +194,34 @@ async def _read_query(request: Request) -> str | None:
     return text.strip() or None
 
 
+async def _read_coords(request: Request) -> tuple[str | None, str | None]:
+    """GPS for "… near me": prefer ``?lat=&lon=``, else a JSON body's lat/lon.
+
+    The Shortcut can pass the device location either in the URL or — far more
+    reliably — as ``lat``/``lon`` fields next to ``q`` in the JSON body. Reading
+    both means the same shortcut works whichever way the user wired it. The body
+    is re-read here (Starlette caches it after ``_read_query``), so this is cheap.
+    """
+    lat = request.query_params.get("lat")
+    lon = request.query_params.get("lon")
+    if lat and lon:
+        return lat, lon
+    raw = await request.body()
+    if not raw or "application/json" not in request.headers.get("content-type", ""):
+        return None, None
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    blat = data.get("lat") or data.get("latitude")
+    blon = data.get("lon") or data.get("lng") or data.get("longitude")
+    if blat is None or blon is None:
+        return None, None
+    return str(blat), str(blon)
+
+
 def _respond(speech: str, *, raw: str, mode: str | None, want_json: bool) -> Any:
     """Render the spoken reply as plain text (default) or a JSON envelope."""
     if want_json:
@@ -296,21 +324,30 @@ async def siri_ask(request: Request) -> Any:
     if dist is not None:
         return _respond(dist, raw=dist, mode="distance", want_json=want_json)
 
-    # "… near me" — use the exact GPS the shortcut sent via ?lat=&lon=. The richer
-    # share text (with a map link) goes in `text` so the shortcut can push it to
-    # Telegram or the iOS share sheet.
-    lat = request.query_params.get("lat")
-    lon = request.query_params.get("lon")
+    # "… near me" — use the exact GPS the shortcut sent (URL ?lat=&lon= or body).
+    # The fast heuristic catches obvious phrasings; the AI classifier below catches
+    # anything else. The richer share text (with a map link) goes in `text` so the
+    # shortcut can push it to Telegram or the iOS share sheet.
+    lat, lon = await _read_coords(request)
     if lat and lon:
-        from friday.maps.nearby import nearby_reply  # noqa: PLC0415
+        from friday.maps.nearby import classify_nearby, nearby_from_filter, nearby_reply
 
         try:
-            near = nearby_reply(query, float(lat), float(lon))
+            flat, flon = float(lat), float(lon)
         except (TypeError, ValueError):
-            near = None
-        if near is not None:
-            spoken, share = near
-            return _respond(spoken, raw=share, mode="nearby", want_json=want_json)
+            flat = flon = None  # type: ignore[assignment]
+        if flat is not None and flon is not None:
+            near = nearby_reply(query, flat, flon)
+            if near is None:
+                # AI auto-guess: let the model decide if this is a nearby-places
+                # ask and infer the category, so no fixed phrase is required.
+                llm = getattr(request.app.state, "llm", None)
+                inferred = await classify_nearby(llm, query)
+                if inferred is not None:
+                    near = nearby_from_filter(inferred[0], inferred[1], flat, flon)
+            if near is not None:
+                spoken, share = near
+                return _respond(spoken, raw=share, mode="nearby", want_json=want_json)
 
     # Firestore-linked circle (acts on the app's real data as the caller) wins first
     # when a real token is present; then the in-memory circle; else the orchestrator.
@@ -398,17 +435,54 @@ def _send_telegram(request: Request, text: str) -> bool:
 
 @router.post("/siri/telegram", response_model=None)
 async def siri_telegram(request: Request) -> Any:
-    """Share text to Telegram (the shortcut calls this after you confirm 'yes')."""
+    """Smart-share to Telegram: the model extracts only the key content (never the
+    whole transcript). When the request is too vague it speaks a question instead
+    of sending, so the user can clarify."""
     if not _siri_enabled(request):
         return _disabled()
     text = await _read_query(request)
     if not text:
         return JSONResponse(status_code=400, content={"detail": "missing text"})
     want_json = request.query_params.get("format", "").lower() == "json"
-    ok = _send_telegram(request, text)
+
+    from friday.notify import smart_share  # noqa: PLC0415
+
+    llm = getattr(request.app.state, "llm", None)
+    message, question = await smart_share(llm, text)
+    if message is None:
+        ask = question or "What should I send, Boss?"
+        return _respond(ask, raw=ask, mode="telegram_ask", want_json=want_json)
+
+    ok = _send_telegram(request, message)
     msg = (
         "Shared on Telegram, Boss."
         if ok
         else "Telegram isn't set up yet — add the bot token and chat id."
     )
-    return _respond(msg, raw=msg, mode="telegram", want_json=want_json)
+    return _respond(msg, raw=message, mode="telegram", want_json=want_json)
+
+
+@router.api_route("/siri/digest", methods=["GET", "POST"], response_model=None)
+async def siri_digest(request: Request) -> Any:
+    """Build the daily brief (weather forecast + news) and push it to Telegram.
+
+    Designed for a free external cron (cron-job.org / UptimeRobot) to hit at 6 AM:
+    ``GET /siri/digest?key=…&lat=…&lon=…``. ``key`` must match ``digest_key`` when
+    that setting is non-empty (open otherwise); ``lat``/``lon`` set the forecast
+    location, defaulting to ``digest_lat``/``digest_lon``.
+    """
+    if not _siri_enabled(request):
+        return _disabled()
+    settings = getattr(request.app.state, "settings", None)
+    secret = getattr(settings, "digest_key", "") or ""
+    if secret and request.query_params.get("key", "") != secret:
+        return JSONResponse(status_code=403, content={"detail": "forbidden"})
+
+    lat = request.query_params.get("lat") or getattr(settings, "digest_lat", "") or ""
+    lon = request.query_params.get("lon") or getattr(settings, "digest_lon", "") or ""
+
+    from friday.notify import build_digest  # noqa: PLC0415
+
+    digest = await build_digest(str(lat), str(lon))
+    sent = _send_telegram(request, digest)
+    return JSONResponse(status_code=200, content={"sent": sent, "digest": digest})

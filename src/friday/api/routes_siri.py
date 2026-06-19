@@ -296,6 +296,22 @@ async def siri_ask(request: Request) -> Any:
     if dist is not None:
         return _respond(dist, raw=dist, mode="distance", want_json=want_json)
 
+    # "… near me" — use the exact GPS the shortcut sent via ?lat=&lon=. The richer
+    # share text (with a map link) goes in `text` so the shortcut can push it to
+    # Telegram or the iOS share sheet.
+    lat = request.query_params.get("lat")
+    lon = request.query_params.get("lon")
+    if lat and lon:
+        from friday.maps.nearby import nearby_reply  # noqa: PLC0415
+
+        try:
+            near = nearby_reply(query, float(lat), float(lon))
+        except (TypeError, ValueError):
+            near = None
+        if near is not None:
+            spoken, share = near
+            return _respond(spoken, raw=share, mode="nearby", want_json=want_json)
+
     # Firestore-linked circle (acts on the app's real data as the caller) wins first
     # when a real token is present; then the in-memory circle; else the orchestrator.
     fs_reply = _try_firestore_circle(request, query)
@@ -334,3 +350,43 @@ async def siri_ask(request: Request) -> Any:
     speech = for_speech(raw_text) or _FALLBACK_SPEECH
     mode = getattr(getattr(result, "mode", None), "value", None)
     return _respond(speech, raw=raw_text, mode=mode, want_json=want_json)
+
+
+def _send_telegram(request: Request, text: str) -> bool:
+    """Send ``text`` to the configured Telegram chat; False if not set up/failed."""
+    settings = getattr(request.app.state, "settings", None)
+    secret = getattr(settings, "telegram_bot_token", None)
+    chat_id = getattr(settings, "telegram_chat_id", "") or ""
+    token = secret.get_secret_value() if secret is not None else ""
+    if not token or not chat_id:
+        return False
+    import urllib.parse  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    body = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    try:
+        with urllib.request.urlopen(  # noqa: S310
+            urllib.request.Request(url, data=body), timeout=8
+        ) as resp:
+            return bool(200 <= resp.status < 300)
+    except Exception:  # noqa: BLE001 - never raise to the caller
+        return False
+
+
+@router.post("/siri/telegram", response_model=None)
+async def siri_telegram(request: Request) -> Any:
+    """Share text to Telegram (the shortcut calls this after you confirm 'yes')."""
+    if not _siri_enabled(request):
+        return _disabled()
+    text = await _read_query(request)
+    if not text:
+        return JSONResponse(status_code=400, content={"detail": "missing text"})
+    want_json = request.query_params.get("format", "").lower() == "json"
+    ok = _send_telegram(request, text)
+    msg = (
+        "Shared on Telegram, Boss."
+        if ok
+        else "Telegram isn't set up yet — add the bot token and chat id."
+    )
+    return _respond(msg, raw=msg, mode="telegram", want_json=want_json)

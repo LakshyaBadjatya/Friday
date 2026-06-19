@@ -171,6 +171,12 @@ class Settings(BaseSettings):
     # dependency); a missing CLI degrades cleanly with an install hint. Read-only:
     # never fabricates on error.
     enable_agent_reach: bool = False
+    # Auto-delegate (roster): when on, a turn that names no operator is routed to
+    # the specialist whose topic keyword it matches, so the right persona — and its
+    # own free model — answers. An explicit address (the ``→ EDITH`` chip / "EDITH,
+    # ...") always wins. Off by default so existing tests / un-rostered builds keep
+    # the prime-only path; explicit addressing works regardless of this flag.
+    enable_auto_delegate: bool = False
     # Base of the keyless Jina Reader endpoint; ``read_url`` issues
     # ``GET {base}{url}`` and expects clean markdown back.
     agent_reach_jina_base: str = "https://r.jina.ai/"
@@ -619,6 +625,23 @@ class Settings(BaseSettings):
     # state (Firebase ID-token verification replaces it later). Services fall back
     # to in-memory stores until a persistent backend is wired.
     enable_circle: bool = False
+    # Firebase service-account credential for the circle's persistent/authenticated
+    # backend. Either the raw service-account JSON (as a string) or a filesystem path
+    # to it. When set, the circle routes verify real Firebase ID tokens and persist
+    # to Firestore via ``firebase-admin``; when empty they fall back to in-memory
+    # stores + the dev bearer-token map. A secret — never logged or committed.
+    firebase_service_account: SecretStr | None = None
+    # Optional explicit Firebase project id (else inferred from the credential).
+    firebase_project_id: str = ""
+    # Browser origins allowed to call the API cross-origin (the web app on Vercel
+    # talks to this backend on Render). Comma-separated; ``*`` allows any. Auth is
+    # by bearer token (not cookies), so ``*`` is safe here — credentials are off.
+    cors_allow_origins: str = "*"
+    # Optional Telegram bot for sharing results (``POST /siri/telegram``). Both must
+    # be set for sharing to work: the bot token from @BotFather and the destination
+    # chat id. Empty => the share endpoint reports it's not set up (no integration).
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str = ""
 
     # --- 3D Studio (Phase 7; default off) ---
     # The whole studio feature (router + static UI) is gated behind this flag; off

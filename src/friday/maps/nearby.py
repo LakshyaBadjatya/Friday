@@ -16,7 +16,14 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-_OVERPASS = "https://overpass-api.de/api/interpreter"
+#: Overpass mirrors, tried in order until one returns results. The main instance
+#: rate-limits shared cloud IPs (Render) hard, so the mirrors are the difference
+#: between "quick results" and an occasional miss.
+_OVERPASS_ENDPOINTS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+)
 _TIMEOUT = 14
 _RADIUS_M = 7000
 
@@ -90,15 +97,21 @@ def _overpass(filt: str, lat: float, lon: float) -> list[dict[str, Any]]:
     )
     body = urllib.parse.urlencode({"data": query}).encode()
     # Overpass rejects header-less requests with 406; a User-Agent is required.
-    req = urllib.request.Request(
-        _OVERPASS, data=body, headers={"User-Agent": "FridayAssistant/1.0 (near-me)"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception:  # noqa: BLE001 - degrade to empty
-        return []
-    return data.get("elements", []) if isinstance(data, dict) else []
+    # Try each mirror until one yields results — one rate-limiting (429/504/empty)
+    # shouldn't sink the whole search.
+    for endpoint in _OVERPASS_ENDPOINTS:
+        req = urllib.request.Request(
+            endpoint, data=body, headers={"User-Agent": "FridayAssistant/1.0 (near-me)"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:  # noqa: BLE001 - try the next mirror
+            continue
+        elements = data.get("elements", []) if isinstance(data, dict) else []
+        if elements:
+            return elements
+    return []
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

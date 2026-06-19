@@ -112,6 +112,17 @@ def test_reminder_for_friend() -> None:
     assert any(p.endswith("/reminders") for p, _ in FakeFs.created)
 
 
+def test_weather_here_uses_wttr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sc, "_wttr", lambda _loc: "Sunny +31°C")
+    reply = _ask("what's the weather")
+    assert reply is not None and "31" in reply
+
+
+def test_weather_with_city_falls_through() -> None:
+    # "weather in kota" has an explicit place → orchestrator handles it, not us.
+    assert _ask("what's the weather in kota") is None
+
+
 def test_unknown_name_falls_through() -> None:
-    # "the weather" isn't a circle member → None so the orchestrator answers.
-    assert _ask("what's the weather doing") is None
+    # "the news" isn't a circle member → None so the orchestrator answers.
+    assert _ask("what's the news doing") is None

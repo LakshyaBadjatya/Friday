@@ -39,8 +39,23 @@ _MESSAGES = re.compile(
 )
 _STREAK = re.compile(r"\b(?:our streak|check[- ]?in streak|how'?s our streak|streak)\b")
 _CHECKIN = re.compile(r"\bcheck me in\b")
+_WEATHER = re.compile(r"\b(?:weather|temperature|forecast|raining|how (?:hot|cold))\b")
 _TIME = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b")
 _ME = {"me", "my", "myself", "i"}
+
+
+def _wttr(location: str) -> str | None:
+    """Keyless current-conditions from wttr.in, e.g. 'Sunny +31°C'. None on failure."""
+    import urllib.parse  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    url = "https://wttr.in/" + urllib.parse.quote(location) + "?format=%C+%t"
+    try:
+        with urllib.request.urlopen(url, timeout=6) as resp:  # noqa: S310
+            text = resp.read().decode("utf-8").strip()
+    except Exception:  # noqa: BLE001 - degrade to None
+        return None
+    return text or None
 
 
 def handle(token: str, query: str, now: datetime) -> str | None:
@@ -53,9 +68,11 @@ def handle(token: str, query: str, now: datetime) -> str | None:
     text = query.strip()
     low = text.lower().rstrip(".!?")
     intent = parse_intent(text)
+    weather_here = bool(_WEATHER.search(low)) and " in " not in low
 
     if not (
         intent
+        or weather_here
         or _SOS.search(low)
         or _REMIND.search(low)
         or _NUDGE.search(low)
@@ -75,6 +92,8 @@ def handle(token: str, query: str, now: datetime) -> str | None:
     id_token, uid = resolved
     ctx = _Ctx(FirestoreRest(id_token), uid, now)
 
+    if weather_here:
+        return ctx.weather()
     if _SOS.search(low):
         return ctx.sos()
     m = _REMIND.search(low)
@@ -219,6 +238,17 @@ class _Ctx:
             if self._fs.patch(f"groups/{gid}/members/{self._uid}", fields):
                 ok = True
         return ok
+
+    # -- weather (location-aware, keyless) -------------------------------- #
+    def weather(self) -> str | None:
+        member = self._self_member()
+        loc = member.get("location") if member else None
+        if isinstance(loc, dict) and loc.get("lat") is not None:
+            summary = _wttr(f"{loc['lat']},{loc['lng']}")
+            if summary:
+                return f"It's {summary} where you are, Boss."
+        summary = _wttr("")  # wttr.in IP default — better than failing outright
+        return f"It's {summary}, Boss." if summary else None
 
     # -- B: care & safety -------------------------------------------------- #
     def sos(self) -> str | None:

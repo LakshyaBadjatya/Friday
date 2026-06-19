@@ -153,32 +153,60 @@ def _reverse(lat: float, lon: float) -> str | None:
     return _reverse_nominatim(lat, lon) or _reverse_photon(lat, lon)
 
 
-def _via_cities(coords: list[Any]) -> list[str]:
-    """Two waypoint cities along the route, looked up IN PARALLEL via Photon.
+#: Strip administrative suffixes so a waypoint reads as a clean city name
+#: ("Thandla Tahsil" -> "Thandla", "Kota District" -> "Kota").
+_ADMIN_SUFFIX = re.compile(
+    r"\s+(tahsil|tehsil|taluka|taluk|mandal|district|division|block|sub-?district)\b.*$",
+    re.IGNORECASE,
+)
 
-    Photon is cloud-friendly and fast, so no Nominatim rate-limit sleep is needed
-    — the lookups run concurrently and are time-bounded so a slow network can't
-    stall the whole answer (which used to make Siri time out and give up).
+
+def _clean_city(name: str) -> str:
+    return _ADMIN_SUFFIX.sub("", name).strip(" ,") or name
+
+
+def _safe_result(future: concurrent.futures.Future[str | None]) -> str | None:
+    try:
+        return future.result(timeout=_REVERSE_TIMEOUT)
+    except Exception:  # noqa: BLE001 - a slow/failed lookup is just a miss
+        return None
+
+
+def _via_cities(coords: list[Any]) -> list[str]:
+    """Two waypoint CITIES along the route (not road names).
+
+    Each sample point is reverse-geocoded by Photon AND Nominatim *in parallel*
+    (first valid wins), so one provider rate-limiting Render no longer drops us to
+    raw road summaries. Every lookup runs concurrently and is time-bounded, so a
+    slow network can't stall the answer (which used to make Siri time out).
     """
     if len(coords) < 3:
         return []
     points: list[tuple[float, float]] = []
-    for fraction in (0.34, 0.66):
+    for fraction in (0.30, 0.55, 0.78):
         point = coords[int(len(coords) * fraction)]
         if isinstance(point, list) and len(point) >= 2:
             points.append((float(point[1]), float(point[0])))  # [lon, lat] -> lat, lon
     if not points:
         return []
     cities: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(_reverse_photon, lat, lon) for lat, lon in points]
-        for future in futures:
-            try:
-                city = future.result(timeout=_REVERSE_TIMEOUT)
-            except Exception:  # noqa: BLE001 - skip a slow/failed lookup
-                city = None
-            if city and city not in cities and "taluka" not in city.lower():
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2 * len(points)) as pool:
+        pairs = [
+            (
+                pool.submit(_reverse_photon, lat, lon),
+                pool.submit(_reverse_nominatim, lat, lon),
+            )
+            for lat, lon in points
+        ]
+        for f_photon, f_nominatim in pairs:
+            raw = _safe_result(f_photon) or _safe_result(f_nominatim)
+            if not raw:
+                continue
+            city = _clean_city(raw)
+            if city and city not in cities:
                 cities.append(city)
+            if len(cities) >= 2:
+                break
     return cities
 
 
@@ -227,12 +255,18 @@ def distance_reply(text: str) -> str | None:
     cities = _via_cities(coords)
     via_label = ", ".join(cities) if cities else summary
     via = f" via {via_label}" if via_label else ""
-    if seconds >= 3600:
-        hours = round(seconds / 3600)
-        when = f"around {hours} hour{'s' if hours != 1 else ''}"
-    else:
-        when = f"around {round(seconds / 60)} minutes"
     return (
         f"Fastest from {a_name.title()} to {b_name.title()} is about {km} kilometres"
-        f"{via} — total drive time {when}, Boss."
+        f"{via} — total drive time about {_format_duration(seconds)}, Boss."
     )
+
+
+def _format_duration(seconds: float) -> str:
+    """Precise spoken drive time: 'X hours Y minutes' (the free-flow OSRM estimate)."""
+    total_minutes = max(1, round(seconds / 60))
+    hours, minutes = divmod(total_minutes, 60)
+    h = f"{hours} hour{'s' if hours != 1 else ''}"
+    m = f"{minutes} minute{'s' if minutes != 1 else ''}"
+    if hours and minutes:
+        return f"{h} {m}"
+    return h if hours else m

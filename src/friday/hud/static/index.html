@@ -87,6 +87,13 @@
             <span class="ri-label">System</span>
           </button>
         </li>
+        <li>
+          <button type="button" class="rail-item" data-view="circle" role="tab"
+            aria-selected="false" id="nav-circle">
+            <span class="ri-glyph" aria-hidden="true">◍</span>
+            <span class="ri-label">Circle</span>
+          </button>
+        </li>
       </ul>
 
       <div class="rail-foot">
@@ -300,6 +307,45 @@
             <h2 class="panel-h">Activity</h2>
             <div id="log" aria-live="polite"></div>
           </section>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------------- CIRCLE ------ -->
+      <!-- The full circle client (create group / invite / E2EE chat / presence)
+           is the live web app, embedded so the HUD shows one real client. The
+           Siri command card alongside is the voice reference. -->
+      <section class="view" id="view-circle" data-view="circle"
+        role="tabpanel" aria-label="Circle" hidden>
+        <style>
+          #view-circle .circle-wrap { display: flex; gap: 14px; height: 100%; min-height: 70vh; }
+          #view-circle .circle-app { flex: 1 1 auto; border: 1px solid #2dd4bf33; border-radius: 12px; overflow: hidden; background: #0008; }
+          #view-circle .circle-app iframe { width: 100%; height: 100%; min-height: 70vh; border: 0; display: block; }
+          #view-circle .circle-aside { flex: 0 0 300px; max-width: 320px; }
+          #view-circle .cmd-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+          #view-circle .cmd-list li { font-size: 0.82rem; line-height: 1.35; color: #cdeefe; padding-bottom: 8px; border-bottom: 1px solid #2dd4bf1f; }
+          #view-circle .cmd-list b { color: #2dd4bf; }
+          @media (max-width: 860px) { #view-circle .circle-wrap { flex-direction: column; } #view-circle .circle-aside { flex-basis: auto; max-width: none; } }
+        </style>
+        <div class="circle-wrap">
+          <div class="circle-app">
+            <iframe title="Circle" src="https://web-lovat-phi-18.vercel.app"
+              loading="lazy" allow="geolocation"></iframe>
+          </div>
+          <aside class="circle-aside panel">
+            <h2 class="panel-h">Ask Friday <span class="panel-tag">voice</span></h2>
+            <p class="panel-hint">Say “Hey Siri, Ask Friday” then:</p>
+            <ul class="cmd-list">
+              <li><b>“what's &lt;name&gt; up to?”</b> — their status + local time</li>
+              <li><b>“is it a good time to call &lt;name&gt;?”</b></li>
+              <li><b>“set my status to …”</b></li>
+              <li><b>“let &lt;name&gt; know I got home safe”</b></li>
+              <li><b>“remind &lt;name&gt; to … at 9pm her time”</b></li>
+              <li><b>“send &lt;name&gt; a thinking-of-you”</b></li>
+              <li><b>“what's today's question?”</b></li>
+              <li><b>“do I have any messages?”</b></li>
+              <li><b>“SOS”</b> — alert your circle</li>
+            </ul>
+          </aside>
         </div>
       </section>
     </main>

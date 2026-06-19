@@ -283,7 +283,7 @@
   // ==========================================================================
   // VIEW ROUTER — one view visible at a time, hash-deep-linked.
   // ==========================================================================
-  var VIEWS = ["command", "arena", "agents", "memory", "system"];
+  var VIEWS = ["command", "arena", "agents", "memory", "system", "circle"];
   var currentView = "command";
   var loadedOnce = {};
 

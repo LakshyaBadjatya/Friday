@@ -48,17 +48,22 @@ def _geocode(place: str) -> tuple[float, float] | None:
     return None
 
 
-def _route(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float] | None:
-    # OSRM wants lon,lat order.
-    url = f"{_OSRM}/{a[1]},{a[0]};{b[1]},{b[0]}?overview=false"
+def _route(
+    a: tuple[float, float], b: tuple[float, float]
+) -> tuple[float, float, str] | None:
+    # OSRM wants lon,lat order. ``steps=true`` populates each leg's ``summary``
+    # (the major roads, e.g. "NH 52, NH 48") — our "via".
+    url = f"{_OSRM}/{a[1]},{a[0]};{b[1]},{b[0]}?overview=false&steps=true"
     data = _get(url)
     if isinstance(data, dict):
         routes = data.get("routes") or []
         if routes:
             dist = routes[0].get("distance")
             dur = routes[0].get("duration")
+            legs = routes[0].get("legs") or []
+            summary = str(legs[0].get("summary", "")) if legs else ""
             if isinstance(dist, int | float):
-                return float(dist), float(dur or 0)
+                return float(dist), float(dur or 0), summary
     return None
 
 
@@ -88,16 +93,17 @@ def distance_reply(text: str) -> str | None:
     routed = _route(a, b)
     if routed is None:
         return None
-    meters, seconds = routed
+    meters, seconds, summary = routed
     if not meters:
         return None
     km = round(meters / 1000)
+    via = f" via {summary}" if summary else ""
     if seconds >= 3600:
         hours = round(seconds / 3600)
-        when = f"about {hours} hour{'s' if hours != 1 else ''} of driving"
+        when = f"around {hours} hour{'s' if hours != 1 else ''}"
     else:
-        when = f"about {round(seconds / 60)} minutes by road"
+        when = f"around {round(seconds / 60)} minutes"
     return (
-        f"{a_name.title()} to {b_name.title()} is about {km} kilometres by road — "
-        f"{when}, Boss."
+        f"Fastest from {a_name.title()} to {b_name.title()} is about {km} kilometres"
+        f"{via} — total drive time {when}, Boss."
     )

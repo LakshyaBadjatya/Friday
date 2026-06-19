@@ -13,6 +13,7 @@ import {
   addDoc,
   query,
   orderBy,
+  limit,
   onSnapshot,
   serverTimestamp,
   Timestamp,
@@ -143,6 +144,38 @@ export function createCircleData(db) {
           /* permission/transient errors — UI shows the status separately */
         },
       );
+    },
+
+    // Live activity feed: the nudges / reminders / SOS alerts Siri writes. Merges
+    // three collections, newest first. Returns an unsubscribe.
+    subscribeActivity(gid, onItems) {
+      const kinds = ["nudges", "reminders", "alerts"];
+      const buckets = { nudges: [], reminders: [], alerts: [] };
+      const emit = () => {
+        const merged = [
+          ...buckets.nudges,
+          ...buckets.reminders,
+          ...buckets.alerts,
+        ]
+          .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+          .slice(0, 25);
+        onItems(merged);
+      };
+      const unsubs = kinds.map((k) =>
+        onSnapshot(
+          query(
+            collection(db, "groups", gid, k),
+            orderBy("createdAt", "desc"),
+            limit(20),
+          ),
+          (snap) => {
+            buckets[k] = snap.docs.map((d) => ({ id: d.id, group: k, ...d.data() }));
+            emit();
+          },
+          () => {},
+        ),
+      );
+      return () => unsubs.forEach((u) => u());
     },
   };
 }

@@ -47,6 +47,9 @@
     .bubble { max-width: 75%; padding: 0.4rem 0.7rem; border-radius: 0.8rem; background: #8882; word-break: break-word; }
     .msg.mine .bubble { background: #4f46e5; color: #fff; }
     #circle-status { min-height: 1.2rem; font-size: 0.9rem; }
+    .activity { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.4rem 0; }
+    .act-row { font-size: 0.88rem; padding: 0.4rem 0.6rem; border: 1px solid #8884; border-radius: 0.5rem; }
+    .act-row.act-sos { border-color: #dc2626; background: #dc26261a; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -98,6 +101,9 @@
           <textarea id="invite-link" readonly rows="3"></textarea>
           <button id="copy-invite" class="ghost">Copy link</button>
         </div>
+
+        <h3>Activity <span class="muted">· nudges &amp; alerts</span></h3>
+        <div id="activity" class="activity" aria-live="polite"></div>
 
         <h3>Chat <span class="muted">· end-to-end encrypted</span></h3>
         <div id="messages" class="messages" aria-live="polite"></div>

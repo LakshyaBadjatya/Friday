@@ -22,7 +22,15 @@ const $ = (id) => document.getElementById(id);
 
 export function initCircle(auth, db) {
   const data = createCircleData(db);
-  const state = { groupId: null, name: null, key: null, unsub: null, seen: new Set() };
+  const state = {
+    groupId: null,
+    name: null,
+    key: null,
+    unsub: null,
+    actUnsub: null,
+    seen: new Set(),
+    names: {},
+  };
 
   const me = () => auth.currentUser;
   const myUid = () => (me() ? me().uid : null);
@@ -84,6 +92,10 @@ export function initCircle(auth, db) {
       state.unsub();
       state.unsub = null;
     }
+    if (state.actUnsub) {
+      state.actUnsub();
+      state.actUnsub = null;
+    }
     state.groupId = groupId;
     state.name = name;
     state.seen = new Set();
@@ -104,6 +116,39 @@ export function initCircle(auth, db) {
     await renderMembers(groupId);
     state.unsub = data.subscribeMessages(groupId, (msg) => {
       if (state.groupId === groupId) renderMessage(msg);
+    });
+    startActivity(groupId);
+  }
+
+  function describeItem(item) {
+    const who = state.names[item.fromUid] || "Someone";
+    if (item.group === "alerts" || item.kind === "sos") {
+      return `🚨 ${who} needs help — SOS`;
+    }
+    if (item.group === "reminders") {
+      return `⏰ Reminder for ${state.names[item.toUid] || "you"}: ${item.text || ""}`;
+    }
+    if (item.kind === "relay") {
+      return `❓ ${who} asks: ${item.text || ""}`;
+    }
+    return `💭 ${who} is thinking of you`;
+  }
+
+  function startActivity(groupId) {
+    state.actUnsub = data.subscribeActivity(groupId, (items) => {
+      if (state.groupId !== groupId) return;
+      const box = $("activity");
+      box.innerHTML = "";
+      if (!items.length) {
+        box.innerHTML = "<p class='muted'>No nudges or alerts yet.</p>";
+        return;
+      }
+      for (const item of items) {
+        const row = document.createElement("div");
+        row.className = "act-row" + (item.group === "alerts" ? " act-sos" : "");
+        row.textContent = describeItem(item);
+        box.appendChild(row);
+      }
     });
   }
 
@@ -136,6 +181,7 @@ export function initCircle(auth, db) {
     try {
       const members = await data.members(groupId);
       for (const m of members) {
+        state.names[m.uid] = m.displayName;
         const row = document.createElement("div");
         row.className = "member-row";
         const name = document.createElement("div");

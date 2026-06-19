@@ -20,6 +20,7 @@ rejections keep their honest 401/429 from the middleware.
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
@@ -67,6 +68,43 @@ _PLACEHOLDER_HINT = (
     "Open the Friday shortcut, and in the Get Contents of URL step, delete the typed "
     "text in the request body and insert the blue Dictated Text variable instead."
 )
+
+#: "Who made you?" — answered instantly (no LLM) with a fixed name, varied wording.
+_CREATOR_TRIGGERS = (
+    "who made you",
+    "who created you",
+    "who built you",
+    "who designed you",
+    "who developed you",
+    "who programmed you",
+    "who coded you",
+    "who is your maker",
+    "who's your maker",
+    "who is your creator",
+    "who's your creator",
+    "who is your master",
+    "who's your master",
+    "who is your owner",
+    "who do you work for",
+    "who do you belong to",
+)
+_CREATOR_LINES = (
+    "My master is Lakshya Badjatya — he built me.",
+    "I was created by Lakshya Badjatya, Boss.",
+    "That'd be Lakshya Badjatya — my maker and master.",
+    "Lakshya Badjatya made me. I answer to him.",
+    "I'm Lakshya Badjatya's creation.",
+    "Crafted by Lakshya Badjatya, my one and only master.",
+    "Lakshya Badjatya is the mind behind me.",
+)
+
+
+def _creator_reply(query: str) -> str | None:
+    """A fast, varied 'who made you' answer (same name, different wording)."""
+    low = query.lower()
+    if any(trigger in low for trigger in _CREATOR_TRIGGERS):
+        return secrets.choice(_CREATOR_LINES)
+    return None
 
 
 def _siri_enabled(request: Request) -> bool:
@@ -209,6 +247,11 @@ async def siri_ask(request: Request) -> Any:
         return _respond(
             _PLACEHOLDER_HINT, raw=_PLACEHOLDER_HINT, mode="hint", want_json=want_json
         )
+
+    # "Who made you?" — answered instantly (no model, no network).
+    creator = _creator_reply(query)
+    if creator is not None:
+        return _respond(creator, raw=creator, mode="identity", want_json=want_json)
 
     # Firestore-linked circle (acts on the app's real data as the caller) wins first
     # when a real token is present; then the in-memory circle; else the orchestrator.

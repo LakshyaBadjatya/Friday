@@ -22,11 +22,23 @@ def test_non_distance_returns_none() -> None:
 def test_reply_formats_from_route(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(d, "_geocode", lambda _p: (1.0, 2.0))
     monkeypatch.setattr(
-        d, "_route", lambda _a, _b: (893000.0, 39600.0, "NH 52")
-    )  # 893km / 11h via NH 52
+        d, "_route", lambda _a, _b: (893000.0, 39600.0, "NH 52", [[1, 2], [3, 4], [5, 6]])
+    )
+    monkeypatch.setattr(d, "_via_cities", lambda _c: ["Indore", "Ujjain"])
     reply = d.distance_reply("distance between kota and bombay")
     assert reply is not None
-    assert "893 kilometres" in reply and "11 hours" in reply and "via NH 52" in reply
+    assert "893 kilometres" in reply and "11 hours" in reply
+    assert "via Indore, Ujjain" in reply
+
+
+def test_reply_falls_back_to_road_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(d, "_geocode", lambda _p: (1.0, 2.0))
+    monkeypatch.setattr(
+        d, "_route", lambda _a, _b: (251000.0, 10800.0, "NH 52", [[1, 2], [3, 4], [5, 6]])
+    )
+    monkeypatch.setattr(d, "_via_cities", lambda _c: [])  # reverse-geocode unavailable
+    reply = d.distance_reply("distance between kota and jaipur")
+    assert reply is not None and "via NH 52" in reply
 
 
 def test_reply_none_when_geocode_fails(monkeypatch: pytest.MonkeyPatch) -> None:

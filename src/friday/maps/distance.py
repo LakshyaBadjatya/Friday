@@ -15,6 +15,7 @@ import urllib.request
 from typing import Any
 
 _NOMINATIM = "https://nominatim.openstreetmap.org/search"
+_REVERSE = "https://nominatim.openstreetmap.org/reverse"
 _OSRM = "https://router.project-osrm.org/route/v1/driving"
 _UA = "FridayAssistant/1.0 (personal distance lookup)"
 _TIMEOUT = 8
@@ -50,10 +51,13 @@ def _geocode(place: str) -> tuple[float, float] | None:
 
 def _route(
     a: tuple[float, float], b: tuple[float, float]
-) -> tuple[float, float, str] | None:
-    # OSRM wants lon,lat order. ``steps=true`` populates each leg's ``summary``
-    # (the major roads, e.g. "NH 52, NH 48") — our "via".
-    url = f"{_OSRM}/{a[1]},{a[0]};{b[1]},{b[0]}?overview=false&steps=true"
+) -> tuple[float, float, str, list[Any]] | None:
+    # OSRM wants lon,lat order. ``steps=true`` gives each leg's road ``summary``
+    # (fallback "via"); the simplified geojson geometry is sampled for via-cities.
+    url = (
+        f"{_OSRM}/{a[1]},{a[0]};{b[1]},{b[0]}"
+        "?overview=simplified&geometries=geojson&steps=true"
+    )
     data = _get(url)
     if isinstance(data, dict):
         routes = data.get("routes") or []
@@ -62,9 +66,41 @@ def _route(
             dur = routes[0].get("duration")
             legs = routes[0].get("legs") or []
             summary = str(legs[0].get("summary", "")) if legs else ""
+            geometry = routes[0].get("geometry") or {}
+            coords = geometry.get("coordinates", []) if isinstance(geometry, dict) else []
             if isinstance(dist, int | float):
-                return float(dist), float(dur or 0), summary
+                return float(dist), float(dur or 0), summary, list(coords)
     return None
+
+
+def _reverse(lat: float, lon: float) -> str | None:
+    """Reverse-geocode a point to a city/town name (OSM Nominatim)."""
+    query = urllib.parse.urlencode(
+        {"lat": lat, "lon": lon, "format": "json", "zoom": "10"}
+    )
+    data = _get(f"{_REVERSE}?{query}")
+    if isinstance(data, dict):
+        address = data.get("address") or {}
+        for key in ("city", "town", "municipality", "village", "state_district", "county"):
+            value = address.get(key)
+            if value:
+                return str(value)
+    return None
+
+
+def _via_cities(coords: list[Any]) -> list[str]:
+    """Reverse-geocode a couple of points along the route into distinct city names."""
+    if len(coords) < 3:
+        return []
+    cities: list[str] = []
+    for fraction in (0.34, 0.66):
+        point = coords[int(len(coords) * fraction)]
+        if not isinstance(point, list) or len(point) < 2:
+            continue
+        city = _reverse(float(point[1]), float(point[0]))  # [lon, lat]
+        if city and city not in cities:
+            cities.append(city)
+    return cities
 
 
 def _places(text: str) -> tuple[str, str] | None:
@@ -93,11 +129,13 @@ def distance_reply(text: str) -> str | None:
     routed = _route(a, b)
     if routed is None:
         return None
-    meters, seconds, summary = routed
+    meters, seconds, summary, coords = routed
     if not meters:
         return None
     km = round(meters / 1000)
-    via = f" via {summary}" if summary else ""
+    cities = _via_cities(coords)
+    via_label = ", ".join(cities) if cities else summary
+    via = f" via {via_label}" if via_label else ""
     if seconds >= 3600:
         hours = round(seconds / 3600)
         when = f"around {hours} hour{'s' if hours != 1 else ''}"

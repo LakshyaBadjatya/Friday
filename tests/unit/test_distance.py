@@ -41,6 +41,15 @@ def test_reply_falls_back_to_road_summary(monkeypatch: pytest.MonkeyPatch) -> No
     assert reply is not None and "via NH 52" in reply
 
 
-def test_reply_none_when_geocode_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reply_graceful_when_geocode_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A distance query that can't be grounded must NOT return None (which would
+    # let the LLM hallucinate a wrong number) — it returns a graceful message.
     monkeypatch.setattr(d, "_geocode", lambda _p: None)
-    assert d.distance_reply("distance between nowhere and elsewhere") is None
+    reply = d.distance_reply("distance between nowhere and elsewhere")
+    assert reply is not None
+    assert "couldn't pull up" in reply
+
+
+def test_non_distance_still_returns_none() -> None:
+    # Non-distance text yields None so other handlers/LLM take it.
+    assert d.distance_reply("what's the weather like") is None

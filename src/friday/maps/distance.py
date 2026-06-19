@@ -8,9 +8,9 @@ any miss returns ``None`` so the caller falls back to the assistant.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
-import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -18,12 +18,25 @@ from typing import Any
 _NOMINATIM = "https://nominatim.openstreetmap.org/search"
 _NOM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
 # Photon (komoot) is OSM-based, keyless, and far more tolerant of cloud-host IPs
-# than Nominatim's reverse endpoint (which rate-limits/blocks Render), so the
-# via-city lookups actually succeed in production.
+# than Nominatim (which rate-limits/blocks Render). Used as a forward-geocode
+# fallback AND for via-city reverse lookups so both succeed in production.
 _PHOTON = "https://photon.komoot.io/reverse"
+_PHOTON_SEARCH = "https://photon.komoot.io/api"
 _OSRM = "https://router.project-osrm.org/route/v1/driving"
 _UA = "FridayAssistant/1.0 (personal distance lookup)"
-_TIMEOUT = 8
+_TIMEOUT = 6
+_REVERSE_TIMEOUT = 4
+
+#: In-process geocode cache so repeated lookups (same cities) are instant.
+_GEO_CACHE: dict[str, tuple[float, float] | None] = {}
+
+#: Spoken when a query IS a distance ask but can't be grounded. Returned instead
+#: of None so the request never falls through to the LLM, which would otherwise
+#: hallucinate a wrong number (e.g. "Kota to Vapi = 63 km" — it's ~760 km).
+_DISTANCE_FAIL = (
+    "I couldn't pull up that exact route just now, Boss — the map service was slow. "
+    "Give me a moment and ask again."
+)
 
 # "distance between A and B", "distance from A to B", "distance A to B",
 # "how far is A from B", "how far A to B".
@@ -43,7 +56,7 @@ def _get(url: str) -> Any:
         return None
 
 
-def _geocode(place: str) -> tuple[float, float] | None:
+def _geocode_nominatim(place: str) -> tuple[float, float] | None:
     query = urllib.parse.urlencode({"q": place, "format": "json", "limit": 1})
     data = _get(f"{_NOMINATIM}?{query}")
     if isinstance(data, list) and data:
@@ -52,6 +65,33 @@ def _geocode(place: str) -> tuple[float, float] | None:
         except (KeyError, ValueError, TypeError):
             return None
     return None
+
+
+def _geocode_photon(place: str) -> tuple[float, float] | None:
+    """Forward-geocode via Photon — the cloud-friendly fallback when Nominatim
+    rate-limits Render (which is why distances were falling through to the LLM)."""
+    query = urllib.parse.urlencode({"q": place, "limit": 1})
+    data = _get(f"{_PHOTON_SEARCH}?{query}")
+    if isinstance(data, dict):
+        features = data.get("features") or []
+        if features:
+            coords = (features[0].get("geometry") or {}).get("coordinates") or []
+            if len(coords) >= 2:
+                try:
+                    return float(coords[1]), float(coords[0])  # [lon, lat] -> lat, lon
+                except (ValueError, TypeError):
+                    return None
+    return None
+
+
+def _geocode(place: str) -> tuple[float, float] | None:
+    """Locate ``place`` (Nominatim, then Photon), cached across requests."""
+    key = place.strip().lower()
+    if key in _GEO_CACHE:
+        return _GEO_CACHE[key]
+    result = _geocode_nominatim(place) or _geocode_photon(place)
+    _GEO_CACHE[key] = result
+    return result
 
 
 def _route(
@@ -114,22 +154,31 @@ def _reverse(lat: float, lon: float) -> str | None:
 
 
 def _via_cities(coords: list[Any]) -> list[str]:
-    """Reverse-geocode two points along the route into distinct major-city names.
+    """Two waypoint cities along the route, looked up IN PARALLEL via Photon.
 
-    A short pause before each lookup respects Nominatim's ~1 req/sec limit (its
-    rate-limiting from cloud IPs was why this fell back to road names before).
+    Photon is cloud-friendly and fast, so no Nominatim rate-limit sleep is needed
+    — the lookups run concurrently and are time-bounded so a slow network can't
+    stall the whole answer (which used to make Siri time out and give up).
     """
     if len(coords) < 3:
         return []
-    cities: list[str] = []
+    points: list[tuple[float, float]] = []
     for fraction in (0.34, 0.66):
-        time.sleep(1.1)
         point = coords[int(len(coords) * fraction)]
-        if not isinstance(point, list) or len(point) < 2:
-            continue
-        city = _reverse(float(point[1]), float(point[0]))  # [lon, lat]
-        if city and city not in cities and "taluka" not in city.lower():
-            cities.append(city)
+        if isinstance(point, list) and len(point) >= 2:
+            points.append((float(point[1]), float(point[0])))  # [lon, lat] -> lat, lon
+    if not points:
+        return []
+    cities: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_reverse_photon, lat, lon) for lat, lon in points]
+        for future in futures:
+            try:
+                city = future.result(timeout=_REVERSE_TIMEOUT)
+            except Exception:  # noqa: BLE001 - skip a slow/failed lookup
+                city = None
+            if city and city not in cities and "taluka" not in city.lower():
+                cities.append(city)
     return cities
 
 
@@ -146,22 +195,34 @@ def _places(text: str) -> tuple[str, str] | None:
 
 
 def distance_reply(text: str) -> str | None:
-    """A grounded spoken distance answer, or ``None`` if it isn't a distance query
-    (or a place couldn't be located / routed)."""
+    """A grounded spoken distance answer.
+
+    Returns ``None`` only when the text is NOT a distance query (so other handlers
+    take it). When it IS a distance query but can't be grounded, returns a
+    graceful message — never ``None`` — so it never falls through to the LLM,
+    which would invent a wrong number.
+    """
     places = _places(text)
     if places is None:
         return None
     a_name, b_name = places
-    a = _geocode(a_name)
-    b = _geocode(b_name)
+    # Geocode both endpoints concurrently (each tries Nominatim then Photon).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        fa = pool.submit(_geocode, a_name)
+        fb = pool.submit(_geocode, b_name)
+        try:
+            a = fa.result(timeout=_TIMEOUT * 2 + 1)
+            b = fb.result(timeout=_TIMEOUT * 2 + 1)
+        except Exception:  # noqa: BLE001 - treat a stuck lookup as a miss
+            return _DISTANCE_FAIL
     if a is None or b is None:
-        return None
+        return _DISTANCE_FAIL
     routed = _route(a, b)
     if routed is None:
-        return None
+        return _DISTANCE_FAIL
     meters, seconds, summary, coords = routed
     if not meters:
-        return None
+        return _DISTANCE_FAIL
     km = round(meters / 1000)
     cities = _via_cities(coords)
     via_label = ", ".join(cities) if cities else summary

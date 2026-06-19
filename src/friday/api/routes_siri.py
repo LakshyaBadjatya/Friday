@@ -143,6 +143,49 @@ def _augment_teaching(query: str) -> str:
     return query
 
 
+#: Appended to the persona for the fast voice path so replies are short and speakable.
+_VOICE_RULES = (
+    "\n\nYou are answering by VOICE through Siri. Reply in 1-4 short sentences of "
+    "plain spoken text — no markdown, no bullet lists, no headings, no code blocks. "
+    "Address the user as 'Boss'. Be accurate and direct; if you're unsure, say so "
+    "briefly rather than guessing. For a formula or concept, state it, then give a "
+    "one-line plain-English explanation."
+)
+
+
+async def _fast_answer(request: Request, query: str) -> str | None:
+    """A single persona'd LLM call — the low-latency voice path.
+
+    Skips the full orchestrator graph (routing, memory, optional critic re-pass,
+    confidence scoring), which is several steps and sometimes a second model call.
+    Reuses the live FRIDAY persona for voice consistency, falling back to a minimal
+    one. Returns ``None`` on any failure so the caller drops to the orchestrator.
+    """
+    llm = getattr(request.app.state, "llm", None)
+    if llm is None:
+        return None
+    from friday.providers.llm import Message  # noqa: PLC0415
+
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    persona = "You are FRIDAY, a sharp, warm personal AI assistant."
+    getter = getattr(orchestrator, "_persona_text", None)
+    if callable(getter):
+        try:
+            persona = getter() or persona
+        except Exception:  # noqa: BLE001 - fall back to the minimal persona
+            pass
+    try:
+        resp = await llm.complete(
+            [
+                Message(role="system", content=persona + _VOICE_RULES),
+                Message(role="user", content=_augment_teaching(query)),
+            ]
+        )
+    except Exception:  # noqa: BLE001 - drop to the orchestrator
+        return None
+    return (getattr(resp, "text", "") or "").strip() or None
+
+
 def _siri_enabled(request: Request) -> bool:
     """Whether the Siri surface is enabled, read off startup settings on app state."""
     settings = getattr(request.app.state, "settings", None)
@@ -364,6 +407,16 @@ async def siri_ask(request: Request) -> Any:
         return _respond(
             for_speech(circle_reply), raw=circle_reply, mode="circle", want_json=want_json
         )
+
+    # Fast voice path: one persona'd LLM call instead of the full orchestrator graph
+    # (routing, memory, optional critic re-pass, confidence) — much lower latency.
+    # Falls through to the orchestrator below when it yields nothing. Kill-switch:
+    # FRIDAY_SIRI_FAST_PATH=false.
+    settings = getattr(request.app.state, "settings", None)
+    if getattr(settings, "siri_fast_path", True):
+        fast = await _fast_answer(request, query)
+        if fast:
+            return _respond(for_speech(fast), raw=fast, mode="fast", want_json=want_json)
 
     orchestrator = getattr(request.app.state, "orchestrator", None)
     if orchestrator is None or not hasattr(orchestrator, "handle"):

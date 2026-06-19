@@ -618,6 +618,10 @@ class Settings(BaseSettings):
     # same orchestrator as ``/chat``. Public/tunnelled deployments MUST pair this
     # with ``require_auth`` + an ``api_keys`` token (the route has full power).
     enable_siri: bool = False
+    # Fast voice path for ``/siri/ask``: answer general questions with a single
+    # persona'd LLM call instead of the full orchestrator graph (much lower latency
+    # for Siri). On by default; set false to always use the orchestrator.
+    siri_fast_path: bool = True
 
     # --- Circle (friends groups; default off) ---
     # Gates the ``/circle`` REST surface (groups, invites, members, status). Off by

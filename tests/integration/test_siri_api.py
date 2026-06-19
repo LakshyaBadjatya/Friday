@@ -169,3 +169,46 @@ def test_siri_ask_requires_bearer_when_auth_on(
     assert no_key.status_code == 401
     assert with_key.status_code == 200
     assert with_key.text == "hi"
+
+
+class _StubLLM:
+    """Returns a fixed completion — used to exercise the fast voice path."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    async def complete(self, messages, tools=None, *, model=None):  # noqa: ANN001, ANN002
+        from friday.providers.llm import LLMResponse
+
+        return LLMResponse(text=self._text)
+
+
+def test_siri_fast_path_answers_without_orchestrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    get_settings.cache_clear()
+    orch = _FakeOrchestrator("from orchestrator")
+    with TestClient(create_app()) as client:
+        client.app.state.llm = _StubLLM("Paris is the capital, Boss.")
+        client.app.state.orchestrator = orch
+        resp = client.post("/siri/ask?format=json", json={"q": "capital of france"})
+    body = resp.json()
+    assert body["mode"] == "fast"
+    assert "Paris" in body["speak"]
+    assert orch.seen == []  # the orchestrator was bypassed for speed
+
+
+def test_siri_fast_path_kill_switch_uses_orchestrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    monkeypatch.setenv("FRIDAY_SIRI_FAST_PATH", "false")
+    get_settings.cache_clear()
+    orch = _FakeOrchestrator("from orchestrator")
+    with TestClient(create_app()) as client:
+        client.app.state.llm = _StubLLM("should be ignored")
+        client.app.state.orchestrator = orch
+        resp = client.post("/siri/ask?q=capital of france")
+    assert resp.text == "from orchestrator"
+    assert orch.seen  # the orchestrator handled the turn

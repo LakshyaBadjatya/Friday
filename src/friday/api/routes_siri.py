@@ -253,6 +253,13 @@ async def siri_ask(request: Request) -> Any:
     if creator is not None:
         return _respond(creator, raw=creator, mode="identity", want_json=want_json)
 
+    # Distance queries — geocoded + routed via OpenStreetMap (computed, not guessed).
+    from friday.maps.distance import distance_reply  # noqa: PLC0415
+
+    dist = distance_reply(query)
+    if dist is not None:
+        return _respond(dist, raw=dist, mode="distance", want_json=want_json)
+
     # Firestore-linked circle (acts on the app's real data as the caller) wins first
     # when a real token is present; then the in-memory circle; else the orchestrator.
     fs_reply = _try_firestore_circle(request, query)

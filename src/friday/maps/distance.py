@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
 
 _NOMINATIM = "https://nominatim.openstreetmap.org/search"
-_REVERSE = "https://nominatim.openstreetmap.org/reverse"
+_NOM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
+# Photon (komoot) is OSM-based, keyless, and far more tolerant of cloud-host IPs
+# than Nominatim's reverse endpoint (which rate-limits/blocks Render), so the
+# via-city lookups actually succeed in production.
+_PHOTON = "https://photon.komoot.io/reverse"
 _OSRM = "https://router.project-osrm.org/route/v1/driving"
 _UA = "FridayAssistant/1.0 (personal distance lookup)"
 _TIMEOUT = 8
@@ -73,32 +78,57 @@ def _route(
     return None
 
 
-def _reverse(lat: float, lon: float) -> str | None:
-    """Reverse-geocode a point to a city/town name (OSM Nominatim)."""
+def _reverse_nominatim(lat: float, lon: float) -> str | None:
+    """Nominatim reverse at city zoom — returns the MAJOR city/district of a point."""
     query = urllib.parse.urlencode(
         {"lat": lat, "lon": lon, "format": "json", "zoom": "10"}
     )
-    data = _get(f"{_REVERSE}?{query}")
+    data = _get(f"{_NOM_REVERSE}?{query}")
     if isinstance(data, dict):
         address = data.get("address") or {}
-        for key in ("city", "town", "municipality", "village", "state_district", "county"):
+        for key in ("city", "town", "state_district", "municipality", "county"):
             value = address.get(key)
             if value:
                 return str(value)
     return None
 
 
+def _reverse_photon(lat: float, lon: float) -> str | None:
+    """Photon reverse — cloud-friendly fallback (nearest named place)."""
+    query = urllib.parse.urlencode({"lat": lat, "lon": lon})
+    data = _get(f"{_PHOTON}?{query}")
+    if isinstance(data, dict):
+        features = data.get("features") or []
+        if features:
+            props = features[0].get("properties") or {}
+            for key in ("city", "county", "district", "name"):
+                value = props.get(key)
+                if value:
+                    return str(value)
+    return None
+
+
+def _reverse(lat: float, lon: float) -> str | None:
+    """Best-effort city for a point: Nominatim (major city), else Photon."""
+    return _reverse_nominatim(lat, lon) or _reverse_photon(lat, lon)
+
+
 def _via_cities(coords: list[Any]) -> list[str]:
-    """Reverse-geocode a couple of points along the route into distinct city names."""
+    """Reverse-geocode two points along the route into distinct major-city names.
+
+    A short pause before each lookup respects Nominatim's ~1 req/sec limit (its
+    rate-limiting from cloud IPs was why this fell back to road names before).
+    """
     if len(coords) < 3:
         return []
     cities: list[str] = []
     for fraction in (0.34, 0.66):
+        time.sleep(1.1)
         point = coords[int(len(coords) * fraction)]
         if not isinstance(point, list) or len(point) < 2:
             continue
         city = _reverse(float(point[1]), float(point[0]))  # [lon, lat]
-        if city and city not in cities:
+        if city and city not in cities and "taluka" not in city.lower():
             cities.append(city)
     return cities
 

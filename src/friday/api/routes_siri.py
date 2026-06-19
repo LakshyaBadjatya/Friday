@@ -240,6 +240,9 @@ async def siri_ask(request: Request) -> Any:
             extra={"error_type": type(exc).__name__},
         )
         return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
+    except Exception:  # noqa: BLE001 - Siri must never read a raw 500 to the user
+        logger.exception("siri ask: unexpected error; speaking a graceful fallback")
+        return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
 
     raw_text = getattr(result, "response", None) or ""
     speech = for_speech(raw_text) or _FALLBACK_SPEECH

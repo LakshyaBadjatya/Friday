@@ -44,15 +44,36 @@ _ME = {"me", "my", "myself", "i"}
 
 
 def handle(token: str, query: str, now: datetime) -> str | None:
-    """Resolve the caller and act on ``query`` against their Firestore; else None."""
+    """Act on ``query`` against the caller's Firestore; ``None`` to fall through.
+
+    Classifies with cheap regex/parse FIRST and only exchanges the token + touches
+    Firestore when it's actually a circle intent — so non-circle queries (weather,
+    general chat) skip the network entirely and stay as fast as the plain assistant.
+    """
+    text = query.strip()
+    low = text.lower().rstrip(".!?")
+    intent = parse_intent(text)
+
+    if not (
+        intent
+        or _SOS.search(low)
+        or _REMIND.search(low)
+        or _NUDGE.search(low)
+        or _NUDGE2.search(low)
+        or _DAILY_ANSWER.search(low)
+        or _DAILY_ASK.search(low)
+        or _MESSAGES.search(low)
+        or _CHECKIN.search(low)
+        or _STREAK.search(low)
+        or _RELAY.search(low)
+    ):
+        return None
+
     resolved = resolve_token(token)
     if resolved is None:
         return None
     id_token, uid = resolved
     ctx = _Ctx(FirestoreRest(id_token), uid, now)
-
-    text = query.strip()
-    low = text.lower().rstrip(".!?")
 
     if _SOS.search(low):
         return ctx.sos()

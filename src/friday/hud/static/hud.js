@@ -14,8 +14,9 @@
   heartbeat keeps the connection pill honest everywhere. Every optional endpoint
   degrades gracefully — a 404 quietly hides its panel instead of crashing.
 
-  API BASE is configurable: ?api=<url> in the page URL (or window.FRIDAY_API_BASE)
-  points every fetch at a remote backend; default is same-origin ("").
+  API BASE defaults to the live Render backend, so even a locally-served HUD
+  drives the one real backend. Override per-load with ?api=<url> in the page URL
+  (or window.FRIDAY_API_BASE) — e.g. ?api=http://localhost:8800 for local dev.
 */
 
 (function () {
@@ -94,13 +95,19 @@
   }
 
   // --- API base (configurable) ----------------------------------------------
+  // FRIDAY's canonical backend (Render). The HUD points here by DEFAULT — even
+  // when this page is opened from localhost — so a locally-served HUD still
+  // drives the one live backend instead of a same-origin dev server. Override
+  // per-load with ?api=<url> or by setting window.FRIDAY_API_BASE before this
+  // script (e.g. ?api=http://localhost:8800 to target a local backend on purpose).
+  var DEFAULT_API_BASE = "https://friday-backend-oj8h.onrender.com";
   function resolveApiBase() {
-    var base = "";
+    var base = DEFAULT_API_BASE;
     try {
       var params = new URLSearchParams(window.location.search);
-      base = params.get("api") || window.FRIDAY_API_BASE || "";
+      base = params.get("api") || window.FRIDAY_API_BASE || DEFAULT_API_BASE;
     } catch (err) {
-      base = window.FRIDAY_API_BASE || "";
+      base = window.FRIDAY_API_BASE || DEFAULT_API_BASE;
     }
     return String(base).replace(/\/+$/, "");
   }
@@ -283,7 +290,7 @@
   // ==========================================================================
   // VIEW ROUTER — one view visible at a time, hash-deep-linked.
   // ==========================================================================
-  var VIEWS = ["command", "arena", "agents", "memory", "system"];
+  var VIEWS = ["command", "arena", "agents", "memory", "system", "circle"];
   var currentView = "command";
   var loadedOnce = {};
 

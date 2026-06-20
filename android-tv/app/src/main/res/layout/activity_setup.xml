@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="48dp" android:background="#0B0E11">
+
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="FRIDAY — TV setup" android:textColor="#7FE3FF" android:textSize="32sp" />
+
+    <EditText android:id="@+id/url" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:hint="Backend URL (https://…)"
+        android:textColor="#FFFFFF" android:textColorHint="#557" android:inputType="textUri"
+        android:autofillHints="" />
+
+    <EditText android:id="@+id/token" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:hint="Bearer token"
+        android:textColor="#FFFFFF" android:textColorHint="#557" android:inputType="textPassword"
+        android:autofillHints="" />
+
+    <Button android:id="@+id/save" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:text="Save, pair &amp; start" />
+
+    <TextView android:id="@+id/status" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:textColor="#9F9" android:paddingTop="16dp" />
+</LinearLayout>

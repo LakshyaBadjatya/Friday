@@ -230,6 +230,7 @@ views — are always on.
 | Calendar | Google Calendar events | `FRIDAY_ENABLE_CALENDAR` |
 | Email | Gmail read / send | `FRIDAY_ENABLE_EMAIL` |
 | Comms | SMS / WhatsApp via Twilio | `FRIDAY_ENABLE_COMMS` |
+| Instagram DMs | Count unread / read aloud / dictate replies to Instagram DMs by voice (unofficial, lazy `instagrapi`) | `FRIDAY_ENABLE_INSTAGRAM_DMS` |
 | n8n | Draft and start n8n workflows behind a confirm-step | `FRIDAY_ENABLE_N8N` |
 | Family sharing | Opt-in, revocable sharing with family | `FRIDAY_ENABLE_FAMILY_SHARING` |
 | Home | Home/device controls | `FRIDAY_ENABLE_HOME` |
@@ -325,6 +326,8 @@ FRIDAY exposes many faces over one core. The flag-gated ones return `404` until 
 | 🧩 Browser ext | `browser_ext/` | A Manifest V3 quick-ask popup for the local FRIDAY |
 | 📊 Dashboard | Streamlit | A separate operator console reading the admin surface |
 | 🎙️ Voice | `POST /voice`, `WS /ws/voice`, `WS /ws/wake` | One spoken turn / streaming + barge-in / wake + summon |
+| 🍏 Siri | `POST /siri/ask` | Hands-free turns via the iOS Shortcut (circle, maps, Instagram DMs) |
+| 📺 Android TV | `/tv/ask`, `/tv/command`, `WS /tv/stream` | Android TV front door — spoken control + a companion app (`android-tv/`) |
 
 The **Streamlit dashboard** is a *separate UI process* — never imported by the package or the
 test suite, its deps kept out of the lock:
@@ -408,6 +411,9 @@ relevant outbound call.
 | OpenTelemetry export | `FRIDAY_ENABLE_OTEL=true` | an OTLP/HTTP collector at `FRIDAY_OTEL_ENDPOINT` |
 | Perception | `FRIDAY_ENABLE_PERCEPTION=true` | `make install-perception` + the `tesseract` binary + a **webcam** |
 | Presence | `FRIDAY_ENABLE_PRESENCE=true` | `FRIDAY_PRESENCE_KNOWN_DEVICES` |
+| Siri front door | `FRIDAY_ENABLE_SIRI=true` | the iOS "Ask FRIDAY" Shortcut + an `FRIDAY_API_KEYS` token |
+| Android TV | `FRIDAY_ENABLE_TV=true` | the companion app in `android-tv/` + an `FRIDAY_API_KEYS` token |
+| Instagram DMs | `FRIDAY_ENABLE_INSTAGRAM_DMS=true` | `pip install instagrapi` + `FRIDAY_INSTAGRAM_USERNAME` / `_PASSWORD` / `_SESSION_JSON` (personal account; see `docs/instagram-dms.md`) |
 | Remote access | *(deployment)* | a **Tailscale** tailnet to reach your machine securely off-LAN |
 
 </details>

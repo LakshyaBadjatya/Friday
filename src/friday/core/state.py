@@ -75,3 +75,8 @@ class GraphState(BaseModel):
     confirmed: bool = False
     # Paralinguistic emotion sensed for this turn (None when the feature is off).
     emotion: Emotion | None = None
+    # Optional per-turn model override (a ``provider:model`` catalog id). Set from
+    # the chat request's ``model`` field; the orchestrator routes this turn through
+    # it (highest precedence, above any persona model) when the LLM is a gateway.
+    # ``None`` leaves model selection to the addressed persona / active default.
+    model_override: str | None = None

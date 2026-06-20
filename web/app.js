@@ -26,11 +26,20 @@ import {
   isSupported as analyticsSupported,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-analytics.js";
 import { firebaseConfig } from "./firebase-config.js";
+import { initCircle } from "./circle.js";
+import { startPresence } from "./presence.js";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const googleProvider = new GoogleAuthProvider();
+
+// Wire the circle UI (groups, invites, E2EE chat). Listeners attach once here; the
+// group list is refreshed each time a user signs in (below). Client-direct Firestore.
+const circle = initCircle(auth, db);
+
+// Auto presence + precise location publisher (started once after first sign-in).
+let presence = null;
 
 // Firebase Analytics — initialise only where the browser supports it (needs a
 // measurementId and a supporting environment); never let it break the app.
@@ -143,6 +152,8 @@ onAuthStateChanged(auth, async (user) => {
     } catch (err) {
       $("profile").textContent = `Firestore read failed: ${friendly(err)}`;
     }
+    circle.refreshGroups();
+    if (!presence) presence = startPresence(db, auth);
   } else {
     signedOut.hidden = false;
     signedIn.hidden = true;
@@ -154,3 +165,18 @@ $("register").addEventListener("click", registerWithEmail);
 $("login").addEventListener("click", loginWithEmail);
 $("google").addEventListener("click", loginWithGoogle);
 $("logout").addEventListener("click", logout);
+
+// Copy the Firebase refresh token for the Siri shortcut: paste it into the
+// shortcut's "Authorization: Bearer …" header so Siri acts as you against the same
+// Firestore. It's long-lived — keep it private (it's your circle credential).
+$("siri-token").addEventListener("click", async () => {
+  const user = auth.currentUser;
+  if (!user) return setStatus("Sign in first.", true);
+  const token = user.refreshToken;
+  try {
+    await navigator.clipboard.writeText(token);
+    setStatus("Siri token copied — paste it into the shortcut's Authorization header (keep it private).");
+  } catch {
+    setStatus("Couldn't auto-copy. Token: " + token);
+  }
+});

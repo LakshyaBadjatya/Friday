@@ -72,6 +72,7 @@ from friday.protocols.store import Protocol as ProtocolModel
 from friday.providers.emotion import Emotion, emotion_hint
 from friday.providers.llm import LLMProvider, LLMResponse, Message
 from friday.roster import Persona, RosterRegistry
+from friday.roster.definitions import INTENT_TO_PERSONA
 from friday.tools.registry import ToolRegistry
 from friday.tools.security import AuditRecord
 
@@ -528,6 +529,7 @@ class Orchestrator:
         gateway: ModelGateway | None = None,
         budget_downshift_model_id: str = "",
         compaction: Compactor | None = None,
+        persona_models: dict[str, str] | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -555,6 +557,11 @@ class Orchestrator:
         self._gateway = gateway
         self._budget_downshift_model_id = budget_downshift_model_id
         self._compaction = compaction
+        # Per-persona free-model assignment (code-name -> catalog id), resolved at
+        # build time from the catalog. Empty on builds without a gateway/catalog.
+        # When a turn runs under a persona that has an entry here AND the LLM is a
+        # gateway, that turn is routed through the persona's model.
+        self._persona_models = dict(persona_models or {})
         # Sensitive writes proposed but not yet confirmed, keyed by session id.
         # They are held here (never persisted) until a confirming follow-up turn
         # commits them — the write-consent gate for sensitive data (§10).
@@ -587,18 +594,78 @@ class Orchestrator:
                 "honest, and direct. Never fabricate capability or data."
             )
 
-    def _system_prompt(self, emotion: Emotion | None = None) -> Message:
+    def _system_prompt(
+        self, persona: Persona | None = None, emotion: Emotion | None = None
+    ) -> Message:
         owner = get_settings().owner_address
-        persona = self._persona_text()
-        content = (
-            f"{persona}\n\n"
-            f"---\nAddress the owner as '{owner}'. Answer first, keep it tight, "
-            f"and never fabricate a capability, a fact, or a tool result you do "
-            f"not have."
-        )
+        if persona is not None and persona.name.casefold() != "friday":
+            # A summoned specialist answers in ITS OWN voice (its roster charter),
+            # not the prime's persona file — so addressing EDITH replies as EDITH
+            # rather than as solo FRIDAY denying it can summon anyone. The shared
+            # footer keeps the owner-address, honesty, and defensive-only guards.
+            content = (
+                f"{persona.system_prompt}\n\n"
+                f"You are {persona.name}, one of FRIDAY's specialist operators, "
+                f"speaking directly to the owner.\n\n"
+                f"---\nAddress the owner as '{owner}'. Answer first, keep it tight, "
+                f"and never fabricate a capability, a fact, or a tool result you do "
+                f"not have. Stay defensive-only: never help attack, surveil, or harm."
+            )
+        else:
+            # The prime / un-addressed path is byte-for-byte unchanged.
+            persona_text = self._persona_text()
+            content = (
+                f"{persona_text}\n\n"
+                f"---\nAddress the owner as '{owner}'. Answer first, keep it tight, "
+                f"and never fabricate a capability, a fact, or a tool result you do "
+                f"not have."
+            )
         if emotion is not None and get_settings().emotion_adapt:
             content += "\n\n" + emotion_hint(emotion)
         return Message(role="system", content=content)
+
+    # -- per-turn persona + model selection -------------------------------- #
+    def _turn_persona(self, state: GraphState) -> Persona | None:
+        """The persona this turn runs under (addressed or auto-delegated), or None.
+
+        Reads the code-name stamped on the scratchpad by the address-by-name /
+        auto-delegate step and resolves it through the roster. ``None`` when no
+        persona was selected or no roster is wired — the prime path.
+        """
+        name = state.scratchpad.get("persona")
+        if not name or self._roster is None:
+            return None
+        try:
+            return self._roster.get(str(name))
+        except KeyError:
+            return None
+
+    def _turn_model_id(
+        self, persona: Persona | None, model_override: str | None
+    ) -> str | None:
+        """The catalog id this turn's synthesis should run on, or ``None``.
+
+        Precedence: an explicit per-turn ``model_override`` wins; else the
+        addressed persona's assigned free model (so every operator runs on its own
+        brain); else ``None`` (the gateway's active/default model is used).
+        """
+        if model_override:
+            return model_override
+        if persona is not None:
+            return self._persona_models.get(persona.name)
+        return None
+
+    def _complete_kwargs(self, model_id: str | None) -> dict[str, Any]:
+        """``complete`` kwargs that pin ``model_id`` only when the LLM is a gateway.
+
+        A ``provider:model`` catalog id is meaningful only to the
+        :class:`~friday.models.gateway.ModelGateway` (which resolves it to a
+        provider + slug); a single-provider/fake LLM would mishandle it, so the
+        per-call override is applied only when the active LLM actually is a gateway.
+        """
+        if model_id and isinstance(self._llm, ModelGateway):
+            return {"model": model_id}
+        return {}
 
     # -- refusal ----------------------------------------------------------- #
     @staticmethod
@@ -618,6 +685,7 @@ class Orchestrator:
     async def _synthesize(
         self, history: list[Message], task: Message,
         session_id: str | None = None, emotion: Emotion | None = None,
+        persona: Persona | None = None, model_override: str | None = None,
     ) -> str:
         """Call the LLM with persona + history + the turn's task message.
 
@@ -627,9 +695,12 @@ class Orchestrator:
         the session's turn budget and a hot turn downshifts the gateway's active
         model (see :meth:`_record_budget`).
         """
-        messages = [self._system_prompt(emotion), *history, task]
+        messages = [self._system_prompt(persona, emotion), *history, task]
+        model_id = self._turn_model_id(persona, model_override)
         try:
-            response = await self._llm.complete(messages, tools=None)
+            response = await self._llm.complete(
+                messages, tools=None, **self._complete_kwargs(model_id)
+            )
         except ProviderError as exc:
             logger.warning("LLM synthesis failed: %s", exc)
             owner = get_settings().owner_address
@@ -638,7 +709,7 @@ class Orchestrator:
                 f"{owner}. That's a real outage, not me stalling — try again in "
                 f"a moment."
             )
-        self._record_usage(response)
+        self._record_usage(response, model_id)
         if session_id is not None:
             self._record_budget(session_id, response)
         text = response.text
@@ -648,7 +719,9 @@ class Orchestrator:
         return text.strip()
 
     # -- usage/cost ledger (observability; cost dashboard) ----------------- #
-    def _record_usage(self, response: LLMResponse) -> None:
+    def _record_usage(
+        self, response: LLMResponse, model_id_used: str | None = None
+    ) -> None:
         """Tally a completion's tokens into the process usage ledger.
 
         Always-on observability (like :class:`Metrics`), independent of the
@@ -661,11 +734,14 @@ class Orchestrator:
         if self._usage_ledger is None:
             return
         usage = response.usage
-        model_id = (
-            self._gateway.active_model_id
-            if self._gateway is not None
-            else get_settings().llm_provider
-        )
+        # Prefer the model the turn actually ran on (a persona / override model);
+        # else fall back to the gateway's active id, else the provider name.
+        if model_id_used is not None:
+            model_id = model_id_used
+        elif self._gateway is not None:
+            model_id = self._gateway.active_model_id
+        else:
+            model_id = get_settings().llm_provider
         self._usage_ledger.record(
             model_id,
             prompt_tokens=usage.prompt_tokens,
@@ -818,8 +894,11 @@ class Orchestrator:
     # -- conversation ------------------------------------------------------ #
     async def _converse(self, state: GraphState, history: list[Message]) -> str:
         task = Message(role="user", content=state.user_input)
-        return await self._synthesize(history, task, state.session_id,
-                                      emotion=state.emotion)
+        return await self._synthesize(
+            history, task, state.session_id, emotion=state.emotion,
+            persona=self._turn_persona(state),
+            model_override=state.model_override,
+        )
 
     # -- research ---------------------------------------------------------- #
     async def _research(self, state: GraphState, history: list[Message]) -> str:
@@ -906,8 +985,11 @@ class Orchestrator:
             "to dig further — do not invent facts or citations."
         )
         task = Message(role="user", content=task_content)
-        return await self._synthesize(history, task, state.session_id,
-                                      emotion=state.emotion)
+        return await self._synthesize(
+            history, task, state.session_id, emotion=state.emotion,
+            persona=self._turn_persona(state),
+            model_override=state.model_override,
+        )
 
     # -- clarify ----------------------------------------------------------- #
     def _clarify(self, state: GraphState) -> str:
@@ -1039,9 +1121,13 @@ class Orchestrator:
                 f"result does not contain:\n\n{draft}"
             ),
         )
-        messages = [self._system_prompt(state.emotion), *history, task]
+        persona = self._turn_persona(state)
+        messages = [self._system_prompt(persona, state.emotion), *history, task]
+        model_id = self._turn_model_id(persona, state.model_override)
         try:
-            response = await self._llm.complete(messages, tools=None)
+            response = await self._llm.complete(
+                messages, tools=None, **self._complete_kwargs(model_id)
+            )
         except ProviderError as exc:
             logger.warning("persona wrap failed; using agent draft: %s", exc)
             return draft
@@ -1186,6 +1272,37 @@ class Orchestrator:
         state.scratchpad["persona"] = persona.name
         state.scratchpad["persona_scope"] = sorted(persona.allowed_tools)
         state.scratchpad["persona_namespace"] = persona.memory_namespace
+
+    def _auto_delegate(self, text: str) -> Persona | None:
+        """Pick a specialist by topic when the turn names no operator explicitly.
+
+        Scans the lowercased input for the domain keywords in
+        :data:`~friday.roster.definitions.INTENT_TO_PERSONA` and returns the
+        persona whose keyword appears *earliest* in the text (so "the first topic
+        mentioned wins"). Returns ``None`` when nothing matches or no roster is
+        wired, leaving the turn with the prime. Inert unless ``enable_auto_delegate``
+        is on (the caller gates it); an explicit address always takes precedence,
+        because the caller only consults this when :meth:`_match_persona` found none.
+        """
+        roster = self._roster
+        if roster is None:
+            return None
+        lowered = text.lower()
+        best_pos: int | None = None
+        best: Persona | None = None
+        for keyword, name in INTENT_TO_PERSONA.items():
+            match = re.search(rf"\b{re.escape(keyword)}\b", lowered)
+            if match is None:
+                continue
+            if best_pos is not None and match.start() >= best_pos:
+                continue
+            try:
+                candidate = roster.get(name)
+            except KeyError:
+                continue
+            best_pos = match.start()
+            best = candidate
+        return best
 
     # -- maps deep links (Tier 3) ------------------------------------------ #
     def _open_maps_reply(self) -> str:
@@ -1469,6 +1586,11 @@ class Orchestrator:
         # scratchpad up front; inert (no scratchpad keys) when no roster is wired
         # or the turn is un-addressed, so existing behaviour is unchanged.
         persona = self._match_persona(state.user_input)
+        # Auto-delegate (opt-in): when the turn names no operator explicitly, pick
+        # a specialist by topic so the right operator (and its model) answers. An
+        # explicit address above always wins; this only fills the un-addressed case.
+        if persona is None and get_settings().enable_auto_delegate:
+            persona = self._auto_delegate(state.user_input)
         if persona is not None:
             self._apply_persona_scope(persona, state)
 

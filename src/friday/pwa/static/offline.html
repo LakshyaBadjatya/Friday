@@ -3,69 +3,108 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0a84ff" />
+    <meta name="theme-color" content="#4fe3ff" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <title>FRIDAY — Offline</title>
     <style>
+      /* FRIDAY-OS offline shell — reactor + scanlines, matching the cockpit. */
       :root {
         color-scheme: dark;
-        --bg: #05060a;
-        --fg: #e8eef6;
-        --muted: #8a93a6;
-        --accent: #0a84ff;
+        --bg: #03060d;
+        --fg: #d9ebff;
+        --muted: #5d738c;
+        --accent: #4fe3ff;
+        --accent-rgb: 79, 227, 255;
+        --line: rgba(var(--accent-rgb), 0.2);
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
       }
       * { box-sizing: border-box; }
       html, body { height: 100%; margin: 0; }
       body {
+        position: relative;
         display: grid;
         place-items: center;
         min-height: 100svh;
         padding: 2rem;
         background:
-          radial-gradient(1200px 600px at 50% -10%, rgba(10, 132, 255, 0.18), transparent 60%),
+          radial-gradient(1200px 640px at 50% -10%, rgba(var(--accent-rgb), 0.16), transparent 60%),
+          radial-gradient(1200px 900px at 50% 120%, rgba(0, 0, 0, 0.6), transparent 60%),
           var(--bg);
         color: var(--fg);
-        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        font: 15px/1.6 var(--mono);
+        letter-spacing: 0.02em;
         text-align: center;
+        overflow: hidden;
       }
-      main { max-width: 28rem; }
-      .orb {
-        width: 88px;
-        height: 88px;
-        margin: 0 auto 1.5rem;
-        border-radius: 50%;
-        background: radial-gradient(circle at 50% 38%, #6fb8ff, var(--accent) 55%, #043b73 100%);
-        box-shadow: 0 0 0 6px rgba(10, 132, 255, 0.12), 0 0 48px rgba(10, 132, 255, 0.45);
+      body::after {
+        content: ""; position: fixed; inset: 0; z-index: 5; pointer-events: none;
+        background: repeating-linear-gradient(180deg, rgba(var(--accent-rgb), 0.05) 0 1px, transparent 1px 3px);
+        box-shadow: inset 0 0 220px 36px rgba(0, 0, 0, 0.55);
+        opacity: 0.5;
+      }
+      main { position: relative; z-index: 6; max-width: 28rem; }
+      /* arc-reactor: spinning ring + glowing core */
+      .reactor {
+        position: relative; width: 104px; height: 104px; margin: 0 auto 1.75rem;
+      }
+      .reactor .ring {
+        position: absolute; inset: 0; border-radius: 50%;
+        border: 1.5px solid rgba(var(--accent-rgb), 0.4);
+        border-top-color: var(--accent);
+        box-shadow: 0 0 18px rgba(var(--accent-rgb), 0.25);
+        animation: spin 3.4s linear infinite;
+      }
+      .reactor .ring2 {
+        inset: 16px; border-top-color: transparent; border-bottom-color: var(--accent);
+        animation: spin 5s linear infinite reverse;
+      }
+      .reactor .core {
+        position: absolute; inset: 36px; border-radius: 50%;
+        background: radial-gradient(circle at 50% 38%, #eafcff, var(--accent) 55%, #06354b 100%);
+        box-shadow: 0 0 26px var(--accent), inset 0 0 12px #fff;
         animation: pulse 2.4s ease-in-out infinite;
       }
+      @keyframes spin { to { transform: rotate(360deg); } }
       @keyframes pulse {
-        0%, 100% { transform: scale(1); opacity: 0.92; }
-        50% { transform: scale(1.06); opacity: 1; }
+        0%, 100% { transform: scale(1); filter: brightness(1); }
+        50% { transform: scale(1.07); filter: brightness(1.25); }
       }
       @media (prefers-reduced-motion: reduce) {
-        .orb { animation: none; }
+        .reactor .ring, .reactor .core { animation: none; }
+        body::after { background: none; }
       }
-      h1 { font-size: 1.6rem; margin: 0 0 0.5rem; letter-spacing: 0.04em; }
+      h1 {
+        font-size: 1.3rem; margin: 0 0 0.6rem; letter-spacing: 0.22em;
+        text-transform: uppercase; color: var(--fg);
+        text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.3);
+      }
       p { color: var(--muted); margin: 0 0 1.75rem; }
       .actions { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
       a.button, button.button {
         appearance: none;
-        border: 1px solid rgba(10, 132, 255, 0.5);
-        background: rgba(10, 132, 255, 0.12);
-        color: var(--fg);
+        border: 1px solid rgba(var(--accent-rgb), 0.5);
+        background: rgba(var(--accent-rgb), 0.12);
+        color: var(--accent);
         padding: 0.6rem 1.2rem;
-        border-radius: 0.6rem;
+        border-radius: 0.5rem;
         font: inherit;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
         text-decoration: none;
         cursor: pointer;
+        transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
       }
-      a.button:hover, button.button:hover { background: rgba(10, 132, 255, 0.22); }
-      .hint { margin-top: 2rem; font-size: 0.85rem; color: var(--muted); }
+      a.button:hover, button.button:hover { background: rgba(var(--accent-rgb), 0.2); border-color: var(--accent); box-shadow: 0 0 16px rgba(var(--accent-rgb), 0.25); }
+      .hint { margin-top: 2rem; font-size: 0.78rem; color: var(--muted); letter-spacing: 0.08em; }
     </style>
   </head>
   <body>
     <main>
-      <div class="orb" aria-hidden="true"></div>
+      <div class="reactor" aria-hidden="true">
+        <span class="ring"></span>
+        <span class="ring ring2"></span>
+        <span class="core"></span>
+      </div>
       <h1>FRIDAY is offline</h1>
       <p>
         The network is unreachable right now. FRIDAY is local-first, so the

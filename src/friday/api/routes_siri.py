@@ -20,6 +20,7 @@ rejections keep their honest 401/429 from the middleware.
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
@@ -43,6 +44,146 @@ _DEFAULT_SESSION = "siri"
 _FALLBACK_SPEECH = "Sorry, I didn't catch that. Could you try again?"
 #: Upper bound on the accepted query (parity with ``/chat``'s 8000-char input).
 _MAX_QUERY = 8000
+
+#: Literal Shortcuts placeholder labels. If the request body contains one of these
+#: verbatim, the shortcut is mis-wired — it's sending the *name* of a variable
+#: instead of its value (the user's actual words). We detect that exact case and
+#: speak a fix-it hint rather than letting the brain ask to clarify every turn.
+_PLACEHOLDER_LABELS = frozenset(
+    {
+        "dictated text",
+        "dictate text",
+        "spoken text",
+        "spoken input",
+        "provided input",
+        "shortcut input",
+        "ask each time",
+        "text",
+        "input",
+    }
+)
+#: Spoken when a placeholder label is detected — actionable, not cryptic.
+_PLACEHOLDER_HINT = (
+    "It looks like your shortcut is sending a placeholder instead of your words. "
+    "Open the Friday shortcut, and in the Get Contents of URL step, delete the typed "
+    "text in the request body and insert the blue Dictated Text variable instead."
+)
+
+#: "Who made you?" — answered instantly (no LLM) with a fixed name, varied wording.
+_CREATOR_TRIGGERS = (
+    "who made you",
+    "who created you",
+    "who built you",
+    "who designed you",
+    "who developed you",
+    "who programmed you",
+    "who coded you",
+    "who is your maker",
+    "who's your maker",
+    "who is your creator",
+    "who's your creator",
+    "who is your master",
+    "who's your master",
+    "who is your owner",
+    "who do you work for",
+    "who do you belong to",
+)
+_CREATOR_LINES = (
+    "My master is Lakshya Badjatya — he built me.",
+    "I was created by Lakshya Badjatya, Boss.",
+    "That'd be Lakshya Badjatya — my maker and master.",
+    "Lakshya Badjatya made me. I answer to him.",
+    "I'm Lakshya Badjatya's creation.",
+    "Crafted by Lakshya Badjatya, my one and only master.",
+    "Lakshya Badjatya is the mind behind me.",
+)
+
+
+def _creator_reply(query: str) -> str | None:
+    """A fast, varied 'who made you' answer (same name, different wording)."""
+    low = query.lower()
+    if any(trigger in low for trigger in _CREATOR_TRIGGERS):
+        return secrets.choice(_CREATOR_LINES)
+    return None
+
+
+#: Formula / theory / "explain" questions get a teach-me-simply instruction so the
+#: model defines symbols, gives intuition, and flags uncertainty instead of guessing.
+_TEACH_TRIGGERS = (
+    "formula",
+    "equation",
+    "theorem",
+    "theory",
+    "law of",
+    "principle",
+    "derive",
+    "derivation",
+    "prove",
+    "explain",
+    "definition",
+    "define ",
+    "concept",
+    "how does",
+    "why does",
+    "how do you calculate",
+)
+_TEACH_INSTR = (
+    " (Answer accurately and simply, in plain spoken words a beginner follows. If "
+    "there's a formula, state it naming each symbol in words like 'E equals m c "
+    "squared', say what each symbol means, and give a one-line intuition. Be precise; "
+    "if you're not certain, say so rather than guess.)"
+)
+
+
+def _augment_teaching(query: str) -> str:
+    """Append the explain-simply-and-accurately instruction to teaching questions."""
+    low = query.lower()
+    if any(trigger in low for trigger in _TEACH_TRIGGERS):
+        return query + _TEACH_INSTR
+    return query
+
+
+#: Appended to the persona for the fast voice path so replies are short and speakable.
+_VOICE_RULES = (
+    "\n\nYou are answering by VOICE through Siri. Reply in 1-4 short sentences of "
+    "plain spoken text — no markdown, no bullet lists, no headings, no code blocks. "
+    "Address the user as 'Boss'. Be accurate and direct; if you're unsure, say so "
+    "briefly rather than guessing. For a formula or concept, state it, then give a "
+    "one-line plain-English explanation."
+)
+
+
+async def _fast_answer(request: Request, query: str) -> str | None:
+    """A single persona'd LLM call — the low-latency voice path.
+
+    Skips the full orchestrator graph (routing, memory, optional critic re-pass,
+    confidence scoring), which is several steps and sometimes a second model call.
+    Reuses the live FRIDAY persona for voice consistency, falling back to a minimal
+    one. Returns ``None`` on any failure so the caller drops to the orchestrator.
+    """
+    llm = getattr(request.app.state, "llm", None)
+    if llm is None:
+        return None
+    from friday.providers.llm import Message  # noqa: PLC0415
+
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    persona = "You are FRIDAY, a sharp, warm personal AI assistant."
+    getter = getattr(orchestrator, "_persona_text", None)
+    if callable(getter):
+        try:
+            persona = getter() or persona
+        except Exception:  # noqa: BLE001 - fall back to the minimal persona
+            pass
+    try:
+        resp = await llm.complete(
+            [
+                Message(role="system", content=persona + _VOICE_RULES),
+                Message(role="user", content=_augment_teaching(query)),
+            ]
+        )
+    except Exception:  # noqa: BLE001 - drop to the orchestrator
+        return None
+    return (getattr(resp, "text", "") or "").strip() or None
 
 
 def _siri_enabled(request: Request) -> bool:
@@ -96,12 +237,47 @@ async def _read_query(request: Request) -> str | None:
     return text.strip() or None
 
 
-def _respond(speech: str, *, raw: str, mode: str | None, want_json: bool) -> Any:
+async def _read_coords(request: Request) -> tuple[str | None, str | None]:
+    """GPS for "… near me": prefer ``?lat=&lon=``, else a JSON body's lat/lon.
+
+    The Shortcut can pass the device location either in the URL or — far more
+    reliably — as ``lat``/``lon`` fields next to ``q`` in the JSON body. Reading
+    both means the same shortcut works whichever way the user wired it. The body
+    is re-read here (Starlette caches it after ``_read_query``), so this is cheap.
+    """
+    lat = request.query_params.get("lat")
+    lon = request.query_params.get("lon")
+    if lat and lon:
+        return lat, lon
+    raw = await request.body()
+    if not raw or "application/json" not in request.headers.get("content-type", ""):
+        return None, None
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    blat = data.get("lat") or data.get("latitude")
+    blon = data.get("lon") or data.get("lng") or data.get("longitude")
+    if blat is None or blon is None:
+        return None, None
+    return str(blat), str(blon)
+
+
+def _respond(
+    speech: str,
+    *,
+    raw: str,
+    mode: str | None,
+    want_json: bool,
+    action: dict[str, Any] | None = None,
+) -> Any:
     """Render the spoken reply as plain text (default) or a JSON envelope."""
     if want_json:
         return JSONResponse(
             status_code=200,
-            content={"speak": speech, "text": raw, "mode": mode},
+            content={"speak": speech, "text": raw, "mode": mode, "action": action},
         )
     return PlainTextResponse(content=speech, media_type="text/plain; charset=utf-8")
 
@@ -120,6 +296,88 @@ def _caller_uid(request: Request) -> str | None:
         return None
     uid = identities.get(auth[7:].strip())
     return uid if isinstance(uid, str) else None
+
+
+def _try_firestore_circle(request: Request, query: str) -> str | None:
+    """Act on the app's real Firestore as the caller (presence, reminders, nudges…).
+
+    Tried first when the bearer looks like a real Firebase credential (an ID-token
+    JWT or a long refresh token); short dev tokens are skipped so offline tests never
+    touch the network. ANY failure returns ``None`` so the request falls through to
+    the in-memory circle / orchestrator — the live endpoint can never break.
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    if token.count(".") != 2 and len(token) < 100:
+        return None  # not a plausible Firebase ID/refresh token (skip dev tokens)
+    try:
+        from friday.circle.siri_circle import handle as _handle  # noqa: PLC0415
+
+        return _handle(token, query, datetime.now(UTC))
+    except Exception:  # noqa: BLE001 - never break the live endpoint
+        logger.warning("siri firestore-circle path failed", exc_info=False)
+        return None
+
+
+def _instagram_service(request: Request) -> Any:
+    """Lazily build + cache the Instagram service on ``app.state.instagram``.
+
+    Returns the cached service if present (so tests can inject a fake); else, when
+    the feature is enabled and credentials exist, builds an ``InstagrapiClient`` +
+    ``InstagramService`` from startup settings and caches it. Returns ``None`` when
+    the flag is off or credentials are missing — the caller then falls through.
+    instagrapi is NOT imported here: the client only imports it at login time.
+    """
+    cached = getattr(request.app.state, "instagram", None)
+    if cached is not None:
+        return cached
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None or not getattr(settings, "enable_instagram_dms", False):
+        return None
+    username = getattr(settings, "instagram_username", "") or ""
+    pw_secret = getattr(settings, "instagram_password", None)
+    password = pw_secret.get_secret_value() if pw_secret is not None else ""
+    if not username or not password:
+        return None
+    from friday.instagram.client import InstagrapiClient  # noqa: PLC0415
+    from friday.instagram.service import InstagramService  # noqa: PLC0415
+    from friday.instagram.session import parse_session  # noqa: PLC0415
+
+    sess_secret = getattr(settings, "instagram_session_json", None)
+    raw_session = sess_secret.get_secret_value() if sess_secret is not None else None
+    client = InstagrapiClient(username, password, parse_session(raw_session))
+    limit = int(getattr(settings, "instagram_read_aloud_limit", 5) or 5)
+    service = InstagramService(client, read_aloud_limit=limit)
+    request.app.state.instagram = service
+    return service
+
+
+def _try_instagram(request: Request, query: str) -> str | None:
+    """Handle an Instagram DM intent (count / read-aloud / reply); ``None`` to skip.
+
+    Regex-classifies first (no network) inside ``siri_instagram.handle``; only an
+    Instagram phrase constructs the client / hits the API. ANY error returns
+    ``None`` so the request falls through and the live endpoint never breaks. A
+    successful Instagram turn stamps ``app.state._ig_marker`` so a bare "read them
+    aloud" right after counts as an Instagram follow-up.
+    """
+    service = _instagram_service(request)
+    if service is None:
+        return None
+    from friday.instagram.siri_instagram import handle as instagram_handle  # noqa: PLC0415
+
+    now = datetime.now(UTC)
+    marker = getattr(request.app.state, "_ig_marker", None)
+    try:
+        reply = instagram_handle(service, query, now, marker=marker)
+    except Exception:  # noqa: BLE001 - never break the live endpoint
+        logger.warning("siri instagram path failed", exc_info=False)
+        return None
+    if reply is not None:
+        request.app.state._ig_marker = now
+    return reply
 
 
 def _try_circle(request: Request, query: str) -> str | None:
@@ -156,6 +414,88 @@ async def siri_ask(request: Request) -> Any:
     want_json = request.query_params.get("format", "").lower() == "json"
     session_id = request.query_params.get("session") or _DEFAULT_SESSION
 
+    # Mis-wired shortcut guard: the body is a literal variable label (e.g. "Dictated
+    # Text"), not the spoken words. Speak an actionable fix instead of clarifying.
+    if query.lower() in _PLACEHOLDER_LABELS:
+        return _respond(
+            _PLACEHOLDER_HINT, raw=_PLACEHOLDER_HINT, mode="hint", want_json=want_json
+        )
+
+    # "<command> on the TV" → parse and hand to the paired TV (the phone is the mic).
+    relay = getattr(request.app.state, "tv_relay", None)
+    if relay is not None:
+        from friday.tv.intents import parse_tv_command, strip_tv_suffix  # noqa: PLC0415
+
+        bare = strip_tv_suffix(query)
+        if bare is not None:
+            tv_action = parse_tv_command(bare)
+            if tv_action is not None:
+                device = relay.default_device()
+                if device is None:
+                    msg = "No TV is paired yet. Open Friday on the TV to pair it."
+                    return _respond(msg, raw=msg, mode="tv", want_json=want_json)
+                relay.enqueue(device, tv_action)
+                return _respond(
+                    tv_action.speak,
+                    raw=tv_action.speak,
+                    mode="tv",
+                    want_json=want_json,
+                    action=tv_action.model_dump(),
+                )
+
+    # "Who made you?" — answered instantly (no model, no network).
+    creator = _creator_reply(query)
+    if creator is not None:
+        return _respond(creator, raw=creator, mode="identity", want_json=want_json)
+
+    # Distance queries — geocoded + routed via OpenStreetMap (computed, not guessed).
+    from friday.maps.distance import distance_reply  # noqa: PLC0415
+
+    dist = distance_reply(query)
+    if dist is not None:
+        return _respond(dist, raw=dist, mode="distance", want_json=want_json)
+
+    # "… near me" — use the exact GPS the shortcut sent (URL ?lat=&lon= or body).
+    # The fast heuristic catches obvious phrasings; the AI classifier below catches
+    # anything else. The richer share text (with a map link) goes in `text` so the
+    # shortcut can push it to Telegram or the iOS share sheet.
+    lat, lon = await _read_coords(request)
+    if lat and lon:
+        from friday.maps.nearby import classify_nearby, nearby_from_filter, nearby_reply
+
+        try:
+            flat, flon = float(lat), float(lon)
+        except (TypeError, ValueError):
+            flat = flon = None  # type: ignore[assignment]
+        if flat is not None and flon is not None:
+            near = nearby_reply(query, flat, flon)
+            if near is None:
+                # AI auto-guess: let the model decide if this is a nearby-places
+                # ask and infer the category, so no fixed phrase is required.
+                llm = getattr(request.app.state, "llm", None)
+                inferred = await classify_nearby(llm, query)
+                if inferred is not None:
+                    near = nearby_from_filter(inferred[0], inferred[1], flat, flon)
+            if near is not None:
+                spoken, share = near
+                return _respond(spoken, raw=share, mode="nearby", want_json=want_json)
+
+    # Firestore-linked circle (acts on the app's real data as the caller) wins first
+    # when a real token is present; then the in-memory circle; else the orchestrator.
+    fs_reply = _try_firestore_circle(request, query)
+    if fs_reply is not None:
+        return _respond(
+            for_speech(fs_reply), raw=fs_reply, mode="circle", want_json=want_json
+        )
+
+    # Instagram DMs ("any instagram dms", "read my instagram messages", "reply to X
+    # on instagram …") — only an Instagram phrase touches the API; else falls through.
+    ig_reply = _try_instagram(request, query)
+    if ig_reply is not None:
+        return _respond(
+            for_speech(ig_reply), raw=ig_reply, mode="instagram", want_json=want_json
+        )
+
     # Circle status intents ("what's X doing", "set my status…") win when the
     # caller is known and the phrasing matches; otherwise fall through below.
     circle_reply = _try_circle(request, query)
@@ -164,12 +504,22 @@ async def siri_ask(request: Request) -> Any:
             for_speech(circle_reply), raw=circle_reply, mode="circle", want_json=want_json
         )
 
+    # Fast voice path: one persona'd LLM call instead of the full orchestrator graph
+    # (routing, memory, optional critic re-pass, confidence) — much lower latency.
+    # Falls through to the orchestrator below when it yields nothing. Kill-switch:
+    # FRIDAY_SIRI_FAST_PATH=false.
+    settings = getattr(request.app.state, "settings", None)
+    if getattr(settings, "siri_fast_path", True):
+        fast = await _fast_answer(request, query)
+        if fast:
+            return _respond(for_speech(fast), raw=fast, mode="fast", want_json=want_json)
+
     orchestrator = getattr(request.app.state, "orchestrator", None)
     if orchestrator is None or not hasattr(orchestrator, "handle"):
         logger.error("siri ask: orchestrator missing on app.state")
         return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
 
-    state = GraphState(session_id=session_id, user_input=query)
+    state = GraphState(session_id=session_id, user_input=_augment_teaching(query))
     try:
         result = await orchestrator.handle(state)
     except FridayError as exc:
@@ -178,8 +528,110 @@ async def siri_ask(request: Request) -> Any:
             extra={"error_type": type(exc).__name__},
         )
         return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
+    except Exception:  # noqa: BLE001 - Siri must never read a raw 500 to the user
+        logger.exception("siri ask: unexpected error; speaking a graceful fallback")
+        return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
 
     raw_text = getattr(result, "response", None) or ""
     speech = for_speech(raw_text) or _FALLBACK_SPEECH
     mode = getattr(getattr(result, "mode", None), "value", None)
     return _respond(speech, raw=raw_text, mode=mode, want_json=want_json)
+
+
+def _discover_chat_id(token: str) -> str:
+    """Find the most recent chat that messaged the bot (so no chat_id env needed)."""
+    import json  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:  # noqa: S310
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return ""
+    for update in reversed(data.get("result", []) if isinstance(data, dict) else []):
+        chat = (update.get("message") or update.get("channel_post") or {}).get("chat", {})
+        if chat.get("id"):
+            return str(chat["id"])
+    return ""
+
+
+def _send_telegram(request: Request, text: str) -> bool:
+    """Send ``text`` to the configured (or auto-discovered) Telegram chat."""
+    settings = getattr(request.app.state, "settings", None)
+    secret = getattr(settings, "telegram_bot_token", None)
+    chat_id = getattr(settings, "telegram_chat_id", "") or ""
+    token = secret.get_secret_value() if secret is not None else ""
+    if not token:
+        return False
+    if not chat_id:
+        chat_id = _discover_chat_id(token)  # whoever last messaged the bot
+    if not chat_id:
+        return False
+    import urllib.parse  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    body = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    try:
+        with urllib.request.urlopen(  # noqa: S310
+            urllib.request.Request(url, data=body), timeout=8
+        ) as resp:
+            return bool(200 <= resp.status < 300)
+    except Exception:  # noqa: BLE001 - never raise to the caller
+        return False
+
+
+@router.post("/siri/telegram", response_model=None)
+async def siri_telegram(request: Request) -> Any:
+    """Smart-share to Telegram: the model extracts only the key content (never the
+    whole transcript). When the request is too vague it speaks a question instead
+    of sending, so the user can clarify."""
+    if not _siri_enabled(request):
+        return _disabled()
+    text = await _read_query(request)
+    if not text:
+        return JSONResponse(status_code=400, content={"detail": "missing text"})
+    want_json = request.query_params.get("format", "").lower() == "json"
+
+    from friday.notify import smart_share  # noqa: PLC0415
+
+    llm = getattr(request.app.state, "llm", None)
+    message, question = await smart_share(llm, text)
+    if message is None:
+        ask = question or "What should I send, Boss?"
+        return _respond(ask, raw=ask, mode="telegram_ask", want_json=want_json)
+
+    ok = _send_telegram(request, message)
+    msg = (
+        "Shared on Telegram, Boss."
+        if ok
+        else "Telegram isn't set up yet — add the bot token and chat id."
+    )
+    return _respond(msg, raw=message, mode="telegram", want_json=want_json)
+
+
+@router.api_route("/siri/digest", methods=["GET", "POST"], response_model=None)
+async def siri_digest(request: Request) -> Any:
+    """Build the daily brief (weather forecast + news) and push it to Telegram.
+
+    Designed for a free external cron (cron-job.org / UptimeRobot) to hit at 6 AM:
+    ``GET /siri/digest?key=…&lat=…&lon=…``. ``key`` must match ``digest_key`` when
+    that setting is non-empty (open otherwise); ``lat``/``lon`` set the forecast
+    location, defaulting to ``digest_lat``/``digest_lon``.
+    """
+    if not _siri_enabled(request):
+        return _disabled()
+    settings = getattr(request.app.state, "settings", None)
+    secret = getattr(settings, "digest_key", "") or ""
+    if secret and request.query_params.get("key", "") != secret:
+        return JSONResponse(status_code=403, content={"detail": "forbidden"})
+
+    lat = request.query_params.get("lat") or getattr(settings, "digest_lat", "") or ""
+    lon = request.query_params.get("lon") or getattr(settings, "digest_lon", "") or ""
+
+    from friday.notify import build_digest  # noqa: PLC0415
+
+    digest = await build_digest(str(lat), str(lon))
+    sent = _send_telegram(request, digest)
+    return JSONResponse(status_code=200, content={"sent": sent, "digest": digest})

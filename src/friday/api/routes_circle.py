@@ -13,17 +13,29 @@ Errors map cleanly: an unknown caller -> 401, a guardrail
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from friday.circle.auth import FirebaseTokenVerifier, TokenVerifier, resolve_caller
+from friday.circle.chat import (
+    ChatBroadcaster,
+    ChatService,
+    ChatStore,
+    InMemoryChatStore,
+    StreamTicketStore,
+)
+from friday.circle.firebase import FirebaseBackend, get_backend
+from friday.circle.firestore_store import FirestoreChatStore, FirestoreCircleStore
 from friday.circle.models import InviteError
 from friday.circle.service import CircleService
 from friday.circle.status import InMemoryStatusStore, StatusService
-from friday.circle.store import InMemoryCircleStore
+from friday.circle.store import CircleStore, InMemoryCircleStore
 from friday.errors import PermissionError
 from friday.logging import get_logger
 
@@ -41,11 +53,70 @@ def _disabled() -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": "circle disabled"})
 
 
+def _backend(request: Request) -> FirebaseBackend | None:
+    """The lazily-built Firebase backend (None when no service account is set)."""
+    state = request.app.state
+    if getattr(state, "_circle_backend_checked", False):
+        backend = getattr(state, "_circle_backend", None)
+        return backend if isinstance(backend, FirebaseBackend) else None
+    settings = getattr(state, "settings", None)
+    secret = getattr(settings, "firebase_service_account", None)
+    raw = secret.get_secret_value() if secret is not None else None
+    project = getattr(settings, "firebase_project_id", "") or ""
+    backend = get_backend(raw, project)
+    state._circle_backend = backend
+    state._circle_backend_checked = True
+    return backend
+
+
+def _verifier(request: Request) -> TokenVerifier | None:
+    """A real Firebase ID-token verifier when a backend exists, else None."""
+    state = request.app.state
+    if getattr(state, "_circle_verifier_checked", False):
+        existing = getattr(state, "_circle_verifier", None)
+        return existing if isinstance(existing, FirebaseTokenVerifier) else None
+    backend = _backend(request)
+    verifier = FirebaseTokenVerifier(backend.app) if backend is not None else None
+    state._circle_verifier = verifier
+    state._circle_verifier_checked = True
+    return verifier
+
+
 def _circle(request: Request) -> CircleService:
     service = getattr(request.app.state, "circle", None)
-    if not isinstance(service, CircleService):
-        service = CircleService(InMemoryCircleStore())
-        request.app.state.circle = service
+    if isinstance(service, CircleService):
+        return service
+    backend = _backend(request)
+    store: CircleStore = (
+        FirestoreCircleStore(backend.firestore)
+        if backend is not None
+        else InMemoryCircleStore()
+    )
+    service = CircleService(store)
+    request.app.state.circle = service
+    return service
+
+
+def _broadcaster(request: Request) -> ChatBroadcaster:
+    bc = getattr(request.app.state, "circle_broadcaster", None)
+    if not isinstance(bc, ChatBroadcaster):
+        bc = ChatBroadcaster()
+        request.app.state.circle_broadcaster = bc
+    return bc
+
+
+def _chat(request: Request) -> ChatService:
+    service = getattr(request.app.state, "circle_chat", None)
+    if isinstance(service, ChatService):
+        return service
+    backend = _backend(request)
+    store: ChatStore = (
+        FirestoreChatStore(backend.firestore)
+        if backend is not None
+        else InMemoryChatStore()
+    )
+    service = ChatService(_circle(request), store, _broadcaster(request))
+    request.app.state.circle_chat = service
     return service
 
 
@@ -57,15 +128,24 @@ def _status(request: Request) -> StatusService:
     return service
 
 
+def _tickets(request: Request) -> StreamTicketStore:
+    store = getattr(request.app.state, "circle_stream_tickets", None)
+    if not isinstance(store, StreamTicketStore):
+        store = StreamTicketStore()
+        request.app.state.circle_stream_tickets = store
+    return store
+
+
 def _caller_uid(request: Request) -> str | None:
+    """Resolve the ``Authorization`` bearer token to a uid.
+
+    A real Firebase ID token is verified via ``firebase-admin``; the dev/Siri
+    token->uid map on app state is the fallback, so both resolve through one path.
+    """
     identities = getattr(request.app.state, "siri_identities", None)
-    if not isinstance(identities, dict):
-        return None
-    auth = request.headers.get("authorization", "")
-    if not auth.lower().startswith("bearer "):
-        return None
-    uid = identities.get(auth[7:].strip())
-    return uid if isinstance(uid, str) else None
+    identity_map = identities if isinstance(identities, dict) else None
+    header = request.headers.get("authorization")
+    return resolve_caller(header, verifier=_verifier(request), identities=identity_map)
 
 
 def _unauthorized() -> JSONResponse:
@@ -198,3 +278,143 @@ async def get_status(request: Request, target_uid: str) -> JSONResponse:
         return JSONResponse(status_code=403, content={"detail": str(exc)})
     payload: dict[str, Any] = {"target_uid": target_uid, "speak": spoken}
     return JSONResponse(status_code=200, content=payload)
+
+
+class PostMessageBody(BaseModel):
+    # Base64 AES-GCM ciphertext + nonce, sealed in the browser. The server never
+    # sees plaintext or the key (E2EE) — it only relays and stores these two.
+    ciphertext: str = Field(min_length=1, max_length=20000)
+    nonce: str = Field(min_length=1, max_length=64)
+
+
+@router.get("/groups", response_model=None)
+async def my_groups(request: Request) -> JSONResponse:
+    if not _enabled(request):
+        return _disabled()
+    uid = _caller_uid(request)
+    if uid is None:
+        return _unauthorized()
+    groups = _circle(request).groups_for(uid)
+    body = [g.model_dump(mode="json") for g in groups]
+    return JSONResponse(status_code=200, content={"groups": body})
+
+
+@router.get("/invites/{code}", response_model=None)
+async def preview_invite(request: Request, code: str) -> JSONResponse:
+    if not _enabled(request):
+        return _disabled()
+    uid = _caller_uid(request)
+    if uid is None:
+        return _unauthorized()
+    group = _circle(request).peek_invite(code)
+    if group is None:
+        return JSONResponse(status_code=404, content={"detail": "invite not found"})
+    return JSONResponse(
+        status_code=200, content={"group": {"id": group.id, "name": group.name}}
+    )
+
+
+@router.post("/groups/{group_id}/messages", response_model=None)
+async def post_message(
+    request: Request, group_id: str, body: PostMessageBody
+) -> JSONResponse:
+    if not _enabled(request):
+        return _disabled()
+    uid = _caller_uid(request)
+    if uid is None:
+        return _unauthorized()
+    try:
+        message = _chat(request).post(
+            group_id=group_id,
+            sender_uid=uid,
+            ciphertext=body.ciphertext,
+            nonce=body.nonce,
+            now=datetime.now(UTC),
+        )
+    except PermissionError as exc:
+        return JSONResponse(status_code=403, content={"detail": str(exc)})
+    return JSONResponse(status_code=200, content=message.model_dump(mode="json"))
+
+
+@router.get("/groups/{group_id}/messages", response_model=None)
+async def list_messages(request: Request, group_id: str) -> JSONResponse:
+    if not _enabled(request):
+        return _disabled()
+    uid = _caller_uid(request)
+    if uid is None:
+        return _unauthorized()
+    try:
+        messages = _chat(request).history(group_id=group_id, requester_uid=uid)
+    except PermissionError as exc:
+        return JSONResponse(status_code=403, content={"detail": str(exc)})
+    body = [m.model_dump(mode="json") for m in messages]
+    return JSONResponse(status_code=200, content={"messages": body})
+
+
+@router.post("/groups/{group_id}/stream/ticket", response_model=None)
+async def stream_ticket(request: Request, group_id: str) -> JSONResponse:
+    """Mint a single-use, short-lived ticket to open the SSE stream.
+
+    Authenticated by the normal ``Authorization`` header (so the bearer token never
+    rides in a URL). The returned opaque ticket is bound to (uid, group_id), expires
+    in ~60s, and is consumed on first use.
+    """
+    if not _enabled(request):
+        return _disabled()
+    uid = _caller_uid(request)
+    if uid is None:
+        return _unauthorized()
+    members = _circle(request).list_members(group_id)
+    if not any(m.uid == uid for m in members):
+        return JSONResponse(status_code=403, content={"detail": "not a member"})
+    ticket = _tickets(request).mint(
+        uid=uid, group_id=group_id, now=datetime.now(UTC)
+    )
+    return JSONResponse(status_code=200, content={"ticket": ticket})
+
+
+@router.get("/groups/{group_id}/stream", response_model=None)
+async def stream_messages(
+    request: Request, group_id: str, ticket: str | None = None
+) -> Response:
+    """Server-Sent-Events stream of new ciphertext for a member of the group.
+
+    Authorized by a single-use ``ticket`` (minted via the POST above), NOT a bearer
+    token — so nothing sensitive appears in the URL or access logs. Each event's
+    ``data`` is a JSON ChatMessage (ciphertext only); the client decrypts locally.
+    """
+    if not _enabled(request):
+        return _disabled()
+    if not ticket:
+        return _unauthorized()
+    entry = _tickets(request).consume(ticket, now=datetime.now(UTC))
+    if entry is None or entry.group_id != group_id:
+        return _unauthorized()
+    uid = entry.uid
+    members = _circle(request).list_members(group_id)
+    if not any(m.uid == uid for m in members):
+        return JSONResponse(status_code=403, content={"detail": "not a member"})
+    broadcaster = _chat(request).broadcaster
+    queue = broadcaster.subscribe(group_id)
+
+    async def events() -> Any:
+        try:
+            yield ": connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=20)
+                except TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                payload = json.dumps(message.model_dump(mode="json"))
+                yield f"data: {payload}\n\n"
+        finally:
+            broadcaster.unsubscribe(group_id, queue)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

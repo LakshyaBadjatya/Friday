@@ -28,6 +28,28 @@
     }
     #links a.dl { background: #4f46e5; color: #fff; border-color: #4f46e5; }
     #links a.big { flex-basis: 100%; text-align: center; font-weight: 600; background: #16a34a; color: #fff; border-color: #16a34a; padding: 0.6rem; }
+    .muted { color: #8888; font-size: 0.9rem; }
+    hr.sep { margin: 1.6rem 0; }
+    #circle h2 { font-size: 1.15rem; margin-bottom: 0.4rem; }
+    #circle h3 { font-size: 1rem; margin: 1rem 0 0.4rem; }
+    #groups-list { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.6rem 0; }
+    .group-pill { padding: 0.4rem 0.7rem; }
+    #members { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.4rem 0; }
+    .member-pill { font-size: 0.85rem; padding: 0.25rem 0.6rem; border: 1px solid #8884; border-radius: 1rem; }
+    .member-row { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; font-size: 0.9rem; }
+    .member-name { font-weight: 600; }
+    .member-meta { color: #8889; font-size: 0.82rem; }
+    .member-map { font-size: 0.8rem; text-decoration: none; }
+    #invite-out textarea { width: 100%; box-sizing: border-box; font-size: 0.8rem; }
+    .messages { border: 1px solid #8884; border-radius: 0.6rem; padding: 0.6rem; height: 16rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.4rem; margin: 0.6rem 0; }
+    .msg { display: flex; }
+    .msg.mine { justify-content: flex-end; }
+    .bubble { max-width: 75%; padding: 0.4rem 0.7rem; border-radius: 0.8rem; background: #8882; word-break: break-word; }
+    .msg.mine .bubble { background: #4f46e5; color: #fff; }
+    #circle-status { min-height: 1.2rem; font-size: 0.9rem; }
+    .activity { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.4rem 0; }
+    .act-row { font-size: 0.88rem; padding: 0.4rem 0.6rem; border: 1px solid #8884; border-radius: 0.5rem; }
+    .act-row.act-sos { border-color: #dc2626; background: #dc26261a; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -54,6 +76,46 @@
       <a href="https://friday-backend-oj8h.onrender.com/studio" target="_blank" rel="noopener">Studio</a>
       <a class="dl" href="./friday.shortcut" download="friday.shortcut">Download Siri Shortcut</a>
     </nav>
+    <div class="row">
+      <button id="siri-token" class="ghost">Copy my Siri token</button>
+    </div>
+
+    <hr class="sep" />
+    <section id="circle">
+      <h2>Your circle</h2>
+      <div class="row">
+        <input id="group-name" placeholder="Group name (e.g. Us)" autocomplete="off" />
+        <button id="create-group">Create group</button>
+      </div>
+      <div id="groups-list"></div>
+
+      <div id="group-panel" hidden>
+        <h3 id="group-title"></h3>
+        <div id="members"></div>
+        <div class="row">
+          <button id="invite-friend" class="ghost">Invite friend</button>
+          <button id="cast-hud" class="ghost">Open chat in HUD</button>
+        </div>
+        <div id="invite-out" hidden>
+          <p class="muted">Send this private link to your friend. The encryption key lives in the link and never reaches our server.</p>
+          <textarea id="invite-link" readonly rows="3"></textarea>
+          <button id="copy-invite" class="ghost">Copy link</button>
+        </div>
+
+        <h3>Activity <span class="muted">· nudges &amp; alerts</span></h3>
+        <div id="activity" class="activity" aria-live="polite"></div>
+
+        <h3>Chat <span class="muted">· end-to-end encrypted</span></h3>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <div class="row">
+          <input id="chat-input" placeholder="Message…" autocomplete="off" />
+          <button id="chat-send">Send</button>
+        </div>
+      </div>
+      <div id="circle-status" aria-live="polite"></div>
+    </section>
+
+    <hr class="sep" />
     <button id="logout" class="ghost">Sign out</button>
   </section>
 

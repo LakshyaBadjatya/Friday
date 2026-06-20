@@ -220,15 +220,31 @@ function renderScene(sceneData) {
   setHud("status", `built “${sceneData.name || "scene"}” (${nodes.length} nodes)`);
 }
 
-// Frame the camera/orbit target on the new model's bounding box.
+// Frame the camera/orbit target on the new model's bounding box: re-point the
+// orbit target at the centre AND pull the camera to a distance that fits the
+// largest extent, so big models don't clip and tiny ones aren't specks. The
+// current view *direction* is preserved so generate/reset keep the same angle.
 function frameModel() {
   const box = new THREE.Box3().setFromObject(modelGroup);
   if (box.isEmpty()) {
     controls.target.set(0, 0.5, 0);
+    controls.update();
     return;
   }
   const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const fov = (camera.fov * Math.PI) / 180;
+  // Distance so maxDim fills the vertical FOV, plus padding so it isn't edge-to-edge.
+  const dist = (maxDim / 2 / Math.tan(fov / 2)) * 1.6 + maxDim * 0.5;
+  let dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+  if (dir.lengthSq() < 1e-6) dir.set(0.6, 0.45, 1);
+  dir.normalize();
   controls.target.copy(center);
+  camera.position.copy(center).add(dir.multiplyScalar(dist));
+  camera.near = Math.max(dist / 100, 0.01);
+  camera.far = dist * 100;
+  camera.updateProjectionMatrix();
   controls.update();
 }
 
@@ -622,6 +638,13 @@ function dist2(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+// Exponential moving average — smooths noisy per-frame MediaPipe samples toward
+// `next`. Lower alpha = steadier but laggier; this tames the landmark jitter that
+// otherwise makes gesture-driven rotate/zoom/scale jump around.
+function ema(prev, next, alpha = 0.4) {
+  return prev == null ? next : prev + alpha * (next - prev);
+}
+
 // Heuristic: a finger is "extended" if its tip is farther from the wrist than its
 // PIP joint (works for the upright-hand case MediaPipe normalizes to).
 function fingerExtended(lm, tip, pip, wrist) {
@@ -677,10 +700,14 @@ function onHandResults(results) {
   if (hands_.length >= 2) {
     const c0 = hands_[0][9];
     const c1 = hands_[1][9];
-    const spread = dist2(c0, c1);
+    const spread = ema(gestureState.lastSpread, dist2(c0, c1));
     if (gestureState.lastSpread != null) {
       const delta = spread - gestureState.lastSpread;
-      if (Math.abs(delta) > 0.005) scaleModel(1 + delta * 1.5);
+      // Deadzone ignores micro-jitter; the factor is clamped so a noisy frame
+      // can't suddenly resize the model.
+      if (Math.abs(delta) > 0.006) {
+        scaleModel(THREE.MathUtils.clamp(1 + delta * 1.5, 0.9, 1.1));
+      }
     }
     gestureState.lastSpread = spread;
     gestureState.lastPalm = null;
@@ -693,12 +720,16 @@ function onHandResults(results) {
   const hand = classifyHand(hands_[0]);
 
   if (hand.isPinch) {
+    const pinch = ema(gestureState.lastPinch, hand.pinch);
     if (gestureState.lastPinch != null) {
-      const delta = hand.pinch - gestureState.lastPinch;
-      // Closing the pinch (delta<0) zooms in.
-      if (Math.abs(delta) > 0.003) zoom(1 + delta * 4);
+      const delta = pinch - gestureState.lastPinch;
+      // Closing the pinch (delta<0) zooms in. Deadzone + clamp keep it from
+      // lurching when the thumb/index landmarks flicker.
+      if (Math.abs(delta) > 0.004) {
+        zoom(THREE.MathUtils.clamp(1 + delta * 3, 0.9, 1.1));
+      }
     }
-    gestureState.lastPinch = hand.pinch;
+    gestureState.lastPinch = pinch;
     gestureState.lastPalm = null;
     setHud("gesture", "pinch · zoom");
     return;
@@ -721,12 +752,19 @@ function onHandResults(results) {
   if (hand.isOpen) {
     const palm = hand.palm;
     if (gestureState.lastPalm) {
-      const dx = palm.x - gestureState.lastPalm.x;
-      const dy = palm.y - gestureState.lastPalm.y;
-      // Mirror x so moving your hand right rotates the model right.
-      rotateModel(-dx * 4, dy * 4);
+      // Smooth the palm toward its new position, then rotate by the smoothed
+      // delta (mirror x so moving your hand right rotates the model right).
+      const sx = ema(gestureState.lastPalm.x, palm.x, 0.5);
+      const sy = ema(gestureState.lastPalm.y, palm.y, 0.5);
+      const dx = sx - gestureState.lastPalm.x;
+      const dy = sy - gestureState.lastPalm.y;
+      if (Math.abs(dx) > 0.003 || Math.abs(dy) > 0.003) {
+        rotateModel(-dx * 3, dy * 3);
+      }
+      gestureState.lastPalm = { x: sx, y: sy };
+    } else {
+      gestureState.lastPalm = { x: palm.x, y: palm.y };
     }
-    gestureState.lastPalm = { x: palm.x, y: palm.y };
     setHud("gesture", "open · rotate");
     return;
   }
@@ -767,17 +805,22 @@ async function startHandTracking() {
       width: 320,
       height: 240,
     });
+    // Reveal the webcam/overlay BEFORE starting: a display:none <video> can be
+    // laid out at zero size, so MediaPipe grabs empty frames → no landmarks →
+    // gestures silently never fire. Showing it first guarantees real frames.
+    webcamEl.classList.add("is-live");
+    overlayEl.classList.add("is-live");
     await mpCamera.start();
 
     handTrackingOn = true;
-    webcamEl.classList.add("is-live");
-    overlayEl.classList.add("is-live");
     if (camToggleBtn) camToggleBtn.setAttribute("aria-pressed", "true");
     setHud("gesture", "ready");
     toast("Hand control on. Pinch=zoom · open hand=rotate · two hands=scale.", "info");
   } catch (err) {
     console.error(err);
     handTrackingOn = false;
+    webcamEl.classList.remove("is-live");
+    overlayEl.classList.remove("is-live");
     setHud("gesture", "denied");
     toast("Camera permission denied; gestures are off.", "warn");
   }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom"
+    android:orientation="vertical"
+    android:background="#CC101317"
+    android:padding="32dp">
+
+    <TextView android:id="@+id/heard"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:textColor="#7FE3FF" android:textSize="22sp" android:text="Listening…" />
+
+    <TextView android:id="@+id/reply"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:textColor="#FFFFFF" android:textSize="28sp" android:paddingTop="12dp" />
+</LinearLayout>

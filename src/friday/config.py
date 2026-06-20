@@ -171,6 +171,12 @@ class Settings(BaseSettings):
     # dependency); a missing CLI degrades cleanly with an install hint. Read-only:
     # never fabricates on error.
     enable_agent_reach: bool = False
+    # Auto-delegate (roster): when on, a turn that names no operator is routed to
+    # the specialist whose topic keyword it matches, so the right persona — and its
+    # own free model — answers. An explicit address (the ``→ EDITH`` chip / "EDITH,
+    # ...") always wins. Off by default so existing tests / un-rostered builds keep
+    # the prime-only path; explicit addressing works regardless of this flag.
+    enable_auto_delegate: bool = False
     # Base of the keyless Jina Reader endpoint; ``read_url`` issues
     # ``GET {base}{url}`` and expects clean markdown back.
     agent_reach_jina_base: str = "https://r.jina.ai/"
@@ -612,6 +618,17 @@ class Settings(BaseSettings):
     # same orchestrator as ``/chat``. Public/tunnelled deployments MUST pair this
     # with ``require_auth`` + an ``api_keys`` token (the route has full power).
     enable_siri: bool = False
+    # Fast voice path for ``/siri/ask``: answer general questions with a single
+    # persona'd LLM call instead of the full orchestrator graph (much lower latency
+    # for Siri). On by default; set false to always use the orchestrator.
+    siri_fast_path: bool = True
+
+    # --- Android TV front door (default off) ---
+    # Gates the ``/tv`` surface (``/tv/ask``, ``/tv/command``, ``/tv/pair``,
+    # ``/tv/poll``, ``ws /tv/stream``). Off by default so every route 404s; when on
+    # it sits behind the same ``AuthMiddleware`` bearer token + rate limiter as Siri.
+    # ``/tv/ask`` parses spoken text into a structured action the TV client runs.
+    enable_tv: bool = False
 
     # --- Circle (friends groups; default off) ---
     # Gates the ``/circle`` REST surface (groups, invites, members, status). Off by
@@ -619,6 +636,40 @@ class Settings(BaseSettings):
     # state (Firebase ID-token verification replaces it later). Services fall back
     # to in-memory stores until a persistent backend is wired.
     enable_circle: bool = False
+    # Firebase service-account credential for the circle's persistent/authenticated
+    # backend. Either the raw service-account JSON (as a string) or a filesystem path
+    # to it. When set, the circle routes verify real Firebase ID tokens and persist
+    # to Firestore via ``firebase-admin``; when empty they fall back to in-memory
+    # stores + the dev bearer-token map. A secret — never logged or committed.
+    firebase_service_account: SecretStr | None = None
+    # Optional explicit Firebase project id (else inferred from the credential).
+    firebase_project_id: str = ""
+    # Browser origins allowed to call the API cross-origin (the web app on Vercel
+    # talks to this backend on Render). Comma-separated; ``*`` allows any. Auth is
+    # by bearer token (not cookies), so ``*`` is safe here — credentials are off.
+    cors_allow_origins: str = "*"
+    # Optional Telegram bot for sharing results (``POST /siri/telegram``). Both must
+    # be set for sharing to work: the bot token from @BotFather and the destination
+    # chat id. Empty => the share endpoint reports it's not set up (no integration).
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str = ""
+    # Daily digest (weather forecast + news headlines) pushed to Telegram by an
+    # external cron hitting ``GET /siri/digest?key=…&lat=…&lon=…`` (e.g. 6 AM).
+    # ``digest_key`` gates that endpoint (empty => open); ``digest_lat``/``lon``
+    # default the forecast location when the cron URL omits them.
+    digest_key: str = ""
+    digest_lat: str = ""
+    digest_lon: str = ""
+
+    # --- Instagram DMs (unofficial / instagrapi; Tier 3; default off) ---
+    # On-demand only (no polling). The session JSON is produced once on the user's
+    # own machine (scripts/ig_login.py) and reused so the server skips a fresh
+    # datacenter-IP login. All credentials are secrets and never logged.
+    enable_instagram_dms: bool = False
+    instagram_username: str = ""  # FRIDAY_INSTAGRAM_USERNAME
+    instagram_password: SecretStr | None = None  # FRIDAY_INSTAGRAM_PASSWORD
+    instagram_session_json: SecretStr | None = None  # FRIDAY_INSTAGRAM_SESSION_JSON (saved session)
+    instagram_read_aloud_limit: int = 5
 
     # --- 3D Studio (Phase 7; default off) ---
     # The whole studio feature (router + static UI) is gated behind this flag; off

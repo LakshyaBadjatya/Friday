@@ -157,6 +157,26 @@ class CircleService:
                 seen.setdefault(member.uid, member)
         return list(seen.values())
 
+    def groups_for(self, uid: str) -> list[Group]:
+        """Every group ``uid`` is a member of (powers the my-groups listing)."""
+        groups: list[Group] = []
+        for group_id in self._store.groups_of(uid):
+            group = self._store.get_group(group_id)
+            if group is not None:
+                groups.append(group)
+        return groups
+
+    def peek_invite(self, code: str) -> Group | None:
+        """The group an invite points to, for an accept-page preview (no guardrail).
+
+        Returns ``None`` if the invite or its group is unknown; validity (expiry,
+        single-use, revocation) is still enforced by :meth:`accept_invite`.
+        """
+        invite = self._store.get_invite(code)
+        if invite is None:
+            return None
+        return self._store.get_group(invite.group_id)
+
     def _require_admin(self, group_id: str, uid: str) -> None:
         member = self._store.get_member(group_id, uid)
         if member is None or member.role is not Role.ADMIN:

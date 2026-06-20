@@ -47,11 +47,13 @@ from friday.api.routes_approvals import router as approvals_router
 from friday.api.routes_automation import router as automation_router
 from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
+from friday.api.routes_circle import router as circle_router
 from friday.api.routes_comms import router as comms_router
 from friday.api.routes_email import router as email_router
 from friday.api.routes_emotion import router as emotion_router
 from friday.api.routes_ensemble import router as ensemble_router
 from friday.api.routes_export import router as export_router
+from friday.api.routes_flows import router as flows_router
 from friday.api.routes_graph import router as graph_router
 from friday.api.routes_health import router as health_router
 from friday.api.routes_journal import router as journal_router
@@ -61,7 +63,6 @@ from friday.api.routes_models import router as models_router
 from friday.api.routes_multimodal import router as multimodal_router
 from friday.api.routes_n8n import router as n8n_router
 from friday.api.routes_perception import router as perception_router
-from friday.api.routes_flows import router as flows_router
 from friday.api.routes_planner import router as planner_router
 from friday.api.routes_plugins import router as plugins_router
 from friday.api.routes_protocols import router as protocols_router
@@ -71,10 +72,12 @@ from friday.api.routes_roster import router as roster_router
 from friday.api.routes_schedules import router as schedules_router
 from friday.api.routes_security import router as security_router
 from friday.api.routes_sentiment import router as sentiment_router
+from friday.api.routes_siri import router as siri_router
 from friday.api.routes_studio import STATIC_DIR as STUDIO_STATIC_DIR
 from friday.api.routes_studio import router as studio_router
 from friday.api.routes_study import router as study_router
 from friday.api.routes_system import router as system_router
+from friday.api.routes_tv import router as tv_router
 from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
@@ -85,13 +88,13 @@ from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
 from friday.core.ensemble import Ensemble
 from friday.core.orchestrator import ForgettableVectorStore, Orchestrator
 from friday.core.planner import Planner
+from friday.desktop import AuditedDesktop, DesktopAction, FakeDesktop
+from friday.errors import ProviderError
+from friday.family import router as family_router
 from friday.flows.engine import FlowEngine
 from friday.flows.replan import Replanner
 from friday.flows.store import SQLiteFlowStore
 from friday.flows.templates import FlowTemplateStore
-from friday.desktop import AuditedDesktop, DesktopAction, FakeDesktop
-from friday.errors import ProviderError
-from friday.family import router as family_router
 from friday.graph.extractor import EntityExtractor
 from friday.graph.store import SQLiteGraphStore
 from friday.hud import router as hud_router
@@ -113,6 +116,7 @@ from friday.memory.vector import SQLiteVectorStore
 from friday.models.budget import Budgeter
 from friday.models.catalog import ModelCatalog
 from friday.models.gateway import ModelGateway
+from friday.models.personas import resolve_persona_models
 from friday.n8n.client import N8nClient
 from friday.n8n.drafter import WorkflowDrafter
 from friday.n8n.service import N8nService
@@ -1719,6 +1723,10 @@ class AppRuntime:
     #: The model catalog scoped to the available providers, or ``None`` when no
     #: gateway is wired. The ``/models`` routes list + validate ids against it.
     model_catalog: ModelCatalog | None
+    #: Per-persona free-model assignment (code-name -> catalog id), resolved from
+    #: the catalog at build time. Empty on builds without a gateway/catalog. Wired
+    #: into the orchestrator (per-turn model) and surfaced via ``/roster``.
+    persona_models: dict[str, str]
     #: The per-turn cost/latency budgeter wired into the orchestrator's turn loop,
     #: or ``None`` when ``enable_budgeter`` is off. When present (and a gateway is
     #: wired) a hot turn downshifts the gateway's active model.
@@ -1798,6 +1806,9 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         gateway = None
         model_catalog = None
         primary_llm = _build_llm(settings)
+    # (Per-persona model assignment is built further below — once the roster,
+    # including any custom operators, is known — so custom agents get a distinct
+    # model too. See ``persona_models`` after the roster is assembled.)
     # Then engage strict offline mode when configured: ``select_llm`` swaps in the
     # network-free OfflineLLM when ``enable_offline_mode`` is on, so every consumer
     # (orchestrator, agents, briefing/journal/studio/meeting/n8n) shares one
@@ -1886,6 +1897,16 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         except Exception as exc:  # noqa: BLE001 - malformed config must not crash boot
             logger.warning("skipping invalid FRIDAY_CUSTOM_OPERATORS: %s", exc)
             roster = ROSTER
+    # Assign every roster operator — the built-in specialists AND any custom
+    # operators — its own distinct free model from the catalog, so every summoned or
+    # auto-delegated agent answers on a different brain. Built from the merged roster
+    # so custom agents are covered too. Empty when no gateway/catalog is wired (the
+    # fake/single-provider build), leaving every turn on the default model.
+    persona_models = (
+        resolve_persona_models(model_catalog, roster.personas())
+        if model_catalog is not None
+        else {}
+    )
     # The per-turn budgeter + calibrated confidence scorer (Wave 0). Each is
     # ``None`` unless its own flag is set, so the offline default constructs
     # neither seam. The budgeter governs gateway downshift; the confidence scorer
@@ -1915,6 +1936,7 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         gateway=gateway,
         budget_downshift_model_id=settings.budget_downshift_model_id,
         compaction=_build_compactor(settings, llm),
+        persona_models=persona_models,
     )
     return AppRuntime(
         orchestrator=orchestrator,
@@ -1954,6 +1976,7 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         foresight=foresight,
         gateway=gateway,
         model_catalog=model_catalog,
+        persona_models=persona_models,
         budgeter=budgeter,
         confidence=confidence,
     )
@@ -2458,6 +2481,13 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     runtime = build_runtime(settings)
     app.state.settings = settings
     app.state.orchestrator = runtime.orchestrator
+    # The bare LLM provider, exposed for lightweight one-shot classifications that
+    # must not pay for the full orchestrator graph (Siri near-me auto-detect and
+    # the smart-Telegram summariser both call it directly).
+    app.state.llm = runtime.llm
+    from friday.tv.relay import TVRelay  # noqa: PLC0415
+
+    app.state.tv_relay = TVRelay()
     app.state.tracer = runtime.tracer
     app.state.audit = runtime.audit
     app.state.metrics = runtime.metrics
@@ -2495,6 +2525,8 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     # single-provider/fake builds, so those routes self-guard to 404.
     app.state.gateway = runtime.gateway
     app.state.model_catalog = runtime.model_catalog
+    # Per-persona model assignment, surfaced for the ``/roster`` listing.
+    app.state.persona_models = runtime.persona_models
     _wire_studio(app, settings, runtime.llm)
     _wire_ensemble(app, settings, runtime.llm)
     _wire_planner(app, settings, runtime.llm)
@@ -2625,6 +2657,20 @@ def create_app() -> FastAPI:
         settings=gateway_settings,
         access_policy=_build_access_policy(gateway_settings),
     )
+    # CORS, added last so it runs outermost — preflight (OPTIONS) is answered before
+    # auth/rate-limit. The web app (Vercel) calls this backend (Render) cross-origin;
+    # auth is by bearer token, not cookies, so credentials stay off and "*" is safe.
+    from fastapi.middleware.cors import CORSMiddleware  # noqa: PLC0415
+
+    _cors = getattr(gateway_settings, "cors_allow_origins", "*") or "*"
+    _origins = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(chat_router)
     app.include_router(health_router)
@@ -2653,6 +2699,15 @@ def create_app() -> FastAPI:
     # The persona roster listing (Stage 2) — always available (no flag); a pure
     # read-only listing of FRIDAY + the eight least-privilege specialists.
     app.include_router(roster_router)
+    # The Siri front door — always registered but self-guards on FRIDAY_ENABLE_SIRI
+    # (404 when off), so the offline default exposes no Siri surface.
+    app.include_router(siri_router)
+    # The Android TV surface — always registered but self-guards on FRIDAY_ENABLE_TV
+    # (404 when off): parses spoken commands into TV actions + relays phone commands.
+    app.include_router(tv_router)
+    # The circle REST surface — always registered but self-guards on
+    # FRIDAY_ENABLE_CIRCLE (404 when off).
+    app.include_router(circle_router)
     # The 3D Studio (Phase 7) — always registered but self-guards on
     # FRIDAY_ENABLE_STUDIO (404 when off), so the offline default exposes no
     # studio surface. The StaticFiles mount is added below only when enabled.

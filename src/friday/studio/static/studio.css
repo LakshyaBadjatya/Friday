@@ -87,7 +87,10 @@ html, body {
     radial-gradient(1200px 600px at 50% -10%, #1a1a24 0%, var(--bg) 60%);
 }
 #viewport { position: absolute; inset: 0; }
-#viewport canvas { display: block; }
+/* The renderer sets the drawing-buffer to devicePixelRatio×CSS size and is called
+ * with updateStyle=false, so the canvas must be pinned to the viewport here —
+ * otherwise on HiDPI screens it lays out at 2× and overflows the clipped stage. */
+#viewport canvas { display: block; width: 100% !important; height: 100% !important; }
 
 /* Webcam is captured for landmarks but visually small + unobtrusive (or hidden). */
 #webcam {

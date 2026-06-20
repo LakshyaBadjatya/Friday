@@ -13,27 +13,40 @@
 */
 
 :root {
-  /* palette — calmer, more premium FRIDAY */
-  --bg: #060910;
-  --bg-2: #080d18;
-  --surface: #0b1220;
-  --surface-2: #0e1727;
+  /* palette — FRIDAY OS: deep-space black, hard cyan reactor glow */
+  --bg: #03060d;
+  --bg-2: #060b16;
+  --surface: #0a111f;
+  --surface-2: #0d1626;
   --surface-3: #122036;
-  --ink: #d6e6f7;
+  --ink: #d9ebff;
   --ink-2: #9fb3cc;
-  --ink-dim: #62788f;
+  --ink-dim: #5d738c;
   --cyan: #4fe3ff;
   --cyan-2: #2bb7d6;
-  --cyan-soft: rgba(79, 227, 255, 0.4);
+  --cyan-soft: rgba(79, 227, 255, 0.42);
   --cyan-faint: rgba(79, 227, 255, 0.12);
+  --cyan-rgb: 79, 227, 255; /* for runtime alpha compositing in fx */
   --gold: #ffce73;
   --gold-soft: rgba(255, 206, 115, 0.4);
   --danger: #ff6b78;
   --danger-soft: rgba(255, 107, 120, 0.4);
   --ok: #5fe6a6;
   --ok-soft: rgba(95, 230, 166, 0.4);
-  --line: #1a2740;
+  --line: #18253c;
   --line-2: #243653;
+
+  /* ---- FRIDAY OS effect tokens (consumed by the MAXIMAL FX section) ---- */
+  --accent: var(--cyan);              /* semantic alias for the live accent */
+  --accent-rgb: var(--cyan-rgb);
+  --glow-strong: 0 0 18px rgba(var(--accent-rgb), 0.55), 0 0 42px rgba(var(--accent-rgb), 0.22);
+  --glow-text: 0 0 10px rgba(var(--accent-rgb), 0.55);
+  --scan: rgba(var(--accent-rgb), 0.05);   /* CRT scanline ink */
+  --grid: rgba(var(--accent-rgb), 0.045);  /* engineering-grid ink */
+  --bracket: var(--accent);                /* holo-frame corner brackets */
+  --chamfer: 14px;                          /* machined-panel notch size */
+  --chamfer-sm: 9px;
+  --level: 0;                               /* audio-reactive reactor 0..1 (set by fx) */
 
   /* spacing scale: 4 / 8 / 12 / 16 / 24 / 32 / 48 */
   --s-1: 4px;
@@ -76,27 +89,32 @@
  * in :root above; each variant only re-points the accent + (for "light") the
  * surface tokens, so every component re-skins through the existing var()s. */
 [data-theme="amber"] {
-  --cyan: #ffce73;
-  --cyan-2: #d9a441;
-  --cyan-soft: rgba(255, 206, 115, 0.4);
-  --cyan-faint: rgba(255, 206, 115, 0.12);
+  --cyan: #ffb347;
+  --cyan-2: #d9852b;
+  --cyan-soft: rgba(255, 179, 71, 0.42);
+  --cyan-faint: rgba(255, 179, 71, 0.12);
+  --cyan-rgb: 255, 179, 71;
   --gold: #4fe3ff;
   --gold-soft: rgba(79, 227, 255, 0.4);
 }
 [data-theme="crimson"] {
-  --cyan: #ff6b78;
-  --cyan-2: #d6445a;
-  --cyan-soft: rgba(255, 107, 120, 0.4);
-  --cyan-faint: rgba(255, 107, 120, 0.12);
-  --gold: #ffce73;
+  --cyan: #ff3b52;
+  --cyan-2: #d6213a;
+  --cyan-soft: rgba(255, 59, 82, 0.45);
+  --cyan-faint: rgba(255, 59, 82, 0.13);
+  --cyan-rgb: 255, 59, 82;
+  --gold: #4fe3ff;
 }
 [data-theme="emerald"] {
-  --cyan: #5fe6a6;
-  --cyan-2: #2bb784;
-  --cyan-soft: rgba(95, 230, 166, 0.4);
-  --cyan-faint: rgba(95, 230, 166, 0.12);
+  --cyan: #43f0a0;
+  --cyan-2: #1fb778;
+  --cyan-soft: rgba(67, 240, 160, 0.42);
+  --cyan-faint: rgba(67, 240, 160, 0.12);
+  --cyan-rgb: 67, 240, 160;
+  --gold: #ffce73;
 }
 [data-theme="light"] {
+  --cyan-rgb: 10, 132, 199;
   --bg: #eef3fb;
   --bg-2: #e4ecf7;
   --surface: #ffffff;
@@ -126,8 +144,9 @@ body {
 
 body {
   background:
-    radial-gradient(1100px 760px at 18% -8%, #0c1830 0%, rgba(12, 24, 48, 0) 60%),
-    radial-gradient(900px 700px at 100% 0%, #0d1a26 0%, rgba(13, 26, 38, 0) 55%),
+    radial-gradient(1200px 820px at 16% -10%, rgba(var(--accent-rgb), 0.1) 0%, rgba(0, 0, 0, 0) 58%),
+    radial-gradient(900px 720px at 102% 4%, rgba(var(--accent-rgb), 0.06) 0%, rgba(0, 0, 0, 0) 55%),
+    radial-gradient(1400px 1000px at 50% 120%, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0) 60%),
     var(--bg);
   color: var(--ink);
   font-family: var(--mono);
@@ -1489,6 +1508,316 @@ select {
   50% { transform: scale(1.05); filter: brightness(1.2); }
 }
 
+/* ============================================================================
+   MAXIMAL FX — "FRIDAY OS" hybrid Stark + hacker layer.
+   Everything below is additive and lives AFTER the base rules so it wins the
+   cascade on equal specificity. It is driven by hud-fx.js (matrix rain,
+   telemetry, sound, holographic reveal, calm-mode) and degrades to nothing
+   under prefers-reduced-motion / html.calm.
+   ============================================================================ */
+
+/* Sharper, more "machined" corners than the soft app default. */
+:root {
+  --r-1: 5px;
+  --r-2: 8px;
+  --r-3: 11px;
+}
+
+/* ---- ambient backdrop layers (behind the app shell) --------------------- */
+#matrix,
+#grid,
+#vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+#matrix { opacity: 0.34; mix-blend-mode: screen; }
+#grid {
+  opacity: 0.6;
+  background-image:
+    repeating-linear-gradient(0deg, var(--grid) 0 1px, transparent 1px 44px),
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 44px);
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 78%);
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 78%);
+}
+#vignette {
+  box-shadow: inset 0 0 240px 40px rgba(0, 0, 0, 0.7);
+  background: radial-gradient(140% 120% at 50% 50%, transparent 55%, rgba(0, 0, 0, 0.45) 100%);
+}
+#particles { opacity: 0.6; }
+
+/* ---- CRT scanlines + flicker (over everything, never blocks clicks) ----- */
+#scanlines {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    180deg, var(--scan) 0 1px, transparent 1px 3px
+  );
+  opacity: 0.55;
+  animation: crtFlicker 5.5s steps(60) infinite;
+}
+#scanlines::after {
+  /* a slow bright sweep sliding down the screen */
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 26%;
+  top: -26%;
+  background: linear-gradient(
+    180deg, transparent, rgba(var(--accent-rgb), 0.05), transparent
+  );
+  animation: crtSweep 7s linear infinite;
+}
+@keyframes crtFlicker {
+  0%, 96%, 100% { opacity: 0.55; }
+  97% { opacity: 0.4; }
+  98% { opacity: 0.66; }
+  99% { opacity: 0.46; }
+}
+@keyframes crtSweep {
+  to { top: 130%; }
+}
+
+/* ---- holo-frame corner brackets on every framed surface ----------------- */
+.panel,
+.card,
+.arena-card,
+.agent-card,
+.metric-card,
+.composer-row,
+.replay,
+.brain-modal,
+#palette,
+.drop-card,
+.approval {
+  position: relative;
+}
+.panel::before,
+.card::before,
+.arena-card::before,
+.agent-card::before,
+.metric-card::before,
+.composer-row::before,
+.replay::before,
+.brain-modal::before,
+#palette::before,
+.drop-card::before,
+.approval::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  border-radius: inherit;
+  --bl: 12px;   /* bracket arm length */
+  --bw: 1.5px;  /* bracket thickness */
+  background:
+    linear-gradient(var(--bracket), var(--bracket)) 0 0 / var(--bl) var(--bw) no-repeat,
+    linear-gradient(var(--bracket), var(--bracket)) 0 0 / var(--bw) var(--bl) no-repeat,
+    linear-gradient(var(--bracket), var(--bracket)) 100% 0 / var(--bl) var(--bw) no-repeat,
+    linear-gradient(var(--bracket), var(--bracket)) 100% 0 / var(--bw) var(--bl) no-repeat,
+    linear-gradient(var(--bracket), var(--bracket)) 0 100% / var(--bl) var(--bw) no-repeat,
+    linear-gradient(var(--bracket), var(--bracket)) 0 100% / var(--bw) var(--bl) no-repeat,
+    linear-gradient(var(--bracket), var(--bracket)) 100% 100% / var(--bl) var(--bw) no-repeat,
+    linear-gradient(var(--bracket), var(--bracket)) 100% 100% / var(--bw) var(--bl) no-repeat;
+  opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+.agent-card:hover::before,
+.arena-card.winner::before,
+.composer-row:focus-within::before,
+.panel:hover::before { opacity: 0.95; }
+
+/* a glowing instrument hairline along the top of headline panels */
+.panel::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0.5;
+  box-shadow: var(--glow-text);
+  pointer-events: none;
+}
+.panel-h::before {
+  /* a small "▌" tab marker before every panel heading */
+  content: "▌ ";
+  color: var(--accent);
+  text-shadow: var(--glow-text);
+}
+
+/* ---- metric values + headings get the heavy-AI glow --------------------- */
+.mc-value { text-shadow: var(--glow-strong); }
+.vh-title {
+  text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.22);
+}
+
+/* ---- holographic reveal: data materialising in (added by hud-fx.js) ----- */
+@keyframes fxReveal {
+  0% { opacity: 0; transform: translateY(8px); filter: brightness(2.4) saturate(0.4); clip-path: inset(0 0 100% 0); }
+  60% { filter: brightness(1.4); }
+  100% { opacity: 1; transform: translateY(0); filter: none; clip-path: inset(0 0 0 0); }
+}
+.fx-reveal { animation: fxReveal 360ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* ---- glitch wordmark (FRIDAY) ------------------------------------------- */
+.brand-word { position: relative; }
+.brand-word::before,
+.brand-word::after {
+  content: attr(data-text);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  opacity: 0;
+  pointer-events: none;
+}
+.brand-word.is-glitch::before {
+  opacity: 0.9;
+  color: var(--accent);
+  animation: glitchA 460ms steps(2) 1;
+}
+.brand-word.is-glitch::after {
+  opacity: 0.9;
+  color: var(--danger);
+  animation: glitchB 460ms steps(2) 1;
+}
+@keyframes glitchA {
+  0% { transform: translate(0, 0); clip-path: inset(0 0 70% 0); }
+  25% { transform: translate(-2px, -1px); clip-path: inset(40% 0 20% 0); }
+  50% { transform: translate(2px, 1px); clip-path: inset(10% 0 60% 0); }
+  75% { transform: translate(-1px, 1px); clip-path: inset(60% 0 5% 0); }
+  100% { transform: translate(0, 0); clip-path: inset(0 0 70% 0); }
+}
+@keyframes glitchB {
+  0% { transform: translate(0, 0); clip-path: inset(60% 0 10% 0); }
+  25% { transform: translate(2px, 1px); clip-path: inset(15% 0 55% 0); }
+  50% { transform: translate(-2px, -1px); clip-path: inset(50% 0 25% 0); }
+  75% { transform: translate(1px, -1px); clip-path: inset(20% 0 60% 0); }
+  100% { transform: translate(0, 0); clip-path: inset(60% 0 10% 0); }
+}
+
+/* ---- audio-reactive reactor (brand mark scales/glows with --level) ------ */
+.brand-mark {
+  transform: scale(calc(1 + var(--level) * 0.28));
+  transition: transform 90ms linear;
+}
+.brand-mark .bm-core {
+  box-shadow:
+    0 0 calc(10px + var(--level) * 26px) var(--cyan),
+    inset 0 0 6px #fff;
+}
+
+/* ---- rail telemetry readout (the "heavy AI system" data block) ---------- */
+.rail-telemetry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: rgba(var(--accent-rgb), 0.03);
+}
+.tele-row {
+  display: grid;
+  grid-template-columns: 52px 1fr auto;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-0);
+  letter-spacing: 0.1em;
+}
+.tele-k { color: var(--ink-dim); text-transform: uppercase; }
+.tele-bar {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.tele-bar i {
+  display: block;
+  height: 100%;
+  width: 50%;
+  background: linear-gradient(90deg, var(--accent), transparent);
+  box-shadow: 0 0 8px var(--cyan-soft);
+  transition: width 600ms ease;
+}
+.tele-v { color: var(--accent); text-shadow: var(--glow-text); justify-self: end; }
+.tele-hex {
+  font-size: var(--t-00);
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+  opacity: 0.7;
+}
+
+/* ---- FX toggle buttons (calm mode + sound) ------------------------------ */
+.fx-toggles { display: flex; gap: var(--s-2); }
+.fx-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-1);
+  height: 30px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  font-size: var(--t-0);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+.fx-btn:hover { color: var(--ink-2); border-color: var(--cyan-soft); }
+.fx-btn[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--cyan-soft);
+  box-shadow: inset 0 0 12px var(--cyan-faint);
+}
+
+/* ---- richer boot: a third ring, scanlines inside, glitchy title --------- */
+#boot {
+  background:
+    repeating-linear-gradient(180deg, var(--scan) 0 1px, transparent 1px 3px),
+    radial-gradient(900px 600px at 50% 50%, #06121f, #01030a 75%);
+}
+.boot-reactor::before {
+  content: "";
+  position: absolute;
+  inset: -14px;
+  border-radius: 50%;
+  border: 1px dashed var(--cyan-soft);
+  opacity: 0.5;
+  animation: spin 14s linear infinite reverse;
+}
+.boot-text {
+  text-shadow: var(--glow-text);
+  text-transform: uppercase;
+}
+
+/* ---- calm mode: keep the look, kill the continuous motion --------------- */
+html.calm #matrix,
+html.calm #scanlines { display: none; }
+html.calm #particles { opacity: 0.28; }
+html.calm .brand-word.is-glitch::before,
+html.calm .brand-word.is-glitch::after { animation: none; opacity: 0; }
+html.calm .brand-mark { transform: none; }
+
+/* ---- reduced motion: freeze the heavy fx entirely ----------------------- */
+@media (prefers-reduced-motion: reduce) {
+  #matrix,
+  #scanlines { display: none; }
+  .fx-reveal { animation: none; }
+}
+
 /* ====================================================== responsive shell === */
 /* Under 900px the rail becomes a bottom tab-bar and views go full width. */
 @media (max-width: 900px) {
@@ -1521,6 +1850,9 @@ select {
   .brain-pill { min-width: 0; padding: var(--s-2); }
   .brain-pill .bp-label { display: none; }
   .conn { display: none; }
+  .rail-telemetry,
+  .fx-toggles { display: none; }
+  #grid { display: none; }
 
   .view { padding: var(--s-4) var(--s-4) 0; }
   .view-head { flex-direction: column; gap: var(--s-3); }
@@ -1553,4 +1885,115 @@ select {
   text-align: center;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
   transition: background 240ms ease;
+}
+
+/* ============================================================================
+   ARC-REACTOR CENTERPIECE — the JARVIS hero.
+   A large, theme-tinted reactor (concentric dial rings + radial ticks + a
+   sweeping arc + a Stark triangle + a glowing core) sits BEHIND the views in
+   the main canvas. It is the star of the empty Command screen and an ambient
+   core behind the data panels. Kept deliberately clean: moderate opacity, lots
+   of breathing room, no clutter. Fades back when a conversation is on screen.
+   ============================================================================ */
+.view { position: relative; z-index: 1; }   /* lift view content above the reactor */
+
+#reactor-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 0.55;
+  transition: opacity 600ms ease;
+}
+#reactor-stage.has-chat { opacity: 0.12; }   /* recede once a conversation begins */
+/* pure-CSS fade once the chat log holds a turn (no JS needed) */
+#canvas:has(.chat-log .turn) #reactor-stage,
+#canvas:has(.chat-log .approval) #reactor-stage { opacity: 0.12; }
+
+.reactor-core {
+  position: relative;
+  width: min(56vmin, 560px);
+  height: min(56vmin, 560px);
+  filter: drop-shadow(0 0 30px rgba(var(--accent-rgb), 0.25));
+}
+.rr { position: absolute; border-radius: 50%; inset: 0; }
+
+/* faint base circle + a steady outer dashed bezel */
+.rr-base { border: 1px solid rgba(var(--accent-rgb), 0.22); box-shadow: inset 0 0 60px rgba(var(--accent-rgb), 0.06); }
+.rr-dash { inset: 4%; border: 1px dashed rgba(var(--accent-rgb), 0.3); animation: spin 48s linear infinite; }
+.rr-inner { inset: 24%; border: 1px dashed rgba(var(--accent-rgb), 0.34); animation: spin 30s linear infinite reverse; }
+
+/* a ring of radial measurement ticks (conic gradient, masked to an annulus) */
+.rr-ticks {
+  inset: 8%;
+  background: repeating-conic-gradient(rgba(var(--accent-rgb), 0.5) 0 0.4deg, transparent 0.4deg 6deg);
+  -webkit-mask: radial-gradient(circle, transparent 63%, #000 64%, #000 70%, transparent 71%);
+  mask: radial-gradient(circle, transparent 63%, #000 64%, #000 70%, transparent 71%);
+  animation: spin 90s linear infinite;
+}
+/* a single bright sweeping arc that orbits the core */
+.rr-arc {
+  inset: 14%;
+  background: conic-gradient(from 0deg, transparent 0 286deg, rgba(var(--accent-rgb), 0.05) 300deg, var(--accent) 348deg, transparent 360deg);
+  -webkit-mask: radial-gradient(circle, transparent 70%, #000 71%, #000 78%, transparent 79%);
+  mask: radial-gradient(circle, transparent 70%, #000 71%, #000 78%, transparent 79%);
+  animation: spin 12s linear infinite;
+}
+/* four cardinal gauge blocks on the mid ring */
+.rr-gauge {
+  inset: 0;
+  background:
+    conic-gradient(from 84deg, var(--accent) 0 12deg, transparent 12deg) ,
+    conic-gradient(from 174deg, var(--accent) 0 12deg, transparent 12deg),
+    conic-gradient(from 264deg, var(--accent) 0 12deg, transparent 12deg),
+    conic-gradient(from 354deg, var(--accent) 0 12deg, transparent 12deg);
+  -webkit-mask: radial-gradient(circle, transparent 80%, #000 81%, #000 85%, transparent 86%);
+  mask: radial-gradient(circle, transparent 80%, #000 81%, #000 85%, transparent 86%);
+  opacity: 0.7;
+  animation: spin 40s linear infinite reverse;
+}
+
+/* the Stark triangle — an outline frame around the core */
+.reactor-tri {
+  position: absolute;
+  inset: 30%;
+  clip-path: polygon(50% 3%, 50% 3%, 97% 90%, 3% 90%);
+}
+.reactor-tri::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  clip-path: polygon(
+    50% 3%, 53% 8%, 92% 86%, 86% 90%, 50% 16%, 14% 90%, 8% 86%, 47% 8%
+  );
+  opacity: 0.85;
+  filter: drop-shadow(0 0 10px rgba(var(--accent-rgb), 0.6));
+  animation: pulse 3.4s ease-in-out infinite;
+}
+
+/* the glowing reactor orb at dead center */
+.reactor-orb {
+  position: absolute;
+  inset: 41%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 42%, #eafcff, var(--cyan) 52%, rgba(var(--accent-rgb), 0.18) 100%);
+  box-shadow:
+    0 0 36px var(--cyan),
+    0 0 90px rgba(var(--accent-rgb), 0.5),
+    inset 0 0 16px #fff;
+  animation: pulse 3.4s ease-in-out infinite;
+}
+
+/* calm mode + reduced motion: keep the reactor, stop the spinning */
+html.calm #reactor-stage * { animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  #reactor-stage * { animation: none !important; }
+}
+@media (max-width: 900px) {
+  .reactor-core { width: min(72vmin, 360px); height: min(72vmin, 360px); }
+  #reactor-stage { opacity: 0.4; }
 }

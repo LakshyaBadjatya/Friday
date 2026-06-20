@@ -50,6 +50,9 @@ _QUERY_PATTERNS = (
     re.compile(r"\bhow(?:'s| is| are)?\s+(.+?)\s+doing\b"),
     re.compile(r"\bwhere(?:'s| is| are)?\s+(.+?)(?:\s+(?:right now|now|at))?$"),
     re.compile(r"\bis\s+(.+?)\s+(?:awake|asleep|free|around|there|up|busy|ok|okay)\b"),
+    # "good time to call/reach X" and "can i call/text X" → ask about X's availability.
+    re.compile(r"\bgood time to (?:call|reach|text|message|ring)\s+(.+?)$"),
+    re.compile(r"\bcan i (?:call|reach|text|message)\s+(.+?)(?:\s+now)?$"),
 )
 
 _ME = {"me", "my", "myself", "i", "my status", "my self"}

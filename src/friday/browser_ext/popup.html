@@ -5,40 +5,93 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ask FRIDAY</title>
     <style>
-      :root { color-scheme: dark; }
+      /* FRIDAY-OS mini surface — the cockpit language, scaled to a 320px popup. */
+      :root {
+        color-scheme: dark;
+        --bg: #03060d;
+        --ink: #d9ebff;
+        --ink-dim: #5d738c;
+        --accent: #4fe3ff;
+        --accent-rgb: 79, 227, 255;
+        --line: #18253c;
+        --line-2: #243653;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
       body {
+        position: relative;
         width: 320px;
         margin: 0;
-        padding: 12px;
-        background: #060910;
-        color: #d6e6f7;
-        font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        padding: 14px;
+        background:
+          radial-gradient(440px 240px at 18% -25%, rgba(var(--accent-rgb), 0.13), transparent 62%),
+          var(--bg);
+        color: var(--ink);
+        font: 13px/1.55 var(--mono);
+        overflow: hidden;
       }
-      h1 { font-size: 13px; letter-spacing: 0.08em; color: #4fe3ff; margin: 0 0 8px; }
+      /* faint scanlines + corner brackets, behind the controls (kept legible) */
+      body::after {
+        content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+        background: repeating-linear-gradient(180deg, rgba(var(--accent-rgb), 0.05) 0 1px, transparent 1px 3px);
+        opacity: 0.5;
+      }
+      body::before {
+        content: ""; position: absolute; inset: 5px; z-index: 1; pointer-events: none;
+        --bl: 12px; --bw: 1.5px;
+        background:
+          linear-gradient(var(--accent), var(--accent)) 0 0 / var(--bl) var(--bw) no-repeat,
+          linear-gradient(var(--accent), var(--accent)) 0 0 / var(--bw) var(--bl) no-repeat,
+          linear-gradient(var(--accent), var(--accent)) 100% 0 / var(--bl) var(--bw) no-repeat,
+          linear-gradient(var(--accent), var(--accent)) 100% 0 / var(--bw) var(--bl) no-repeat,
+          linear-gradient(var(--accent), var(--accent)) 0 100% / var(--bl) var(--bw) no-repeat,
+          linear-gradient(var(--accent), var(--accent)) 0 100% / var(--bw) var(--bl) no-repeat,
+          linear-gradient(var(--accent), var(--accent)) 100% 100% / var(--bl) var(--bw) no-repeat,
+          linear-gradient(var(--accent), var(--accent)) 100% 100% / var(--bw) var(--bl) no-repeat;
+        opacity: 0.5;
+      }
+      h1, textarea, .row, #reply {
+        position: relative; z-index: 2;
+      }
+      h1 {
+        font-size: 12px; letter-spacing: 0.28em; text-transform: uppercase;
+        color: var(--accent); margin: 0 0 11px;
+        text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.5);
+      }
       textarea {
         width: 100%;
-        box-sizing: border-box;
         min-height: 64px;
-        background: #0b1220;
-        color: #d6e6f7;
-        border: 1px solid #1a2740;
-        border-radius: 8px;
-        padding: 8px;
+        background: rgba(3, 6, 13, 0.7);
+        color: var(--ink);
+        border: 1px solid var(--line-2);
+        border-radius: 6px;
+        padding: 9px;
         resize: vertical;
+        font: inherit;
       }
-      .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
-      input[type="url"] { flex: 1; background: #0b1220; color: #9fb3cc; border: 1px solid #1a2740; border-radius: 8px; padding: 6px; }
+      textarea:focus { outline: none; border-color: rgba(var(--accent-rgb), 0.55); box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.2); }
+      textarea::placeholder { color: var(--ink-dim); }
+      .row { display: flex; gap: 8px; margin-top: 9px; align-items: center; }
+      input[type="url"] {
+        flex: 1; background: rgba(3, 6, 13, 0.7); color: var(--ink-dim);
+        border: 1px solid var(--line); border-radius: 6px; padding: 7px; font: inherit;
+      }
       button {
-        background: #122036;
-        color: #4fe3ff;
-        border: 1px solid #243653;
-        border-radius: 8px;
-        padding: 6px 12px;
+        background: rgba(var(--accent-rgb), 0.12);
+        color: var(--accent);
+        border: 1px solid rgba(var(--accent-rgb), 0.45);
+        border-radius: 6px;
+        padding: 7px 14px;
         cursor: pointer;
+        font: inherit;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        transition: border-color 150ms ease, box-shadow 150ms ease;
       }
-      button:hover { border-color: #4fe3ff; }
-      #reply { margin-top: 10px; white-space: pre-wrap; color: #d6e6f7; }
-      .dim { color: #62788f; }
+      button:hover { border-color: var(--accent); box-shadow: 0 0 14px rgba(var(--accent-rgb), 0.25); }
+      #reply { margin-top: 11px; white-space: pre-wrap; color: var(--ink); line-height: 1.65; }
+      .dim { color: var(--ink-dim); letter-spacing: 0.08em; }
+      @media (prefers-reduced-motion: reduce) { body::after { background: none; } }
     </style>
   </head>
   <body>

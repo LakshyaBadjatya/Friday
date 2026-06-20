@@ -343,3 +343,6 @@ class _N8nEnabledSettings:
         self.enable_protocols = False
         self.memory_autowrite = False
         self.enable_self_critique = False
+        # The auto-delegate hook reads this before persona matching; the real
+        # Settings defaults it off, so the stub mirrors that.
+        self.enable_auto_delegate = False

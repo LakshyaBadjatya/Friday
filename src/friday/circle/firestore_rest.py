@@ -20,9 +20,13 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-#: Public Firebase web config (NOT a secret — access is governed by security rules).
-_PROJECT = "lakufriday"
-_API_KEY = "AIzaSyA8ncX3lFQbcnaGwd8KIFFYMBSA-Cw30os"
+from friday.config import get_settings
+
+#: Public Firebase web config (NOT a secret — access is governed by security rules);
+#: sourced from settings/.env so the literal is never committed to source.
+_settings = get_settings()
+_PROJECT = _settings.firebase_project_id or "lakufriday"
+_API_KEY = _settings.firebase_web_api_key
 _DOCS = (
     f"https://firestore.googleapis.com/v1/projects/{_PROJECT}"
     "/databases/(default)/documents"

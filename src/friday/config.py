@@ -644,6 +644,10 @@ class Settings(BaseSettings):
     firebase_service_account: SecretStr | None = None
     # Optional explicit Firebase project id (else inferred from the credential).
     firebase_project_id: str = ""
+    # Public Firebase WEB API key for the keyless Firestore REST path (NOT a secret —
+    # access is governed by the Firestore security rules). Kept out of source so the
+    # literal isn't committed; read from FRIDAY_FIREBASE_WEB_API_KEY / .env.
+    firebase_web_api_key: str = ""
     # Browser origins allowed to call the API cross-origin (the web app on Vercel
     # talks to this backend on Render). Comma-separated; ``*`` allows any. Auth is
     # by bearer token (not cookies), so ``*`` is safe here — credentials are off.

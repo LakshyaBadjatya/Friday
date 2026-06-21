@@ -19,6 +19,9 @@ import sys
 def main() -> int:
     username = os.environ.get("FRIDAY_INSTAGRAM_USERNAME", "").strip()
     password = os.environ.get("FRIDAY_INSTAGRAM_PASSWORD", "").strip()
+    # Optional 2FA verification code (authenticator app or SMS) for accounts with
+    # two-factor enabled. The code is time-sensitive, so run this promptly.
+    code = os.environ.get("FRIDAY_INSTAGRAM_2FA_CODE", "").strip()
     if not username or not password:
         print(
             "Set FRIDAY_INSTAGRAM_USERNAME and FRIDAY_INSTAGRAM_PASSWORD first.",
@@ -32,7 +35,10 @@ def main() -> int:
         return 3
 
     cl = Client()
-    cl.login(username, password)
+    if code:
+        cl.login(username, password, verification_code=code)
+    else:
+        cl.login(username, password)
     print(json.dumps(cl.get_settings()))
     print(
         "\nPaste the JSON line above into FRIDAY_INSTAGRAM_SESSION_JSON.",

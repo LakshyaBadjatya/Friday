@@ -15,6 +15,7 @@ errors so the service has a single, typed surface to catch.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Protocol
 
 from friday.instagram.models import IgMessage, IgThread
@@ -120,11 +121,15 @@ class InstagrapiClient:
 
         cl = Client()
         try:
-            cl.set_delay_range(self._delay_range)
+            cl.delay_range = self._delay_range
             if self._session:
+                # Reuse the saved (residential-IP) session as-is; do NOT call
+                # login() — that would re-trigger the password/2FA flow even when
+                # the session is valid. If the session has expired, the actual API
+                # call raises LoginRequired -> mapped to InstagramAuthError.
                 cl.set_settings(self._session)
-            # With a saved session this validates/relogs in only if needed.
-            cl.login(self._username, self._password)
+            else:
+                cl.login(self._username, self._password)
         except (ChallengeRequired, LoginRequired) as exc:
             raise InstagramAuthError(str(exc)) from exc
         except InstagramError:
@@ -138,7 +143,16 @@ class InstagrapiClient:
         try:
             cl = self._client()
             raw = cl.direct_threads(amount=20, selected_filter="unread")
-            return [_to_thread(t) for t in raw]
+            threads: list[IgThread] = []
+            for t in raw:
+                thread = _to_thread(t)
+                # The "unread" filter returns only unread conversations, but
+                # instagrapi doesn't populate unread_count in the list view, so a
+                # 0/None there still means "at least one unread message".
+                if thread.unread_count < 1:
+                    thread = replace(thread, unread_count=1)
+                threads.append(thread)
+            return threads
         except InstagramError:
             raise
         except Exception as exc:  # noqa: BLE001 - map any API error

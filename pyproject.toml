@@ -12,6 +12,7 @@ dependencies = [
   "openai>=1.50",
   "python-dotenv>=1.0",
   "psutil>=7.2.2",
+  "instagrapi>=2.16.24",
 ]
 
 [project.scripts]

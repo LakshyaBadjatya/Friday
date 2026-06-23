@@ -496,4 +496,6 @@ variable with no real values.
 
 Released under the **MIT** license.
 
+<sub>Built with AI assistance (Claude) for development and iteration.</sub>
+
 </div>

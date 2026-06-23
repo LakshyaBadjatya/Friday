@@ -22,6 +22,19 @@
 (function () {
   "use strict";
 
+  // A tiny hello for anyone who cracks open the dev console. This cockpit got
+  // built one panel at a time, mostly late at night. If you're reading this — hi.
+  try {
+    console.log(
+      "%cFRIDAY%c  hand-built cockpit · poke around, nothing here bites\n" +
+        "found a bug? it's a feature I haven't been introduced to yet 🛰️",
+      "font:700 14px ui-monospace,monospace;color:#4fe3ff",
+      "font:12px ui-monospace,monospace;color:#9fb3cc"
+    );
+  } catch (_e) {
+    /* console styling is a nicety, never a dependency */
+  }
+
   // --- tiny DOM helpers ------------------------------------------------------
   /** @param {string} id */
   function el(id) {

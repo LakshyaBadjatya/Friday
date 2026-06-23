@@ -61,11 +61,11 @@
 
 ## ✨ What it is
 
-FRIDAY is a **local-first, provider-abstracted personal AI operating system** you run on
-your own machine. It is deliberately *not* a chatbot wrapper: a deterministic orchestrator
-classifies every turn, hands it to a **roster of named specialist operators**, and routes
-every side effect through a **fail-closed security broker** that injects secrets, enforces
-permissions, and writes a **hash-chained, tamper-evident audit ledger**.
+FRIDAY is a **local-first, provider-abstracted personal AI operating system** that runs on
+your own machine. It's not a chatbot wrapper, and that's the point. Every turn gets sorted by
+a deterministic orchestrator and handed to a **roster of named specialist operators**. Anything
+with a side effect goes through a **fail-closed security broker** first — it injects secrets,
+checks permissions, and writes a **hash-chained, tamper-evident audit ledger** as it goes.
 
 - 🏠 **Local-first** — runs on your machine; nothing phones home unless you point it at a
   real provider on purpose.
@@ -84,7 +84,7 @@ permissions, and writes a **hash-chained, tamper-evident audit ledger**.
 
 A deterministic router classifies each turn into a conversation **mode** (`CONVERSATION`,
 `RESEARCH`, `AUTOMATION`, `DEVICE_CONTROL`, `ALERTING`, `SECURITY_LOCKDOWN`, `CLARIFY`, …)
-*before* any model call — so routing is populated even when the language backend is down.
+*before* any model call — so routing still works even when the language backend is down.
 The orchestrator then delegates to an **8-persona roster** of least-privilege specialists,
 each owning a distinct slice of the tool surface and its own memory namespace.
 

@@ -13,14 +13,17 @@
 */
 
 :root {
-  /* palette — FRIDAY OS: deep-space black, hard cyan reactor glow */
-  --bg: #03060d;
-  --bg-2: #060b16;
-  --surface: #0a111f;
-  --surface-2: #0d1626;
-  --surface-3: #122036;
-  --ink: #d9ebff;
-  --ink-2: #9fb3cc;
+  /* palette — FRIDAY OS: deep-space black, hard cyan reactor glow.
+     Warmed a touch — the old blue-black felt clinical at 2am, so the neutrals
+     carry a hair less blue and the ink is a softer white. Subtle on purpose;
+     the cyan still owns the room. */
+  --bg: #05070c;
+  --bg-2: #080c14;
+  --surface: #0c111c;
+  --surface-2: #101622;
+  --surface-3: #152234;
+  --ink: #e3ebf6;
+  --ink-2: #aab8c9;
   --ink-dim: #5d738c;
   --cyan: #4fe3ff;
   --cyan-2: #2bb7d6;
@@ -69,10 +72,12 @@
   --t-5: 24px;
   --t-6: 32px;
 
-  /* radius scale */
-  --r-1: 8px;
-  --r-2: 12px;
-  --r-3: 16px;
+  /* radius scale — nudged up a touch so chips/buttons/cards feel friendlier.
+     (The machined --chamfer panels keep their hard notch; this only softens
+     the round-cornered bits.) */
+  --r-1: 10px;
+  --r-2: 14px;
+  --r-3: 18px;
   --r-pill: 999px;
 
   --rail-w: 240px;

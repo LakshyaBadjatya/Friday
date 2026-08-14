@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
 
+import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -32,6 +33,8 @@ from friday.circle.intents import handle_intent, parse_intent
 from friday.core.state import GraphState
 from friday.errors import FridayError
 from friday.logging import get_logger
+from friday.siri import context as siri_context
+from friday.siri.arithmetic import arithmetic_reply
 from friday.siri.speech import for_speech
 
 logger = get_logger("friday.api.routes_siri")
@@ -42,6 +45,12 @@ router = APIRouter()
 _DEFAULT_SESSION = "siri"
 #: Spoken when the brain returns nothing / errors — Siri should never read silence.
 _FALLBACK_SPEECH = "Sorry, I didn't catch that. Could you try again?"
+#: Spoken when the turn blows its wall-clock budget. Siri abandons a slow request
+#: and reads nothing at all, so a fast honest line beats a perfect late one: the
+#: user hears *something* while the voice session is still open.
+_TIMEOUT_SPEECH = (
+    "That one's taking me longer than Siri will wait, Boss. Ask me again in a moment."
+)
 #: Upper bound on the accepted query (parity with ``/chat``'s 8000-char input).
 _MAX_QUERY = 8000
 
@@ -153,13 +162,22 @@ _VOICE_RULES = (
 )
 
 
-async def _fast_answer(request: Request, query: str) -> str | None:
+async def _fast_answer(
+    request: Request, query: str, history: list[Any], deadline: float
+) -> str | None:
     """A single persona'd LLM call — the low-latency voice path.
 
     Skips the full orchestrator graph (routing, memory, optional critic re-pass,
     confidence scoring), which is several steps and sometimes a second model call.
     Reuses the live FRIDAY persona for voice consistency, falling back to a minimal
-    one. Returns ``None`` on any failure so the caller drops to the orchestrator.
+    one. ``history`` is the recalled context window, replayed between the persona
+    and this turn so follow-ups ("and the last topic?") resolve against what was
+    actually said rather than starting cold.
+
+    Returns ``None`` on any provider failure so the caller drops to the
+    orchestrator, but raises :class:`TimeoutError` when ``deadline`` expires —
+    those are different situations: a failure is worth retrying through the slower
+    path, whereas a timeout means there is no time left to retry anything.
     """
     llm = getattr(request.app.state, "llm", None)
     if llm is None:
@@ -175,12 +193,17 @@ async def _fast_answer(request: Request, query: str) -> str | None:
         except Exception:  # noqa: BLE001 - fall back to the minimal persona
             pass
     try:
-        resp = await llm.complete(
-            [
-                Message(role="system", content=persona + _VOICE_RULES),
-                Message(role="user", content=_augment_teaching(query)),
-            ]
-        )
+        with anyio.fail_after(deadline):
+            resp = await llm.complete(
+                [
+                    Message(role="system", content=persona + _VOICE_RULES),
+                    *history,
+                    Message(role="user", content=_augment_teaching(query)),
+                ]
+            )
+    except TimeoutError:
+        logger.warning("siri fast path exceeded its %.1fs budget", deadline)
+        raise
     except Exception:  # noqa: BLE001 - drop to the orchestrator
         return None
     return (getattr(resp, "text", "") or "").strip() or None
@@ -195,6 +218,40 @@ def _siri_enabled(request: Request) -> bool:
 def _disabled() -> JSONResponse:
     """The canonical ``siri disabled`` 404 response."""
     return JSONResponse(status_code=404, content={"detail": "siri disabled"})
+
+
+def _memory(request: Request) -> Any:
+    """The conversation buffer for the voice path.
+
+    Deliberately the *same* :class:`~friday.memory.short_term.ShortTermMemory` the
+    orchestrator writes to (wired at ``app.state.short_term``), so a spoken turn
+    and a ``/chat`` turn on one ``session_id`` build a single shared thread rather
+    than two blind ones. ``None`` when unwired — recall then degrades to no
+    context instead of failing the request.
+    """
+    return getattr(request.app.state, "short_term", None)
+
+
+def _deadline(request: Request) -> float:
+    """Wall-clock seconds allowed for one spoken answer (see ``siri_timeout_seconds``)."""
+    settings = getattr(request.app.state, "settings", None)
+    try:
+        deadline = float(getattr(settings, "siri_timeout_seconds", 12.0) or 12.0)
+    except (TypeError, ValueError):
+        return 12.0
+    return deadline if deadline > 0 else 12.0
+
+
+def _context_limit(request: Request) -> int:
+    """How many past messages to replay (``0`` disables recall entirely)."""
+    settings = getattr(request.app.state, "settings", None)
+    try:
+        limit = int(
+            getattr(settings, "siri_context_messages", siri_context.DEFAULT_CONTEXT_MESSAGES)
+        )
+    except (TypeError, ValueError):
+        return siri_context.DEFAULT_CONTEXT_MESSAGES
+    return max(0, limit)
 
 
 async def _read_query(request: Request) -> str | None:
@@ -413,12 +470,49 @@ async def siri_ask(request: Request) -> Any:
     query = query[:_MAX_QUERY]
     want_json = request.query_params.get("format", "").lower() == "json"
     session_id = request.query_params.get("session") or _DEFAULT_SESSION
+    memory = _memory(request)
+    deadline = _deadline(request)
+
+    def _reply(
+        speech: str,
+        *,
+        raw: str,
+        mode: str | None,
+        action: dict[str, Any] | None = None,
+        record: bool = True,
+    ) -> Any:
+        """Render the reply and, by default, record the turn in the context window.
+
+        Every branch that actually answers goes through here, so the window holds
+        the whole conversation — a distance answer, an Instagram read-out and an
+        LLM reply are all equally "the last topic". Fallbacks pass
+        ``record=False``: a turn that failed is not something to recall later.
+        """
+        if record:
+            siri_context.remember(memory, session_id, query, raw or speech)
+        return _respond(speech, raw=raw, mode=mode, want_json=want_json, action=action)
 
     # Mis-wired shortcut guard: the body is a literal variable label (e.g. "Dictated
     # Text"), not the spoken words. Speak an actionable fix instead of clarifying.
     if query.lower() in _PLACEHOLDER_LABELS:
-        return _respond(
-            _PLACEHOLDER_HINT, raw=_PLACEHOLDER_HINT, mode="hint", want_json=want_json
+        return _reply(
+            _PLACEHOLDER_HINT, raw=_PLACEHOLDER_HINT, mode="hint", record=False
+        )
+
+    # The conversation so far, replayed into whichever path answers below.
+    limit = _context_limit(request)
+    history = (
+        siri_context.recall(memory, session_id, max_messages=limit) if limit else []
+    )
+
+    # "What were we just talking about?" with an empty window: say so plainly
+    # instead of letting the model invent a plausible-sounding earlier topic.
+    if not history and siri_context.is_recall_question(query):
+        return _reply(
+            siri_context.NO_HISTORY_REPLY,
+            raw=siri_context.NO_HISTORY_REPLY,
+            mode="recall",
+            record=False,
         )
 
     # "<command> on the TV" → parse and hand to the paired TV (the phone is the mic).
@@ -433,27 +527,36 @@ async def siri_ask(request: Request) -> Any:
                 device = relay.default_device()
                 if device is None:
                     msg = "No TV is paired yet. Open Friday on the TV to pair it."
-                    return _respond(msg, raw=msg, mode="tv", want_json=want_json)
+                    return _reply(msg, raw=msg, mode="tv", record=False)
                 relay.enqueue(device, tv_action)
-                return _respond(
+                return _reply(
                     tv_action.speak,
                     raw=tv_action.speak,
                     mode="tv",
-                    want_json=want_json,
                     action=tv_action.model_dump(),
                 )
 
     # "Who made you?" — answered instantly (no model, no network).
     creator = _creator_reply(query)
     if creator is not None:
-        return _respond(creator, raw=creator, mode="identity", want_json=want_json)
+        return _reply(creator, raw=creator, mode="identity")
+
+    # Pure arithmetic is *computed*, never predicted. An LLM asked for "17 percent
+    # of 2,480" returns whatever tokens usually follow that phrasing, which is how
+    # a confidently wrong number gets spoken aloud. Anything that is not
+    # unambiguously a sum returns None here and still reaches the model.
+    maths = arithmetic_reply(query)
+    if maths is not None:
+        return _reply(maths, raw=maths, mode="math")
 
     # Distance queries — geocoded + routed via OpenStreetMap (computed, not guessed).
+    # Run in a worker thread: it is blocking urllib, and on the event loop it stalls
+    # every other in-flight request (including this one's siblings) until it returns.
     from friday.maps.distance import distance_reply  # noqa: PLC0415
 
-    dist = distance_reply(query)
+    dist = await anyio.to_thread.run_sync(distance_reply, query)
     if dist is not None:
-        return _respond(dist, raw=dist, mode="distance", want_json=want_json)
+        return _reply(dist, raw=dist, mode="distance")
 
     # "… near me" — use the exact GPS the shortcut sent (URL ?lat=&lon= or body).
     # The fast heuristic catches obvious phrasings; the AI classifier below catches
@@ -468,41 +571,39 @@ async def siri_ask(request: Request) -> Any:
         except (TypeError, ValueError):
             flat = flon = None  # type: ignore[assignment]
         if flat is not None and flon is not None:
-            near = nearby_reply(query, flat, flon)
+            near = await anyio.to_thread.run_sync(nearby_reply, query, flat, flon)
             if near is None:
                 # AI auto-guess: let the model decide if this is a nearby-places
                 # ask and infer the category, so no fixed phrase is required.
                 llm = getattr(request.app.state, "llm", None)
                 inferred = await classify_nearby(llm, query)
                 if inferred is not None:
-                    near = nearby_from_filter(inferred[0], inferred[1], flat, flon)
+                    near = await anyio.to_thread.run_sync(
+                        nearby_from_filter, inferred[0], inferred[1], flat, flon
+                    )
             if near is not None:
                 spoken, share = near
-                return _respond(spoken, raw=share, mode="nearby", want_json=want_json)
+                return _reply(spoken, raw=share, mode="nearby")
 
     # Firestore-linked circle (acts on the app's real data as the caller) wins first
     # when a real token is present; then the in-memory circle; else the orchestrator.
-    fs_reply = _try_firestore_circle(request, query)
+    # Threaded for the same reason as distance: it is blocking urllib + Firestore.
+    fs_reply = await anyio.to_thread.run_sync(_try_firestore_circle, request, query)
     if fs_reply is not None:
-        return _respond(
-            for_speech(fs_reply), raw=fs_reply, mode="circle", want_json=want_json
-        )
+        return _reply(for_speech(fs_reply), raw=fs_reply, mode="circle")
 
     # Instagram DMs ("any instagram dms", "read my instagram messages", "reply to X
     # on instagram …") — only an Instagram phrase touches the API; else falls through.
-    ig_reply = _try_instagram(request, query)
+    # instagrapi is entirely synchronous, so this must not run on the event loop.
+    ig_reply = await anyio.to_thread.run_sync(_try_instagram, request, query)
     if ig_reply is not None:
-        return _respond(
-            for_speech(ig_reply), raw=ig_reply, mode="instagram", want_json=want_json
-        )
+        return _reply(for_speech(ig_reply), raw=ig_reply, mode="instagram")
 
     # Circle status intents ("what's X doing", "set my status…") win when the
     # caller is known and the phrasing matches; otherwise fall through below.
     circle_reply = _try_circle(request, query)
     if circle_reply is not None:
-        return _respond(
-            for_speech(circle_reply), raw=circle_reply, mode="circle", want_json=want_json
-        )
+        return _reply(for_speech(circle_reply), raw=circle_reply, mode="circle")
 
     # Fast voice path: one persona'd LLM call instead of the full orchestrator graph
     # (routing, memory, optional critic re-pass, confidence) — much lower latency.
@@ -510,32 +611,46 @@ async def siri_ask(request: Request) -> Any:
     # FRIDAY_SIRI_FAST_PATH=false.
     settings = getattr(request.app.state, "settings", None)
     if getattr(settings, "siri_fast_path", True):
-        fast = await _fast_answer(request, query)
+        try:
+            fast = await _fast_answer(request, query, history, deadline)
+        except TimeoutError:
+            # No budget left to also try the slower orchestrator — say so now,
+            # while Siri is still listening, rather than answering into silence.
+            return _reply(_TIMEOUT_SPEECH, raw="", mode="timeout", record=False)
         if fast:
-            return _respond(for_speech(fast), raw=fast, mode="fast", want_json=want_json)
+            return _reply(for_speech(fast), raw=fast, mode="fast")
 
     orchestrator = getattr(request.app.state, "orchestrator", None)
     if orchestrator is None or not hasattr(orchestrator, "handle"):
         logger.error("siri ask: orchestrator missing on app.state")
-        return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
+        return _reply(_FALLBACK_SPEECH, raw="", mode=None, record=False)
 
+    # The orchestrator keeps its own short-term memory under this same session id,
+    # so it needs no history injected — it reloads the very buffer written above.
     state = GraphState(session_id=session_id, user_input=_augment_teaching(query))
+    result = None
     try:
-        result = await orchestrator.handle(state)
+        with anyio.move_on_after(deadline):
+            result = await orchestrator.handle(state)
     except FridayError as exc:
         logger.warning(
             "siri ask raised FridayError",
             extra={"error_type": type(exc).__name__},
         )
-        return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
+        return _reply(_FALLBACK_SPEECH, raw="", mode=None, record=False)
     except Exception:  # noqa: BLE001 - Siri must never read a raw 500 to the user
         logger.exception("siri ask: unexpected error; speaking a graceful fallback")
-        return _respond(_FALLBACK_SPEECH, raw="", mode=None, want_json=want_json)
+        return _reply(_FALLBACK_SPEECH, raw="", mode=None, record=False)
+    if result is None:
+        logger.warning("siri ask: orchestrator exceeded its %.1fs budget", deadline)
+        return _reply(_TIMEOUT_SPEECH, raw="", mode="timeout", record=False)
 
     raw_text = getattr(result, "response", None) or ""
     speech = for_speech(raw_text) or _FALLBACK_SPEECH
     mode = getattr(getattr(result, "mode", None), "value", None)
-    return _respond(speech, raw=raw_text, mode=mode, want_json=want_json)
+    # The orchestrator already recorded this turn in the shared buffer; recording
+    # it again here would double every orchestrator-answered exchange.
+    return _reply(speech, raw=raw_text, mode=mode, record=False)
 
 
 def _discover_chat_id(token: str) -> str:
@@ -602,7 +717,7 @@ async def siri_telegram(request: Request) -> Any:
         ask = question or "What should I send, Boss?"
         return _respond(ask, raw=ask, mode="telegram_ask", want_json=want_json)
 
-    ok = _send_telegram(request, message)
+    ok = await anyio.to_thread.run_sync(_send_telegram, request, message)
     msg = (
         "Shared on Telegram, Boss."
         if ok
@@ -633,5 +748,5 @@ async def siri_digest(request: Request) -> Any:
     from friday.notify import build_digest  # noqa: PLC0415
 
     digest = await build_digest(str(lat), str(lon))
-    sent = _send_telegram(request, digest)
+    sent = await anyio.to_thread.run_sync(_send_telegram, request, digest)
     return JSONResponse(status_code=200, content={"sent": sent, "digest": digest})

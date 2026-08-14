@@ -18,6 +18,7 @@ Covered:
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -212,3 +213,182 @@ def test_siri_fast_path_kill_switch_uses_orchestrator(
         resp = client.post("/siri/ask?q=capital of france")
     assert resp.text == "from orchestrator"
     assert orch.seen  # the orchestrator handled the turn
+
+
+# --------------------------------------------------------------------------- #
+# Context window: the fast path bypasses the orchestrator, so without an
+# explicit replay every spoken turn started from zero and "what was the last
+# topic?" had nothing to answer from.
+# --------------------------------------------------------------------------- #
+class _RecordingLLM:
+    """Stub that answers with a fixed line and keeps every prompt it was sent."""
+
+    def __init__(self, text: str = "Noted, Boss.") -> None:
+        self._text = text
+        self.calls: list[list[Any]] = []
+
+    async def complete(self, messages, tools=None, *, model=None):  # noqa: ANN001, ANN002
+        from friday.providers.llm import LLMResponse
+
+        self.calls.append(list(messages))
+        return LLMResponse(text=self._text)
+
+
+def test_siri_replays_the_previous_turn_into_the_next_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second question must be able to see the first question and answer."""
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    get_settings.cache_clear()
+    llm = _RecordingLLM("The fourth planet, Boss.")
+    with TestClient(create_app()) as client:
+        client.app.state.llm = llm
+        client.post("/siri/ask?q=tell me about mars")
+        client.post("/siri/ask?q=and how far away is it")
+
+    assert len(llm.calls) == 2
+    first_prompt = [m.content for m in llm.calls[0]]
+    second_prompt = [m.content for m in llm.calls[1]]
+    # Turn one saw only the persona and its own question...
+    assert not any("tell me about mars" in c for c in first_prompt[:-1])
+    # ...turn two also saw both halves of turn one.
+    assert any("tell me about mars" in c for c in second_prompt)
+    assert any("The fourth planet" in c for c in second_prompt)
+
+
+def test_siri_answers_what_was_the_last_topic_from_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    get_settings.cache_clear()
+    llm = _RecordingLLM("We were on the Mars mission, Boss.")
+    with TestClient(create_app()) as client:
+        client.app.state.llm = llm
+        client.post("/siri/ask?q=explain the mars mission")
+        resp = client.post("/siri/ask?format=json&q=what was the last topic")
+
+    body = resp.json()
+    assert body["mode"] == "fast"  # answered by the model, not the empty-window line
+    assert any("explain the mars mission" in m.content for m in llm.calls[-1]), (
+        "the recall question was sent without the earlier turn"
+    )
+
+
+def test_siri_recall_with_no_history_admits_it_instead_of_inventing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty window is a real state — say so rather than hallucinate a topic."""
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    get_settings.cache_clear()
+    llm = _RecordingLLM("we talked about quantum physics")  # a plausible fabrication
+    with TestClient(create_app()) as client:
+        client.app.state.llm = llm
+        resp = client.post("/siri/ask?format=json&q=what were we talking about")
+
+    body = resp.json()
+    assert body["mode"] == "recall"
+    assert "don't have" in body["speak"]
+    assert llm.calls == []  # no model was consulted, so nothing could be invented
+
+
+def test_siri_sessions_do_not_share_a_context_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    get_settings.cache_clear()
+    llm = _RecordingLLM()
+    with TestClient(create_app()) as client:
+        client.app.state.llm = llm
+        client.post("/siri/ask?session=alice&q=my secret project name is atlas")
+        client.post("/siri/ask?session=bob&q=tell me something")
+
+    assert not any("atlas" in m.content for m in llm.calls[-1])
+
+
+# --------------------------------------------------------------------------- #
+# Arithmetic: computed in Python, never predicted by the model.
+# --------------------------------------------------------------------------- #
+def test_siri_computes_arithmetic_without_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    get_settings.cache_clear()
+    llm = _RecordingLLM("That's 4,010.")  # what a model might confidently guess
+    with TestClient(create_app()) as client:
+        client.app.state.llm = llm
+        resp = client.post("/siri/ask?format=json&q=what is 17 percent of 2480")
+
+    body = resp.json()
+    assert body["mode"] == "math"
+    assert body["speak"] == "That's 421.6."
+    assert llm.calls == []  # the number came from Python, not from prediction
+
+
+def test_siri_leaves_conceptual_maths_to_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The calculator must be narrow: explanations still reach the LLM."""
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    get_settings.cache_clear()
+    llm = _RecordingLLM("Compound interest is interest on interest, Boss.")
+    with TestClient(create_app()) as client:
+        client.app.state.llm = llm
+        resp = client.post(
+            "/siri/ask?format=json&q=how do you calculate compound interest"
+        )
+
+    assert resp.json()["mode"] == "fast"
+    assert llm.calls  # the model answered it
+
+
+# --------------------------------------------------------------------------- #
+# Timeout: Siri abandons a slow request and reads nothing, so a slow turn must
+# become a fast spoken line rather than silence.
+# --------------------------------------------------------------------------- #
+class _HangingLLM:
+    """Stub that never answers in time — stands in for a stalled provider."""
+
+    async def complete(self, messages, tools=None, *, model=None):  # noqa: ANN001, ANN002
+        import anyio
+
+        await anyio.sleep(30)
+        raise AssertionError("should have been cancelled by the deadline")
+
+
+def test_siri_slow_turn_speaks_a_timeout_line_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    monkeypatch.setenv("FRIDAY_SIRI_TIMEOUT_SECONDS", "0.1")
+    get_settings.cache_clear()
+    with TestClient(create_app()) as client:
+        client.app.state.llm = _HangingLLM()
+        resp = client.post("/siri/ask?format=json&q=think very hard about this")
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["mode"] == "timeout"
+    assert body["speak"].strip()  # Siri always gets words to read
+
+
+def test_siri_slow_orchestrator_also_speaks_the_timeout_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRIDAY_ENABLE_SIRI", "true")
+    monkeypatch.setenv("FRIDAY_SIRI_FAST_PATH", "false")
+    monkeypatch.setenv("FRIDAY_SIRI_TIMEOUT_SECONDS", "0.1")
+    get_settings.cache_clear()
+
+    class _SlowOrchestrator:
+        async def handle(self, state: GraphState) -> GraphState:
+            import anyio
+
+            await anyio.sleep(30)
+            return state
+
+    with TestClient(create_app()) as client:
+        client.app.state.orchestrator = _SlowOrchestrator()
+        resp = client.post("/siri/ask?format=json&q=deep research please")
+
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "timeout"

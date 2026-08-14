@@ -622,6 +622,17 @@ class Settings(BaseSettings):
     # persona'd LLM call instead of the full orchestrator graph (much lower latency
     # for Siri). On by default; set false to always use the orchestrator.
     siri_fast_path: bool = True
+    # Hard wall-clock budget (seconds) for producing one spoken answer. The LLM
+    # client's own timeout is 60s and ``FallbackLLM`` may then try a second
+    # provider, so an unlucky turn can take ~2 minutes — far longer than Siri waits
+    # before giving up, which is how a query ends in silence. Past this deadline the
+    # attempt is abandoned and a short "still working on it" line is spoken instead,
+    # so Siri always receives *something* while it is still listening.
+    siri_timeout_seconds: float = 12.0
+    # Messages (not turns) of the conversation replayed into each spoken query, so
+    # follow-ups like "what was the last topic?" have context. Shared with ``/chat``
+    # through the same short-term memory, keyed by ``?session=``. 0 disables recall.
+    siri_context_messages: int = 12
 
     # --- Android TV front door (default off) ---
     # Gates the ``/tv`` surface (``/tv/ask``, ``/tv/command``, ``/tv/pair``,

@@ -192,6 +192,20 @@ except Exception:  # noqa: BLE001
     _DISCORD_VOICE = _VOICE_RULES
 
 
+def _language_rule(request: Request, session_id: str) -> str:
+    """Tell the model which language to answer in, when one is pinned.
+
+    Held per session rather than per message: "talk to me in Polish" is an
+    instruction about the conversation, and having to repeat it every line would
+    make the feature useless.
+    """
+    try:
+        from friday.discord import lang  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - discord package optional
+        return ""
+    return lang.instruction(lang.get(request.app.state, session_id))
+
+
 #: How many stored facts are put in front of the model each turn.
 _FACTS_IN_PROMPT = 12
 
@@ -273,7 +287,8 @@ async def _fast_answer(
                         role="system",
                         content=persona
                         + (_DISCORD_VOICE if in_discord else _VOICE_RULES)
-                        + _known_facts(request),
+                        + _known_facts(request)
+                        + _language_rule(request, session_id),
                     ),
                     *history,
                     # Restated after the history, not just before it. A jailbreak

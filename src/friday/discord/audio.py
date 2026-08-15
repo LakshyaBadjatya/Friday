@@ -27,7 +27,7 @@ from typing import Any
 
 import anyio
 
-from friday.discord import opus, prosody
+from friday.discord import lang, opus, prosody
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.audio")
@@ -40,9 +40,10 @@ MIN_SPEECH_BYTES = opus.FRAME_BYTES * 25  # ~0.5s
 MAX_SPEECH_BYTES = opus.FRAME_BYTES * 50 * 30  # ~30s
 
 _STT_PROMPT = (
-    "Transcribe this audio exactly. Output only the words spoken, with no "
-    "commentary, no speaker labels and no timestamps. If there is no intelligible "
-    "speech, output nothing at all."
+    "Transcribe this audio exactly. Reply with the two-letter language code, a "
+    "pipe, then the words: for example 'en|hello there' or 'pl|dzien dobry'. "
+    "Nothing else — no commentary, no speaker labels, no timestamps. If there is "
+    "no intelligible speech, reply with nothing at all."
 )
 
 
@@ -69,11 +70,14 @@ def wav(pcm: bytes) -> bytes:
     )
 
 
-async def transcribe(settings: Any, pcm: bytes) -> str | None:
-    """Speech to text, or ``None`` when there is nothing intelligible.
+async def transcribe(settings: Any, pcm: bytes) -> tuple[str, str] | None:
+    """Speech to ``(language_code, text)``, or ``None`` when nothing was said.
 
-    ``None`` is a normal outcome rather than a failure: most of what a voice
-    channel produces is breathing, keyboard noise and background television.
+    The language comes back with the words rather than from a separate detection
+    pass: nobody announces switching to Polish mid-call, they just do it, and the
+    transcriber already knows which language it just heard. ``None`` is a normal
+    outcome — most of what a voice channel carries is breathing, keyboards and
+    background television.
     """
     secret = getattr(settings, "gemini_api_key", None)
     key = secret.get_secret_value() if secret is not None else ""
@@ -81,7 +85,17 @@ async def transcribe(settings: Any, pcm: bytes) -> str | None:
         return None
     audio = wav(pcm[:MAX_SPEECH_BYTES])
     model = str(getattr(settings, "stt_model", "") or "gemini-2.5-flash")
-    return await anyio.to_thread.run_sync(_gemini_stt, key, model, audio)
+    raw = await anyio.to_thread.run_sync(_gemini_stt, key, model, audio)
+    if not raw:
+        return None
+    code, _, said = raw.partition("|")
+    code = code.strip().lower()[:2]
+    said = said.strip()
+    # No pipe means the model ignored the format; the words are still good, so
+    # take them and assume English rather than throwing the turn away.
+    if not said:
+        return ("en", raw.strip()) if raw.strip() else None
+    return (code or "en"), said
 
 
 def _gemini_stt(key: str, model: str, audio: bytes) -> str | None:
@@ -119,7 +133,7 @@ def _gemini_stt(key: str, model: str, audio: bytes) -> str | None:
     return (text or "").strip() or None
 
 
-async def speak(text: str, voice: str = "en-GB-SoniaNeural") -> list[bytes]:
+async def speak(text: str, voice: str | None = None) -> list[bytes]:
     """Text to a list of Opus frames ready for the voice socket.
 
     Returns ``[]`` rather than raising when anything in the chain is missing, so
@@ -132,7 +146,7 @@ async def speak(text: str, voice: str = "en-GB-SoniaNeural") -> list[bytes]:
         # writes what she means, and how she says it is a property of the voice.
         # Keeping them apart means the text reply and the spoken one stay the
         # same sentence, and the fillers never end up in the transcript.
-        mp3 = await _tts(prosody.humanize(text), voice)
+        mp3 = await _tts(prosody.humanize(text), voice or lang.voice_for("en"))
         if not mp3:
             return []
         pcm = await _to_pcm(mp3)

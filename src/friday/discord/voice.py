@@ -37,7 +37,7 @@ from typing import Any
 
 import anyio
 
-from friday.discord import audio, opus
+from friday.discord import audio, lang, opus
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.voice")
@@ -89,6 +89,8 @@ class VoiceConnection:
         self._decoders: dict[int, opus.Decoder] = {}
         #: Who is talking, by SSRC, so a transcript can be attributed.
         self._speakers: dict[int, str] = {}
+        #: The language last heard in this call; the reply voice follows it.
+        self.language = "en"
         self._closed = False
 
     def credentials(
@@ -274,16 +276,22 @@ class VoiceConnection:
                 if len(pcm) < audio.MIN_SPEECH_BYTES:
                     continue
                 settings = getattr(self.app.state, "settings", None)
-                said = await audio.transcribe(settings, pcm)
-                if said:
-                    logger.info("voice heard: %s", said[:80])
+                heard = await audio.transcribe(settings, pcm)
+                if heard:
+                    code, said = heard
+                    # Follow the speaker. Someone switching language mid-call
+                    # never says so, so the transcript is the only signal there
+                    # is — and answering Polish in an English voice is worse
+                    # than not answering.
+                    self.language = code
+                    logger.info("voice heard [%s]: %s", code, said[:70])
                     with contextlib.suppress(Exception):
-                        await on_speech(said, self._speakers.get(ssrc, ""))
+                        await on_speech(said, self._speakers.get(ssrc, ""), code)
 
     # -- speaking ----------------------------------------------------------- #
-    async def say(self, text: str) -> None:
+    async def say(self, text: str, language: str | None = None) -> None:
         """Speak, pacing frames against a clock rather than sleeping blindly."""
-        frames = await audio.speak(text)
+        frames = await audio.speak(text, lang.voice_for(language or self.language))
         if not frames or self._udp is None or self._remote is None:
             return
         await self._set_speaking(True)

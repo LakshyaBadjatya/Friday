@@ -32,7 +32,7 @@ from typing import Any, cast
 
 import anyio
 
-from friday.discord import banter, vision
+from friday.discord import banter, lang, vision
 from friday.discord.voice import VoiceConnection
 from friday.logging import get_logger
 
@@ -248,10 +248,13 @@ async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) ->
     """Join the channel and start the listen/speak loop."""
     call = await join_voice(app, socket, guild, channel)
 
-    async def _heard(said: str, _user: str) -> None:
+    async def _heard(said: str, _user: str, code: str = "en") -> None:
+        # The spoken language wins over any pinned preference: whatever they
+        # just said out loud is what they want back.
+        lang.set_for(app.state, f"voice:{channel}", code)
         reply = await _compose(app, said, f"voice:{channel}", forced=True)
         if reply:
-            await call.say(reply)
+            await call.say(reply, language=code)
 
     try:
         await call.run(_heard)
@@ -322,7 +325,8 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     # thing worth keeping is thrown away.
     if banter.is_remember_this(content):
         quoted = (message.get("referenced_message") or {}).get("content") or ""
-        await _send(token, channel, _keep(app, quoted.strip()))
+        await _send(token, channel, _keep(app, quoted.strip()),
+                    reply_to=str(message.get("id") or ""))
         return
 
     # Sometimes an emoji is the whole reply. Reacting reads far more like someone
@@ -343,7 +347,9 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         logger.exception("discord message handling failed")
         return
     if reply:
-        await _send(token, channel, reply)
+        # Threaded as a reply to the message she is answering, so a busy channel
+        # stays readable and it is obvious which line she picked up.
+        await _send(token, channel, reply, reply_to=str(message.get("id") or ""))
 
 
 async def _compose(
@@ -358,6 +364,11 @@ async def _compose(
     social = banter.reaction(content)
     if social is not None:
         return social
+
+    # "talk to me in polish" sticks for the conversation, not just this line.
+    asked = lang.requested(content)
+    if asked and banter.addressed(content):
+        lang.set_for(app.state, discord_session(app), asked)
 
     # "friday wanna talk" — she cannot start a call, so she asks them to.
     if banter.addressed(content) and banter.wants_voice(content):
@@ -496,9 +507,17 @@ async def _react(token: str, channel: str, message_id: str, emoji: str) -> None:
     await anyio.to_thread.run_sync(_put)
 
 
-async def _send(token: str, channel: str, content: str) -> None:
-    """Post a message to a channel."""
-    body = json.dumps({"content": content[:1900]}).encode()
+async def _send(
+    token: str, channel: str, content: str, reply_to: str = ""
+) -> None:
+    """Post a message, optionally threaded as a reply to another one."""
+    payload: dict[str, Any] = {"content": content[:1900]}
+    if reply_to:
+        payload["message_reference"] = {"message_id": reply_to}
+        # Without this the reply pings on every message, which turns a
+        # conversation into a notification storm.
+        payload["allowed_mentions"] = {"replied_user": False}
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(  # noqa: S310
         f"{_API}/channels/{channel}/messages",
         data=body,

@@ -113,7 +113,7 @@
   // drives the one live backend instead of a same-origin dev server. Override
   // per-load with ?api=<url> or by setting window.FRIDAY_API_BASE before this
   // script (e.g. ?api=http://localhost:8800 to target a local backend on purpose).
-  var DEFAULT_API_BASE = "https://friday-backend-oj8h.onrender.com";
+  var DEFAULT_API_BASE = "https://friday-backend-v2.onrender.com";
   function resolveApiBase() {
     var base = DEFAULT_API_BASE;
     try {

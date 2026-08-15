@@ -20,14 +20,13 @@ the same store.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from friday.logging import get_logger
-from friday.reminders.store import SQLiteReminderStore
 
 logger = get_logger("friday.api.routes_reminders")
 
@@ -53,10 +52,13 @@ def _disabled() -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": "reminders disabled"})
 
 
-def _get_store(request: Request) -> SQLiteReminderStore:
+def _get_store(request: Request) -> Any:
     """Pull the process-wide reminder store off ``app.state``."""
     store = getattr(request.app.state, "reminder_store", None)
-    if not isinstance(store, SQLiteReminderStore):  # pragma: no cover - startup guard
+    # Checked for presence, not for concrete class. The store is SQLite locally
+    # and Postgres on a deployment with durable storage — an isinstance check
+    # against one of them 500s on the other, which is exactly what it did.
+    if store is None:  # pragma: no cover - startup guard
         raise RuntimeError("reminder store is not initialized on app.state")
     return store
 

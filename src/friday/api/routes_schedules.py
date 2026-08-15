@@ -23,6 +23,7 @@ background tick loop operate on the same store with the same registered actions.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -30,7 +31,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from friday.logging import get_logger
 from friday.scheduler.engine import Scheduler, compute_next_run
-from friday.scheduler.store import SQLiteTriggerStore, TriggerKind
+from friday.scheduler.store import TriggerKind
 
 logger = get_logger("friday.api.routes_schedules")
 
@@ -58,10 +59,13 @@ def _disabled() -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": "scheduler disabled"})
 
 
-def _get_store(request: Request) -> SQLiteTriggerStore:
+def _get_store(request: Request) -> Any:
     """Pull the process-wide trigger store off ``app.state``."""
     store = getattr(request.app.state, "trigger_store", None)
-    if not isinstance(store, SQLiteTriggerStore):  # pragma: no cover - startup guard
+    # Checked for presence, not for concrete class. The store is SQLite locally
+    # and Postgres on a deployment with durable storage — an isinstance check
+    # against one of them 500s on the other, which is exactly what it did.
+    if store is None:  # pragma: no cover - startup guard
         raise RuntimeError("trigger store is not initialized on app.state")
     return store
 

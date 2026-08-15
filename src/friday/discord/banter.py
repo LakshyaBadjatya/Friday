@@ -304,6 +304,71 @@ VOICE_REPLY_RULES = (
 )
 
 
+#: How she answers being reacted to. Reactions are the cheapest thing in a chat —
+#: reacting back is proportionate, replying with a paragraph is not — so most of
+#: these are emoji themselves, and the words are short when they come.
+_REACTED_TO_FUNNY = ("😌", "🫡", "😎", "i'll be here all week", "thank you thank you")
+_REACTED_TO_HARSH = ("😔", "🧍", "ok that's fair", "noted.", "damn ok 💀")
+_REACTED_TO_LOVE = ("🥹", "😊", "aww", "ok you're my favourite now")
+
+#: Which bucket an emoji falls in. Discord sends the literal character, so this
+#: matches the character rather than a name.
+_FUNNY = "😂🤣💀☠😹🤡"
+_HARSH = "🤨😐😑🙄👎💩🥱"
+_LOVE = "❤🥰😍💖✨🔥👏🫶💯"
+
+#: How often being reacted to earns any response at all. Low on purpose: someone
+#: reacting is not asking for a conversation, and a bot that answers every
+#: reaction makes people stop reacting.
+_REACT_BACK_PERCENT = 30
+
+
+def reaction_response(emoji: str) -> str | None:
+    """What to say when someone reacts to one of her messages, if anything."""
+    if not emoji or secrets.randbelow(100) >= _REACT_BACK_PERCENT:
+        return None
+    char = emoji[0]
+    if char in _FUNNY:
+        return secrets.choice(_REACTED_TO_FUNNY)
+    if char in _HARSH:
+        return secrets.choice(_REACTED_TO_HARSH)
+    if char in _LOVE:
+        return secrets.choice(_REACTED_TO_LOVE)
+    return None
+
+
+#: Emoji she adds to *other people's* messages, keyed by what the message is
+#: doing. Matching the mood beats a random pick — a 💀 on good news reads as a
+#: bot choosing at random, which is exactly what it would be.
+_MOOD_REACTIONS: tuple[tuple[str, str], ...] = (
+    (r"\blol+\b|\b(?:lmao+|lmfao+|rofl|haha+)\b|💀|😂", "😂"),
+    (r"\b(?:cooked|crashout|it'?s\s+over|rip|fml)\b|\bi'?m\s+done\b", "💀"),
+    (r"\b(?:finally|lfg|dub)\b|\bwe'?re\s+so\s+back\b|\blet'?s\s+go+\b", "🔥"),
+    (r"\b(?:congrats|congratulations|passed|nailed\s+it)\b", "👏"),
+    (r"\b(?:sad|depressed|tired|exhausted)\b|😭", "🫂"),
+    (r"\b(?:wtf|bruh|deadass)\b|\bwhat\s+the\b|\bno\s+way\b", "👀"),
+    (r"\b(?:studying|exam|jee|mocks|homework|assignment)\b", "📚"),
+    (r"\b(?:love|cute|adorable)\b|🥺", "🫶"),
+)
+#: How often a matched mood actually earns a reaction.
+_MOOD_PERCENT = 30
+
+
+def mood_reaction(text: str) -> str | None:
+    """An emoji that fits what was said, or ``None`` to stay out of it.
+
+    Only fires when she was *not* addressed: if someone is talking to her she
+    should answer, and a reaction in place of a reply reads as ignoring them.
+    """
+    body = (text or "").strip()
+    if not body or addressed(body):
+        return None
+    for pattern, emoji in _MOOD_REACTIONS:
+        if re.search(pattern, body, re.IGNORECASE):
+            return emoji if secrets.randbelow(100) < _MOOD_PERCENT else None
+    return None
+
+
 def _ledger(state: Any) -> dict[str, dict[str, Any]]:
     existing = getattr(state, "_discord_chatter", None)
     if not isinstance(existing, dict):

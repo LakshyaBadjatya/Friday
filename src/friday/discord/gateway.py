@@ -46,10 +46,16 @@ _DISPATCH, _HEARTBEAT, _IDENTIFY = 0, 1, 2
 _PRESENCE_UPDATE, _RECONNECT = 3, 7
 _INVALID_SESSION = 9
 
-#: GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT. MESSAGE_CONTENT is privileged and
-#: must be switched on in the Developer Portal — without it every message arrives
-#: with an empty ``content`` and she looks deaf while appearing perfectly healthy.
-_INTENTS = (1 << 0) | (1 << 9) | (1 << 15)
+#: GUILDS | GUILD_VOICE_STATES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS |
+#: MESSAGE_CONTENT.
+#: MESSAGE_CONTENT is privileged and must be switched on in the Developer Portal
+#: — without it every message arrives with an empty ``content`` and she looks
+#: deaf while appearing perfectly healthy. The reactions bit is separate: without
+#: it the reaction events are simply never delivered.
+#: GUILD_VOICE_STATES (bit 7) is the one that makes her able to follow anyone
+#: into a call. Without it VOICE_STATE_UPDATE is never delivered, so she agrees
+#: to join, waits for an event that cannot arrive, and simply never turns up.
+_INTENTS = (1 << 0) | (1 << 7) | (1 << 9) | (1 << 10) | (1 << 15)
 
 #: Reconnect backoff.
 _RETRY_BASE = 2.0
@@ -105,6 +111,9 @@ async def _session(app: Any) -> None:
                 },
             })
         )
+        # Kept on app state so a message handler can ask the gateway to move
+        # her into a voice channel; opcode 4 goes over *this* socket.
+        app.state._discord_socket = socket  # noqa: SLF001 - app state is a namespace
         logger.info("discord gateway connected")
 
         async with anyio.create_task_group() as tg:
@@ -116,6 +125,8 @@ async def _session(app: Any) -> None:
                 name = event.get("t")
                 if op == _DISPATCH and name == "MESSAGE_CREATE":
                     tg.start_soon(_on_message, app, token, event.get("d") or {})
+                elif op == _DISPATCH and name == "MESSAGE_REACTION_ADD":
+                    tg.start_soon(_on_reaction, app, token, event.get("d") or {})
                 elif op == _DISPATCH and name == "VOICE_STATE_UPDATE":
                     _on_voice_state(app, socket, tg, event.get("d") or {})
                 elif op == _DISPATCH and name == "VOICE_SERVER_UPDATE":
@@ -178,6 +189,45 @@ async def _rotate_presence(socket: Any) -> None:
             await socket.send(json.dumps({"op": _PRESENCE_UPDATE, "d": _presence()}))
 
 
+async def _on_reaction(app: Any, token: str, data: dict[str, Any]) -> None:
+    """Notice someone reacting to one of her messages.
+
+    Only her own messages, and only sometimes. Reacting is the cheapest gesture
+    in a chat — someone is not asking for a conversation — so answering every
+    one would make people stop doing it.
+    """
+    if str((data.get("member") or {}).get("user", {}).get("id") or
+           data.get("user_id") or "") == _self_id(app):
+        return  # her own reaction coming back to her
+    emoji = ((data.get("emoji") or {}).get("name") or "").strip()
+    channel = str(data.get("channel_id") or "")
+    message_id = str(data.get("message_id") or "")
+    if not emoji or not channel or not message_id:
+        return
+    if message_id not in _hers(app):
+        return  # somebody reacting to somebody else is not her business
+    said = banter.reaction_response(emoji)
+    if said:
+        await _send(token, channel, said, reply_to=message_id)
+
+
+def _hers(app: Any) -> Any:
+    """Ids of messages she sent, so a reaction can be attributed.
+
+    Bounded: the gateway does not say who authored the message a reaction landed
+    on, so the alternative is fetching it over REST for every reaction in the
+    server. Remembering the last few dozen of her own is cheaper and enough — a
+    reaction to something she said an hour ago is not a live conversation.
+    """
+    from collections import deque  # noqa: PLC0415
+
+    existing = getattr(app.state, "_my_messages", None)
+    if existing is None:
+        existing = deque(maxlen=80)
+        app.state._my_messages = existing  # noqa: SLF001 - app state is a namespace
+    return existing
+
+
 # --- voice ------------------------------------------------------------------ #
 def _voice(app: Any) -> dict[str, Any]:
     """Live voice connections, keyed by guild."""
@@ -231,6 +281,11 @@ def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> Non
             call.credentials(session_id=str(data.get("session_id") or ""))
         return
 
+    # Remember where people are. Being told "join the vc" when the speaker is
+    # already sitting in one is the common case, and without this she has no way
+    # to know which channel that is — the invitation carries no id.
+    _where(app)[user] = (guild, str(channel)) if channel else None
+
     settings = getattr(app.state, "settings", None)
     owner = str(getattr(settings, "discord_owner_id", "") or "")
     if owner and user != owner:
@@ -263,6 +318,33 @@ async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) ->
     finally:
         call.close()
         _voice(app).pop(guild, None)
+
+
+async def _follow_into_voice_bg(app: Any, socket: Any, guild: str, channel: str) -> None:
+    """Start joining without making the text reply wait for the handshake."""
+    import asyncio  # noqa: PLC0415
+
+    task = asyncio.create_task(_follow_into_voice(app, socket, guild, channel))
+    _joins(app).add(task)
+    task.add_done_callback(_joins(app).discard)
+
+
+def _joins(app: Any) -> set[Any]:
+    """Strong refs to in-flight joins; asyncio keeps only a weak one."""
+    existing = getattr(app.state, "_voice_joins", None)
+    if not isinstance(existing, set):
+        existing = set()
+        app.state._voice_joins = existing  # noqa: SLF001 - app state is a namespace
+    return existing
+
+
+def _where(app: Any) -> dict[str, Any]:
+    """Which voice channel each person is sitting in, if any."""
+    existing = getattr(app.state, "_voice_where", None)
+    if not isinstance(existing, dict):
+        existing = {}
+        app.state._voice_where = existing  # noqa: SLF001 - app state is a namespace
+    return existing
 
 
 def _on_voice_server(app: Any, data: dict[str, Any]) -> None:
@@ -342,6 +424,7 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
             app, content, channel,
             forced=bool(mentioned or replying_to_her)
             or bool(seen and not banter.addressed(content)),
+            asker=str((message.get("author") or {}).get("id") or ""),
         )
     except Exception:  # noqa: BLE001 - one bad message must not kill the socket
         logger.exception("discord message handling failed")
@@ -349,11 +432,24 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     if reply:
         # Threaded as a reply to the message she is answering, so a busy channel
         # stays readable and it is obvious which line she picked up.
-        await _send(token, channel, reply, reply_to=str(message.get("id") or ""))
+        sent = await _send(
+            token, channel, reply, reply_to=str(message.get("id") or "")
+        )
+        if sent:
+            _hers(app).append(sent)
+        return
+
+    # Nothing to say, but the message might still be worth acknowledging. An
+    # emoji that fits the mood reads like someone half-watching; a random one
+    # reads like a bot picking at random, which is what it would be.
+    fitting = banter.mood_reaction(content)
+    if fitting:
+        await _react(token, channel, str(message.get("id") or ""), fitting)
 
 
 async def _compose(
-    app: Any, content: str, channel: str, *, forced: bool = False
+    app: Any, content: str, channel: str, *, forced: bool = False,
+    asker: str = "",
 ) -> str | None:
     """The reply, or ``None`` to stay quiet.
 
@@ -370,10 +466,20 @@ async def _compose(
     if asked and banter.addressed(content):
         lang.set_for(app.state, discord_session(app), asked)
 
-    # "friday wanna talk" — she cannot start a call, so she asks them to.
+    # "friday wanna talk" / "friday join vc". If the asker is already sitting in
+    # a channel she goes there now rather than telling them to do the thing they
+    # have plainly already done — which is what made her look broken.
     if banter.addressed(content) and banter.wants_voice(content):
-        guild_call = next(iter(_voice(app).values()), None)
-        return banter.come_to_vc(already_connected=guild_call is not None)
+        if next(iter(_voice(app).values()), None) is not None:
+            return banter.come_to_vc(already_connected=True)
+        seat = _where(app).get(asker)
+        if seat:
+            guild, voice_channel = seat
+            socket = getattr(app.state, "_discord_socket", None)
+            if socket is not None:
+                await _follow_into_voice_bg(app, socket, guild, voice_channel)
+                return banter.come_to_vc(already_connected=True)
+        return banter.come_to_vc(already_connected=False)
 
     # "what are you doing" is small talk with a punchline attached, not an
     # identity question — she answers it in the same register as her status line.
@@ -509,8 +615,8 @@ async def _react(token: str, channel: str, message_id: str, emoji: str) -> None:
 
 async def _send(
     token: str, channel: str, content: str, reply_to: str = ""
-) -> None:
-    """Post a message, optionally threaded as a reply to another one."""
+) -> str:
+    """Post a message, optionally threaded as a reply; return its id."""
     payload: dict[str, Any] = {"content": content[:1900]}
     if reply_to:
         payload["message_reference"] = {"message_id": reply_to}
@@ -528,11 +634,13 @@ async def _send(
         },
     )
 
-    def _post() -> None:
+    def _post() -> str:
         try:
-            with urllib.request.urlopen(request, timeout=15):  # noqa: S310
-                return
+            with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310
+                sent = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return str(sent.get("id") or "")
         except Exception:  # noqa: BLE001 - a failed send is not worth a crash
             logger.warning("discord send failed")
+            return ""
 
-    await anyio.to_thread.run_sync(_post)
+    return str(await anyio.to_thread.run_sync(_post))

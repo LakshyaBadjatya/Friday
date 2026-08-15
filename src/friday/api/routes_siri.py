@@ -37,6 +37,7 @@ from friday.logging import get_logger
 from friday.siri import context as siri_context
 from friday.siri import desk as siri_desk
 from friday.siri import drill as siri_drill
+from friday.siri import guard as siri_guard
 from friday.siri import operators as siri_operators
 from friday.siri import tasks as siri_tasks
 from friday.siri.arithmetic import arithmetic_reply
@@ -211,6 +212,11 @@ async def _fast_answer(
                 [
                     Message(role="system", content=persona + _VOICE_RULES),
                     *history,
+                    # Restated after the history, not just before it. A jailbreak
+                    # sent earlier in the session lives in that history, and
+                    # whatever comes last carries the most weight — so the last
+                    # word is always hers.
+                    Message(role="system", content=siri_guard.ANCHOR),
                     Message(role="user", content=_augment_teaching(query)),
                 ]
             )
@@ -523,6 +529,7 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
     """
     memory = _memory(request)
     deadline = _deadline(request)
+    app_state = request.app.state
 
     def _reply(
         speech: str,
@@ -541,7 +548,55 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
         """
         if record:
             siri_context.remember(memory, session_id, query, raw or speech)
-        return speech, raw, mode, action
+        # Scrubbed here, at the single exit, rather than in each branch. This
+        # assumes the input guard has already failed: if some phrasing does talk
+        # the model into reciting a key, the characters still cannot leave.
+        settings = getattr(app_state, "settings", None)
+        return (
+            siri_guard.redact(speech, settings),
+            siri_guard.redact(raw, settings),
+            mode,
+            action,
+        )
+
+    # Throwing away a poisoned conversation. This has to run first and it has to
+    # clear the *shared* buffer, because that is where a landed jailbreak lives
+    # and why it keeps working on turns long after it was sent.
+    if siri_guard.is_reset(query):
+        try:
+            memory.clear(session_id)
+        except Exception:  # noqa: BLE001 - a failed purge must still answer
+            logger.exception("guard: session purge failed")
+        siri_operators.release(app_state, session_id)
+        return _reply(
+            siri_guard.RESET_REPLY, raw=siri_guard.RESET_REPLY,
+            mode="reset", record=False,
+        )
+
+    # Identity is answered from a constant, never by the model. The model is the
+    # thing under attack — a hijacked one introduces itself as whatever it was
+    # told to be — so "who are you" is not a question it gets to answer. No
+    # prompt rewrites a string literal.
+    identity = siri_guard.identity_reply(query)
+    if identity is not None:
+        return _reply(identity, raw=identity, mode="identity", record=False)
+
+    # Takeover and exfiltration attempts are refused without the model seeing
+    # them, and deliberately not recorded: a jailbreak left in the context window
+    # is replayed on every later turn, which is why one of them kept working long
+    # after it was sent.
+    refusal = siri_guard.blocked(query)
+    if refusal is not None:
+        logger.warning("guard: refused a takeover/exfiltration attempt")
+        return _reply(refusal, raw=refusal, mode="guard", record=False)
+
+    # Irreversible requests are held for a real confirmation rather than run
+    # from a chat message. The owner may wipe his own data; a prompt that talked
+    # her into it may not, and from inside a turn the two look identical.
+    caution = siri_guard.confirmation_for(query)
+    if caution is not None:
+        logger.warning("guard: held a destructive request for confirmation")
+        return _reply(caution, raw=caution, mode="guard", record=False)
 
     # Mis-wired shortcut guard: the body is a literal variable label (e.g. "Dictated
     # Text"), not the spoken words. Speak an actionable fix instead of clarifying.
@@ -554,7 +609,6 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
     # flight the words are an *answer*, not a question, so this runs ahead of
     # every other branch. Otherwise "mitochondria" gets looked up instead of
     # graded. Starting a drill is matched here too, since it is the same seam.
-    app_state = request.app.state
     if siri_drill.is_drilling(app_state, session_id) or _looks_like_drill(query):
         drilled = await siri_drill.handle(
             app_state,

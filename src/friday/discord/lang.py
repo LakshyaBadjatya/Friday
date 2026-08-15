@@ -55,7 +55,11 @@ VOICES: dict[str, str] = {
 _NAMES: dict[str, str] = {
     "english": "en", "angielski": "en",
     "hindi": "hi", "हिंदी": "hi",
-    "polish": "pl", "polski": "pl", "polsku": "pl",
+    # Polish is the language actually in use here, so it answers to more than
+    # its English name: the endonym in the forms a Pole would type it, and the
+    # phrase "po polsku" that usually carries the request.
+    "polish": "pl", "polski": "pl", "polsku": "pl", "polskim": "pl",
+    "polska": "pl", "pl": "pl", "poland": "pl",
     "spanish": "es", "español": "es", "espanol": "es",
     "french": "fr", "français": "fr", "francais": "fr",
     "german": "de", "deutsch": "de",
@@ -87,7 +91,17 @@ _REQUEST = re.compile(
 )
 #: "back to english", "english again" — returning to the default.
 _RESET = re.compile(
-    r"\b(?:back\s+to|return\s+to)\s+english\b|\benglish\s+again\b", re.IGNORECASE
+    r"\b(?:back\s+to|return\s+to)\s+english\b|\benglish\s+again\b"
+    r"|\bz\s+powrotem\s+po\s+angielsku\b|\bpo\s+angielsku\b",
+    re.IGNORECASE,
+)
+#: Asked *in* Polish — "mow po polsku", "gadaj po polsku", or just "po polsku".
+#: Someone switching to Polish very often asks in Polish, and matching only the
+#: English name would miss exactly the person most likely to want this.
+_POLISH_REQUEST = re.compile(
+    r"\b(?:m[oó]w|gadaj|pisz|odpowiadaj)\s+(?:do\s+mnie\s+)?po\s+polsku\b"
+    r"|^\s*po\s+polsku\s*[!?.]*\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -102,6 +116,8 @@ def requested(text: str) -> str | None:
         return None
     if _RESET.search(body):
         return "en"
+    if _POLISH_REQUEST.search(body):
+        return "pl"
     match = _REQUEST.search(body)
     if match is None:
         return None
@@ -130,16 +146,28 @@ def name_of(code: str | None) -> str:
     return "english"
 
 
+#: Polish-specific guidance. A generic "reply in Polish" produces textbook
+#: Polish — grammatically correct, formal, and nothing like how anyone talks in
+#: a group chat. Naming the register is what makes it sound like a person.
+_POLISH_STYLE = (
+    " Use casual spoken Polish, the way friends message each other — informal "
+    "'ty' forms, contractions, and everyday words rather than literary ones. Do "
+    "not use formal 'Pan/Pani' address. Keep the Polish diacritics correct "
+    "(ą ć ę ł ń ó ś ź ż); stripping them reads as lazy, not casual."
+)
+
+
 def instruction(code: str | None) -> str:
     """A prompt fragment telling the model which language to answer in."""
     if not code or code == "en":
         return ""
     language = name_of(code)
-    return (
+    rule = (
         f"\n\nReply ONLY in {language}. The user is speaking {language} and "
         f"expects the same back — do not translate, do not add an English "
         f"version, and do not remark on having switched."
     )
+    return rule + (_POLISH_STYLE if code == "pl" else "")
 
 
 # --- per-session preference ------------------------------------------------- #

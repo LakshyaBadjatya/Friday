@@ -131,12 +131,54 @@
     return API_BASE + path;
   }
 
+  // --- API key --------------------------------------------------------------
+  // The backend runs with FRIDAY_REQUIRE_AUTH on, so every call needs a bearer
+  // token. The key is never baked into this file — the HUD is a public static
+  // page (Vercel), and a key committed here would be a key published.
+  //
+  // It arrives once via ?key=<token>, is copied into localStorage, and is then
+  // scrubbed from the address bar and this history entry immediately, so it does
+  // not linger in the URL, get screenshotted, or leak through a Referer header.
+  var KEY_STORE = "friday-api-key";
+  function resolveApiKey() {
+    var stored = "";
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var fromUrl = params.get("key");
+      if (fromUrl) {
+        window.localStorage.setItem(KEY_STORE, fromUrl);
+        params.delete("key");
+        var rest = params.toString();
+        window.history.replaceState(
+          {},
+          "",
+          window.location.pathname + (rest ? "?" + rest : "") + window.location.hash
+        );
+        return fromUrl;
+      }
+      stored = window.localStorage.getItem(KEY_STORE) || "";
+    } catch (err) {
+      stored = "";
+    }
+    return stored;
+  }
+  var API_KEY = resolveApiKey();
+
+  /** Merge the bearer token into a headers object (no-op when unset). */
+  function authHeaders(extra) {
+    var headers = extra || {};
+    if (API_KEY) {
+      headers.Authorization = "Bearer " + API_KEY;
+    }
+    return headers;
+  }
+
   // --- backend client (no key baked in) -------------------------------------
   /** GET a JSON endpoint; resolves to parsed JSON or throws (status on .status). */
   async function getJSON(path) {
     var resp = await fetch(url(path), {
       method: "GET",
-      headers: { Accept: "application/json" },
+      headers: authHeaders({ Accept: "application/json" }),
     });
     if (!resp.ok) {
       var e = new Error("GET " + path + " -> HTTP " + resp.status);
@@ -150,10 +192,10 @@
   async function postJSON(path, body) {
     var resp = await fetch(url(path), {
       method: "POST",
-      headers: {
+      headers: authHeaders({
         "Content-Type": "application/json",
         Accept: "application/json",
-      },
+      }),
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
@@ -252,7 +294,7 @@
   /** Slow global heartbeat: a cheap /health ping drives the connection pill. */
   async function heartbeat() {
     try {
-      var resp = await fetch(url("/health"), { method: "GET" });
+      var resp = await fetch(url("/health"), { method: "GET", headers: authHeaders() });
       setOnline(resp.ok);
     } catch (err) {
       setOnline(false);
@@ -1144,6 +1186,7 @@
     try {
       var resp = await fetch(url("/rag/sources/" + encodeURIComponent(id)), {
         method: "DELETE",
+        headers: authHeaders(),
       });
       if (!resp.ok) {
         throw new Error("HTTP " + resp.status);
@@ -1955,7 +1998,7 @@
     fd.append("file", file, file.name);
     toast("Ingesting " + file.name + "…");
     try {
-      var resp = await fetch(url("/rag/ingest"), { method: "POST", body: fd });
+      var resp = await fetch(url("/rag/ingest"), { method: "POST", body: fd, headers: authHeaders() });
       if (resp.status === 404) {
         toast("RAG is disabled on this backend");
         logLine("rag ingest skipped (disabled): " + file.name, "err");

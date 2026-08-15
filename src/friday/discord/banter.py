@@ -406,6 +406,65 @@ def mood_reaction(text: str) -> str | None:
     return None
 
 
+#: Heavy-but-not-distressing talk: architecture arguments, exam strategy, the
+#: fifteenth debate about which university. Fair game to puncture.
+_EARNEST = re.compile(
+    r"\b(?:actually|technically|fundamentally|objectively|literally\s+the)\b"
+    r"|\b(?:i\s+think\s+the\s+(?:real|whole)\s+(?:point|issue|problem))\b"
+    r"|\b(?:in\s+my\s+opinion|the\s+thing\s+is|here'?s\s+the\s+thing)\b"
+    r"|\b(?:strategy|optimal|efficient|architecture|framework|methodology)\b",
+    re.IGNORECASE,
+)
+#: Genuinely difficult things. She does not make jokes about these, ever — a
+#: bot that quips at someone having a bad time is the fastest way to be muted,
+#: and the cost of being wrong here is far higher than the cost of staying quiet.
+_HEAVY = re.compile(
+    r"\b(?:died?|death|funeral|hospital|cancer|sick|ill|surgery)\b"
+    r"|\b(?:depress|anxiet|panic\s+attack|suicid|self\s*harm|therapy)\b"
+    r"|\b(?:breakup|broke\s+up|divorce|cheated|fight\s+with\s+my)\b"
+    r"|\b(?:failed|rejected|didn'?t\s+get\s+in|lost\s+my)\b"
+    r"|\b(?:scared|terrified|hate\s+myself|give\s+up|can'?t\s+do\s+this)\b",
+    re.IGNORECASE,
+)
+
+#: How often an earnest stretch actually earns a jab. Rare — a bot that punctures
+#: every serious sentence stops the conversation happening at all.
+_TEASE_PERCENT = 25
+
+
+def teasable(text: str) -> bool:
+    """Whether a message is earnest enough to poke at, and safe to poke at.
+
+    The safety check comes first and is absolute. Everything else is a coin
+    flip, because the joke only lands when it is occasional.
+    """
+    body = (text or "").strip()
+    if not body or len(body.split()) < 12:
+        return False
+    if _HEAVY.search(body):
+        return False
+    if not _EARNEST.search(body):
+        return False
+    return secrets.randbelow(100) < _TEASE_PERCENT
+
+
+TEASE_PROMPT = (
+    "They have gone properly earnest. Puncture it in one line — affectionate, "
+    "not dismissive, the way a friend says 'ok professor'. Do not answer the "
+    "substance, just land the joke and get out of the way. Under fifteen words."
+)
+
+#: Answering for the owner while he is away.
+STAND_IN_PROMPT = (
+    "The owner is away and his friend has been waiting for a reply. Answer for "
+    "him, in his voice, from what the conversation shows you about what he "
+    "thinks — brief, direct, a bit dry. Do not invent facts about his life, "
+    "plans or feelings; if the question genuinely needs him, say he's away and "
+    "you'll flag it. Never pretend to *be* him — you are answering on his "
+    "behalf and that stays obvious. Under 40 words."
+)
+
+
 def _ledger(state: Any) -> dict[str, dict[str, Any]]:
     existing = getattr(state, "_discord_chatter", None)
     if not isinstance(existing, dict):
@@ -432,7 +491,12 @@ DISCORD_VOICE = (
     "and no bit. Tease the owner freely, never the other person, and never make a "
     "joke you would not make to someone's face. Never invent facts about either of "
     "them — being playful is not permission to make things up.\n"
-    "Under 40 words unless genuinely asked for detail. One message, not an essay."
+    "Under 40 words unless genuinely asked for detail. One message, not an essay.\n"
+    "Be exact. Answer the question that was asked, with the specific thing — the "
+    "number, the name, the actual step — not a paraphrase of the question and not "
+    "a hedge. If you do not know, say that in four words rather than producing a "
+    "paragraph that avoids admitting it. Vagueness is worse than being wrong, "
+    "because being wrong can at least be corrected."
 )
 
 #: How she refers to the Queen. The name itself lives in long-term memory and is

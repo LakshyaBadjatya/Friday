@@ -27,6 +27,7 @@ import contextlib
 import json
 import re
 import secrets
+import time
 import urllib.request
 from typing import Any, cast
 
@@ -332,6 +333,75 @@ def _guilds(app: Any) -> dict[str, str]:
     return existing
 
 
+#: How long the friend waits before FRIDAY answers for him. Long enough that he
+#: gets first refusal on his own conversation — she is a backstop, not a
+#: replacement, and jumping in at ninety seconds would take the conversation off
+#: him entirely.
+_STAND_IN_AFTER = 420.0
+#: Below this a message is chat, not a question left hanging.
+_STAND_IN_MIN_WORDS = 15
+
+
+async def _maybe_stand_in(
+    app: Any, token: str, channel: str, message: dict[str, Any]
+) -> None:
+    """Answer for the owner when his friend has been left waiting.
+
+    Deliberately visible: she posts from the bot account, so Discord labels it
+    as her. She answers *for* him, never as him — a reply that genuinely passed
+    as him would be deceiving someone who never agreed to talk to a machine.
+    """
+    settings = getattr(app.state, "settings", None)
+    owner = str(getattr(settings, "discord_owner_id", "") or "")
+    author = str((message.get("author") or {}).get("id") or "")
+    content = (message.get("content") or "").strip()
+    if not owner or author == owner or len(content.split()) < _STAND_IN_MIN_WORDS:
+        return
+
+    message_id = str(message.get("id") or "")
+    await anyio.sleep(_STAND_IN_AFTER)
+    # If he turned up in the meantime, this was never needed.
+    if _last_owner_message(app, channel) > time.monotonic() - _STAND_IN_AFTER:
+        return
+    if _stood_in(app).get(channel) == message_id:
+        return  # already answered this one
+    _stood_in(app)[channel] = message_id
+
+    reply = await _model(app, f"{content}\n\n[{banter.STAND_IN_PROMPT}]", channel)
+    if reply:
+        await _send(token, channel, reply, reply_to=message_id)
+
+
+async def _model(app: Any, content: str, channel: str) -> str | None:
+    """One turn through the shared brain, for the prompts that steer her."""
+    from friday.api.routes_siri import _MAX_QUERY, _produce  # noqa: PLC0415
+
+    _speech, raw, _mode, _action = await _produce(
+        cast("Any", _GatewayRequest(app)), content[:_MAX_QUERY], discord_session(app)
+    )
+    return raw or None
+
+
+def _last_owner_message(app: Any, channel: str) -> float:
+    return float(_owner_seen(app).get(channel, 0.0))
+
+
+def _owner_seen(app: Any) -> dict[str, float]:
+    existing = getattr(app.state, "_owner_seen", None)
+    if not isinstance(existing, dict):
+        existing = {}
+        app.state._owner_seen = existing  # noqa: SLF001 - app state is a namespace
+    return existing
+
+
+def _stood_in(app: Any) -> dict[str, str]:
+    existing = getattr(app.state, "_stood_in", None)
+    if not isinstance(existing, dict):
+        existing = {}
+        app.state._stood_in = existing  # noqa: SLF001 - app state is a namespace
+    return existing
+
+
 # --- voice ------------------------------------------------------------------ #
 def _voice(app: Any) -> dict[str, Any]:
     """Live voice connections, keyed by guild."""
@@ -497,6 +567,11 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         return
     if message.get("guild_id"):
         _guilds(app)[channel] = str(message["guild_id"])
+    settings_now = getattr(app.state, "settings", None)
+    owner_id = str(getattr(settings_now, "discord_owner_id", "") or "")
+    author_id = str((message.get("author") or {}).get("id") or "")
+    if owner_id and author_id == owner_id:
+        _owner_seen(app)[channel] = time.monotonic()
 
     # Being @-mentioned or replied to is being spoken to, as plainly as typing
     # her name. A mention arrives as markup (<@id>) rather than the word
@@ -576,6 +651,9 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     fitting = banter.mood_reaction(content)
     if fitting:
         await _react(token, channel, str(message.get("id") or ""), fitting)
+    # A long message from the friend starts a clock: if nobody answers it, she
+    # will, on his behalf.
+    await _maybe_stand_in(app, token, channel, message)
 
 
 async def _compose(
@@ -626,6 +704,9 @@ async def _compose(
         doing = banter.doing_reply(content, getattr(app.state, "_presence", None))
         if doing is not None:
             return doing
+
+    if not forced and not banter.addressed(content) and banter.teasable(content):
+        return await _model(app, f"{content}\n\n[{banter.TEASE_PROMPT}]", channel)
 
     if not forced and not banter.addressed(content):
         # Not talking to her. Occasionally she has something to say anyway.

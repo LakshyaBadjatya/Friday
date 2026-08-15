@@ -47,8 +47,24 @@ logger = get_logger("friday.api.routes_siri")
 
 router = APIRouter()
 
-#: Default session id so successive "Hey Siri, ask Friday…" turns share memory.
-_DEFAULT_SESSION = "siri"
+#: Fallback session id when settings are unavailable. The real value comes from
+#: ``owner_session`` — see :func:`_session_id`.
+_DEFAULT_SESSION = "friday"
+
+
+def _session_id(request: Request, override: str | None = None) -> str:
+    """The conversation this turn belongs to.
+
+    Every surface answers under one id by default, which is what makes them one
+    assistant instead of four with the same name: a question asked on Telegram
+    and a follow-up spoken to Siri land in the same thread, and "what was the
+    last topic" means the same thing in both. An explicit ``?session=`` still
+    wins, for when a genuinely separate thread is wanted.
+    """
+    if override:
+        return override
+    settings = getattr(request.app.state, "settings", None)
+    return str(getattr(settings, "owner_session", _DEFAULT_SESSION) or _DEFAULT_SESSION)
 #: Spoken when the brain returns nothing / errors — Siri should never read silence.
 _FALLBACK_SPEECH = "Sorry, I didn't catch that. Could you try again?"
 #: Spoken when the turn blows its wall-clock budget. Siri abandons a slow request
@@ -511,7 +527,7 @@ async def siri_ask(request: Request) -> Any:
             status_code=400, content={"detail": "missing query 'q'"}
         )
     want_json = request.query_params.get("format", "").lower() == "json"
-    session_id = request.query_params.get("session") or _DEFAULT_SESSION
+    session_id = _session_id(request, request.query_params.get("session"))
     speech, raw, mode, action = await _produce(request, query[:_MAX_QUERY], session_id)
     return _respond(speech, raw=raw, mode=mode, want_json=want_json, action=action)
 
@@ -888,7 +904,7 @@ async def telegram_webhook(request: Request) -> Any:
         text = f"{expansion} {argument}".strip() if argument else expansion
 
     speech, raw, _mode, _action = await _produce(
-        request, text[:_MAX_QUERY], f"telegram:{chat_id}"
+        request, text[:_MAX_QUERY], _session_id(request)
     )
     # Chat has no 600-character speaking limit and renders newlines, so the
     # fuller text is the better answer when the two differ.

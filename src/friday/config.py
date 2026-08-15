@@ -638,6 +638,28 @@ class Settings(BaseSettings):
     # being stored as UTC. Any IANA name (``Europe/London``, ``America/New_York``);
     # an unknown name falls back to UTC rather than failing the turn.
     timezone: str = "Asia/Kolkata"
+    # The one conversation. Siri, the Telegram bot, the HUD (and Discord, when it
+    # lands) all answer under this session id unless a caller overrides it, so
+    # they are one continuous thread rather than four assistants with the same
+    # name: ask on Telegram, follow up by voice, and "what was the last topic"
+    # means the same thing in both. Override per-request with ``?session=`` when
+    # a genuinely separate thread is wanted.
+    owner_session: str = "friday"
+
+    # --- Discord front door (default off) ---
+    # Gates ``POST /discord/interactions``. Discord signs every request with
+    # Ed25519, so the public key is what authenticates the caller — that route
+    # cannot sit behind the bearer middleware any more than Telegram's can.
+    enable_discord: bool = False
+    discord_public_key: SecretStr | None = None
+    discord_application_id: str = ""
+    # Only this Discord user is answered. Empty means anyone who can reach the
+    # application's commands can spend the model budget and read the owner's
+    # reminders, so set it on any server with other people in it.
+    discord_owner_id: str = ""
+    # Needed only to push reminders *into* Discord unprompted; slash commands
+    # work without it, because the follow-up uses the interaction's own token.
+    discord_bot_token: SecretStr | None = None
     # Shared secret for ``POST /telegram/webhook``. Telegram cannot send a bearer
     # header, so the bearer middleware cannot guard that route; the secret travels
     # in the URL Telegram is registered with instead, and is compared in constant

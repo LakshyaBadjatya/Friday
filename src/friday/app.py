@@ -50,6 +50,7 @@ from friday.api.routes_briefing import router as briefing_router
 from friday.api.routes_chat import router as chat_router
 from friday.api.routes_circle import router as circle_router
 from friday.api.routes_comms import router as comms_router
+from friday.api.routes_discord import router as discord_router
 from friday.api.routes_email import router as email_router
 from friday.api.routes_emotion import router as emotion_router
 from friday.api.routes_ensemble import router as ensemble_router
@@ -2806,6 +2807,7 @@ def create_app() -> FastAPI:
     # The Siri front door — always registered but self-guards on FRIDAY_ENABLE_SIRI
     # (404 when off), so the offline default exposes no Siri surface.
     app.include_router(siri_router)
+    app.include_router(discord_router)
     # The Android TV surface — always registered but self-guards on FRIDAY_ENABLE_TV
     # (404 when off): parses spoken commands into TV actions + relays phone commands.
     app.include_router(tv_router)

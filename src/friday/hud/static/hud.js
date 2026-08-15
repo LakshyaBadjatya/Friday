@@ -207,7 +207,17 @@
   }
 
   // A stable session id for this HUD tab's /chat turns.
-  var SESSION_ID = "hud-" + Math.random().toString(36).slice(2, 10);
+  // One conversation across every surface. This used to be random per page
+  // load, so the HUD did not share a thread even with itself across a refresh,
+  // let alone with Siri or Telegram. It matches FRIDAY_OWNER_SESSION on the
+  // backend; override with ?session=<id> for a deliberately separate thread.
+  var SESSION_ID = (function () {
+    try {
+      return new URLSearchParams(window.location.search).get("session") || "friday";
+    } catch (err) {
+      return "friday";
+    }
+  })();
 
   // Who the next free-form question is addressed to (a persona name or null).
   var addressTarget = null;

@@ -16,6 +16,9 @@ dependencies = [
   # Durable reminder/trigger storage. Render's free tier wipes the container
   # disk on every deploy, so SQLite cannot hold anything that must outlive one.
   "psycopg[binary]>=3.2",
+  # Ed25519 verification for Discord interactions — Discord signs every request
+  # and rejects an endpoint that does not reject bad signatures.
+  "pynacl>=1.5",
 ]
 
 [project.scripts]
@@ -55,6 +58,7 @@ warn_unused_ignores = false
 module = [
   "numpy", "numpy.*",
   "psycopg", "psycopg.*",
+  "nacl", "nacl.*",
   "onnxruntime", "onnxruntime.*",
   "openwakeword", "openwakeword.*",
   "pvporcupine", "pvporcupine.*",

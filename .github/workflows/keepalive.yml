@@ -46,7 +46,7 @@ jobs:
           # better part of a minute, and giving up early would leave the service
           # asleep, which is the exact thing this exists to prevent.
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 \
-            https://friday-backend-oj8h.onrender.com/health || echo 000)
+            https://friday-backend-v2.onrender.com/health || echo 000)
           echo "health -> $code"
           # Fail on a non-200: that means the service is down rather than merely
           # asleep, and a silent green tick would hide it.

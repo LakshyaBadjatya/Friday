@@ -61,11 +61,9 @@ _OWNER = re.compile(
     re.IGNORECASE,
 )
 #: The part of the answer that never changes, whatever memory holds.
-_OWNER_BASE = (
-    "You're Lakshya Badjatya, Boss — my creator and the only person I answer to. "
-    "I'm FRIDAY: I run your reminders, your journal, your decks and your desk, "
-    "and I reach you through Siri and through Friday on Telegram."
-)
+#: Short on purpose. The old version recited every surface she runs on, which
+#: nobody asked about and which reads like a product description.
+_OWNER_BASE = "that's my Boss — Lakshya. he built me."
 
 #: "remember that X" / "keep in mind that X" — a durable fact about the user.
 _FACT_WRITE = re.compile(
@@ -223,9 +221,33 @@ def _owner(state: Any, text: str) -> str | None:
     remembered = [line for line in remembered if line]
     if not remembered:
         return _OWNER_BASE
-    return f"{_OWNER_BASE} Here's what you've had me remember: " + ". ".join(
-        remembered
-    ) + "."
+    # One thing, not the file. Reciting everything reads like a database being
+    # queried rather than someone who knows him, and "here's what you've had me
+    # remember" narrates the mechanism — nobody says that about a friend.
+    return f"{_OWNER_BASE} {_one_thing(remembered)}"
+
+
+#: How she drops a known fact in: as knowledge, never as a lookup.
+_ASIDES = (
+    "{fact}, if that's what you're after.",
+    "also {lower}.",
+    "{fact}.",
+    "he's the one {lower}, if that helps.",
+)
+
+
+def _one_thing(facts: list[str]) -> str:
+    """Mention a single thing she knows, phrased like knowing rather than recall."""
+    import secrets  # noqa: PLC0415
+
+    fact = secrets.choice(facts).rstrip(".")
+    # First clause only — the stored facts are dense paragraphs, and reading a
+    # whole one out is a briefing rather than an answer.
+    clipped = fact.split(". ")[0]
+    if len(clipped) > 140:
+        clipped = clipped[:140].rsplit(" ", 1)[0] + "…"
+    lower = (clipped[0].lower() + clipped[1:]) if clipped else clipped
+    return secrets.choice(_ASIDES).format(fact=clipped, lower=lower)
 
 
 def _facts(state: Any, text: str) -> str | None:

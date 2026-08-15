@@ -36,7 +36,14 @@ def _settings_for(request: Request) -> Settings:
     return get_settings()
 
 
-@router.get("/health", response_model=HealthResponse)
+# HEAD as well as GET. Uptime monitors default to HEAD because it is the cheaper
+# probe, and FastAPI — unlike plain Starlette — does not add it alongside GET, so
+# every check came back 405 and the service was reported down while being
+# perfectly healthy. A liveness endpoint that only answers one verb is not much
+# of a liveness endpoint.
+@router.api_route(
+    "/health", methods=["GET", "HEAD"], response_model=HealthResponse
+)
 async def health(request: Request) -> HealthResponse:
     """Return liveness and the configured LLM provider/model (no LLM call)."""
     settings = _settings_for(request)

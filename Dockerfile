@@ -46,6 +46,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---- runtime ----------------------------------------------------------------
 FROM python:3.12-slim AS runtime
 
+# Discord voice needs native audio tooling that pip cannot supply: ffmpeg to turn
+# the text-to-speech MP3 into the Opus frames Discord's voice socket accepts, and
+# libopus for the codec itself. This is the whole reason the service runs as a
+# container rather than on a managed Python runtime — there is no way to install
+# a system package on the latter.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg libopus0 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Put the venv on PATH so `uvicorn`/`python` resolve to the synced environment.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

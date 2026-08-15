@@ -19,6 +19,10 @@ dependencies = [
   # Ed25519 verification for Discord interactions — Discord signs every request
   # and rejects an endpoint that does not reject bad signatures.
   "pynacl>=1.5",
+  # Free text-to-speech for Discord voice — no API key and no account, unlike
+  # every hosted TTS. It emits MP3, which ffmpeg converts to the Opus frames the
+  # voice socket requires.
+  "edge-tts>=7.0",
 ]
 
 [project.scripts]

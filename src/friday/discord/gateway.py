@@ -33,6 +33,7 @@ from typing import Any, cast
 import anyio
 
 from friday.discord import banter, vision
+from friday.discord.voice import VoiceConnection
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.gateway")
@@ -112,8 +113,13 @@ async def _session(app: Any) -> None:
             async for raw in socket:
                 event = json.loads(raw)
                 op = event.get("op")
-                if op == _DISPATCH and event.get("t") == "MESSAGE_CREATE":
+                name = event.get("t")
+                if op == _DISPATCH and name == "MESSAGE_CREATE":
                     tg.start_soon(_on_message, app, token, event.get("d") or {})
+                elif op == _DISPATCH and name == "VOICE_STATE_UPDATE":
+                    _on_voice_state(app, socket, tg, event.get("d") or {})
+                elif op == _DISPATCH and name == "VOICE_SERVER_UPDATE":
+                    _on_voice_server(app, event.get("d") or {})
                 elif op in (_RECONNECT, _INVALID_SESSION):
                     logger.info("discord gateway asked for a reconnect")
                     tg.cancel_scope.cancel()
@@ -170,6 +176,100 @@ async def _rotate_presence(socket: Any) -> None:
         await anyio.sleep(_ROTATE_SECONDS)
         with contextlib.suppress(Exception):
             await socket.send(json.dumps({"op": _PRESENCE_UPDATE, "d": _presence()}))
+
+
+# --- voice ------------------------------------------------------------------ #
+def _voice(app: Any) -> dict[str, Any]:
+    """Live voice connections, keyed by guild."""
+    existing = getattr(app.state, "_voice_calls", None)
+    if not isinstance(existing, dict):
+        existing = {}
+        app.state._voice_calls = existing  # noqa: SLF001 - app state is a namespace
+    return existing
+
+
+async def join_voice(app: Any, socket: Any, guild: str, channel: str) -> Any:
+    """Ask the gateway to move the bot into a channel and prepare the connection.
+
+    The request goes over the *main* socket; the credentials come back as two
+    separate events, which is why the connection object exists before the
+    handshake rather than after it.
+    """
+    calls = _voice(app)
+    existing = calls.get(guild)
+    if existing is not None and existing.channel_id == channel:
+        return existing
+    if existing is not None:
+        existing.close()
+    call = VoiceConnection(app, guild, channel)
+    calls[guild] = call
+    await socket.send(json.dumps({
+        "op": 4,
+        "d": {"guild_id": guild, "channel_id": channel,
+              "self_mute": False, "self_deaf": False},
+    }))
+    return call
+
+
+def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> None:
+    """Follow the owner into a channel; leave when the channel empties.
+
+    Two different events share this name: the bot's own state (which carries the
+    session id the handshake needs) and everybody else's (which is how she knows
+    the owner just walked in).
+    """
+    me = _self_id(app)
+    guild = str(data.get("guild_id") or "")
+    channel = data.get("channel_id")
+    user = str(data.get("user_id") or "")
+    if not guild:
+        return
+
+    if user == me:
+        call = _voice(app).get(guild)
+        if call is not None and channel:
+            call.credentials(session_id=str(data.get("session_id") or ""))
+        return
+
+    settings = getattr(app.state, "settings", None)
+    owner = str(getattr(settings, "discord_owner_id", "") or "")
+    if owner and user != owner:
+        return  # only the owner pulls her into a call
+
+    if channel:
+        tg.start_soon(_follow_into_voice, app, socket, guild, str(channel))
+    else:
+        call = _voice(app).pop(guild, None)
+        if call is not None:
+            call.close()
+
+
+async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) -> None:
+    """Join the channel and start the listen/speak loop."""
+    call = await join_voice(app, socket, guild, channel)
+
+    async def _heard(said: str, _user: str) -> None:
+        reply = await _compose(app, said, f"voice:{channel}", forced=True)
+        if reply:
+            await call.say(reply)
+
+    try:
+        await call.run(_heard)
+    except Exception:  # noqa: BLE001 - a dropped call must not kill the gateway
+        logger.exception("voice: call ended badly")
+    finally:
+        call.close()
+        _voice(app).pop(guild, None)
+
+
+def _on_voice_server(app: Any, data: dict[str, Any]) -> None:
+    """The other half of the handshake: the token and the endpoint to dial."""
+    call = _voice(app).get(str(data.get("guild_id") or ""))
+    if call is not None:
+        call.credentials(
+            token=str(data.get("token") or ""),
+            endpoint=str(data.get("endpoint") or ""),
+        )
 
 
 # --- messages -------------------------------------------------------------- #
@@ -259,6 +359,11 @@ async def _compose(
     if social is not None:
         return social
 
+    # "friday wanna talk" — she cannot start a call, so she asks them to.
+    if banter.addressed(content) and banter.wants_voice(content):
+        guild_call = next(iter(_voice(app).values()), None)
+        return banter.come_to_vc(already_connected=guild_call is not None)
+
     # "what are you doing" is small talk with a punchline attached, not an
     # identity question — she answers it in the same register as her status line.
     if banter.addressed(content):
@@ -274,6 +379,8 @@ async def _compose(
 
     # Two bits that are the same turn with a different instruction attached,
     # rather than separate pipelines that would drift from her normal voice.
+    if channel.startswith("voice:") or forced and channel.startswith("voice"):
+        content = f"{content}\n\n[{banter.VOICE_REPLY_RULES}]"
     if banter.is_settle(content):
         content = f"{content}\n\n[{banter.SETTLE_PROMPT}]"
     elif banter.is_callback(content):

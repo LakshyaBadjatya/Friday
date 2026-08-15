@@ -253,6 +253,53 @@ def doing_reply(text: str) -> str | None:
     return secrets.choice(_DOING_LINES) if _DOING.search(text or "") else None
 
 
+#: "friday wanna talk" / "friday lets talk" / "friday vc" — the invitation.
+_WANNA_TALK = re.compile(
+    r"\bfriday[,\s]+(?:wanna|want\s+to|wanna\s+go|lets?|let'?s)\s+"
+    r"(?:talk|chat|vc|call)\b"
+    r"|\bfriday[,\s]+(?:join|get\s+in|hop\s+in|come\s+to)\s+(?:the\s+)?"
+    r"(?:vc|voice|call)\b"
+    r"|\bfriday[,\s]+(?:vc|voice\s+chat)\b",
+    re.IGNORECASE,
+)
+#: What she says when invited but nobody is in a voice channel yet.
+_COME_TO_VC = (
+    "ohh finally 😭 get in the vc, i'll be right there",
+    "yeaaa let's go — hop in the vc and i'll follow you in 🎧",
+    "bet. join the vc, i'm coming 🏃",
+    "ok ok give me a sec — get in the vc first",
+    "huh, you actually wanna talk to me? join the vc then 👀",
+)
+#: What she says when she is already in the channel with them.
+_ALREADY_IN_VC = (
+    "i'm literally already in here 🧍",
+    "bruh i'm in the vc. say something.",
+    "already here. talk to me 🎧",
+)
+
+
+def wants_voice(text: str) -> bool:
+    """Whether she is being invited into a voice channel."""
+    return bool(_WANNA_TALK.search(text or ""))
+
+
+def come_to_vc(already_connected: bool = False) -> str:
+    """The reply to that invitation."""
+    return secrets.choice(_ALREADY_IN_VC if already_connected else _COME_TO_VC)
+
+
+#: Appended when she is answering out loud rather than in text. Spoken language
+#: is not written language: emoji cannot be heard, and a sentence that scans on
+#: screen can be unlistenable.
+VOICE_REPLY_RULES = (
+    "\n\nYou are speaking OUT LOUD in a voice call, and your reply will be read "
+    "by a text-to-speech voice. No emoji, no asterisks, no markdown — none of it "
+    "can be heard, and it gets pronounced or mangled. One or two short sentences, "
+    "the way someone actually talks. No lists. If you need to say a number or a "
+    "symbol, write it as the word."
+)
+
+
 def _ledger(state: Any) -> dict[str, dict[str, Any]]:
     existing = getattr(state, "_discord_chatter", None)
     if not isinstance(existing, dict):

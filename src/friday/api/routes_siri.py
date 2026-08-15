@@ -20,6 +20,7 @@ rejections keep their honest 401/429 from the middleware.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from datetime import UTC, datetime
 from typing import Any
@@ -34,6 +35,8 @@ from friday.core.state import GraphState
 from friday.errors import FridayError
 from friday.logging import get_logger
 from friday.siri import context as siri_context
+from friday.siri import desk as siri_desk
+from friday.siri import drill as siri_drill
 from friday.siri import tasks as siri_tasks
 from friday.siri.arithmetic import arithmetic_reply
 from friday.siri.speech import for_speech
@@ -241,6 +244,19 @@ def _deadline(request: Request) -> float:
     except (TypeError, ValueError):
         return 12.0
     return deadline if deadline > 0 else 12.0
+
+
+#: Phrases that open a flashcard drill. Kept beside the route (not in
+#: :mod:`friday.siri.drill`) because it is a routing question: it decides whether
+#: the drill module is consulted at all, before any session state exists.
+_DRILL_OPENERS = re.compile(
+    r"\b(?:quiz|test|drill)\s+me\b|\b(?:let'?s\s+)?(?:revise|study)\b", re.IGNORECASE
+)
+
+
+def _looks_like_drill(query: str) -> bool:
+    """Whether the words could be opening a flashcard drill."""
+    return bool(_DRILL_OPENERS.search(query))
 
 
 def _timezone(request: Request) -> str:
@@ -506,6 +522,22 @@ async def siri_ask(request: Request) -> Any:
             _PLACEHOLDER_HINT, raw=_PLACEHOLDER_HINT, mode="hint", record=False
         )
 
+    # A flashcard drill in progress owns the next turn: while a card is in
+    # flight the words are an *answer*, not a question, so this runs ahead of
+    # every other branch. Otherwise "mitochondria" gets looked up instead of
+    # graded. Starting a drill is matched here too, since it is the same seam.
+    app_state = request.app.state
+    if siri_drill.is_drilling(app_state, session_id) or _looks_like_drill(query):
+        drilled = await siri_drill.handle(
+            app_state,
+            session_id,
+            query,
+            datetime.now(UTC),
+            getattr(app_state, "llm", None),
+        )
+        if drilled is not None:
+            return _reply(drilled, raw=drilled, mode="drill")
+
     # The conversation so far, replayed into whichever path answers below.
     limit = _context_limit(request)
     history = (
@@ -568,6 +600,12 @@ async def siri_ask(request: Request) -> Any:
     )
     if task_reply is not None:
         return _reply(task_reply, raw=task_reply, mode="reminder")
+
+    # Briefing, journal, protocols and long-term facts — subsystems that were
+    # fully built and reachable only over HTTP until now.
+    desk_reply = await siri_desk.handle(app_state, query, datetime.now(UTC))
+    if desk_reply is not None:
+        return _reply(for_speech(desk_reply), raw=desk_reply, mode="desk")
 
     # Distance queries — geocoded + routed via OpenStreetMap (computed, not guessed).
     # Run in a worker thread: it is blocking urllib, and on the event loop it stalls
@@ -692,8 +730,18 @@ def _discover_chat_id(token: str) -> str:
 
 
 def _send_telegram(request: Request, text: str) -> bool:
-    """Send ``text`` to the configured (or auto-discovered) Telegram chat."""
-    settings = getattr(request.app.state, "settings", None)
+    """Send ``text`` to the configured Telegram chat, reading settings off state."""
+    return send_telegram(getattr(request.app.state, "settings", None), text)
+
+
+def send_telegram(settings: Any, text: str) -> bool:
+    """Send ``text`` to the configured (or auto-discovered) Telegram chat.
+
+    Takes settings rather than a ``Request`` so callers outside the HTTP layer can
+    reach the same chat — the scheduler's due-reminder action pushes through here,
+    which is what turns a stored reminder into one that actually reminds you.
+    Blocking urllib by design; async callers must run it in a worker thread.
+    """
     secret = getattr(settings, "telegram_bot_token", None)
     chat_id = getattr(settings, "telegram_chat_id", "") or ""
     token = secret.get_secret_value() if secret is not None else ""

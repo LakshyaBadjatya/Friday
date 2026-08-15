@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import anyio
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -825,7 +826,9 @@ def _build_n8n_service(settings: Settings, llm: LLMProvider) -> N8nService:
 
 
 def _make_due_reminders_action(
-    reminder_store: SQLiteReminderStore, notify: NotifyTool
+    reminder_store: SQLiteReminderStore,
+    notify: NotifyTool,
+    settings: Settings | None = None,
 ) -> Callable[[Trigger], Awaitable[None]]:
     """Build the ``due_reminders`` scheduler action over the shared stores.
 
@@ -850,6 +853,17 @@ def _make_due_reminders_action(
                     body=reminder.text,
                 )
             )
+        # The sink above is an in-process record, not a delivery — a reminder that
+        # only reaches a log has not reminded anybody. Push each one to the same
+        # Telegram chat ``/siri/digest`` uses, in a worker thread because the
+        # sender is blocking urllib and this runs on the scheduler's event loop.
+        if due and settings is not None:
+            from friday.api.routes_siri import send_telegram  # noqa: PLC0415
+
+            for reminder in due:
+                await anyio.to_thread.run_sync(
+                    send_telegram, settings, f"Reminder: {reminder.text}"
+                )
         logger.info(
             "scheduler due_reminders fired",
             extra={"trigger": trigger.name, "count": len(due)},
@@ -1035,6 +1049,7 @@ def _build_scheduler(
     journal_store: SQLiteJournalStore,
     system_monitor: SystemMonitor,
     anomaly_detector: AnomalyDetector | None = None,
+    settings: Settings | None = None,
 ) -> Scheduler:
     """Assemble the :class:`Scheduler` and register the default actions.
 
@@ -1055,7 +1070,8 @@ def _build_scheduler(
         notify = None
     notify_tool = notify if isinstance(notify, NotifyTool) else NotifyTool()
     scheduler.register_action(
-        "due_reminders", _make_due_reminders_action(reminder_store, notify_tool)
+        "due_reminders",
+        _make_due_reminders_action(reminder_store, notify_tool, settings),
     )
     scheduler.register_action(
         "briefing", _make_briefing_action(briefing_service, notify_tool)
@@ -1868,6 +1884,7 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         journal_store,
         system_monitor,
         anomaly_detector,
+        settings,
     )
     protocol_store = _build_protocol_store(settings)
     protocol_runner = _build_protocol_runner(registry)

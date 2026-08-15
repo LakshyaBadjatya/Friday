@@ -27,7 +27,7 @@ from typing import Any
 
 import anyio
 
-from friday.discord import opus
+from friday.discord import opus, prosody
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.audio")
@@ -128,7 +128,11 @@ async def speak(text: str, voice: str = "en-GB-SoniaNeural") -> list[bytes]:
     if not text.strip():
         return []
     try:
-        mp3 = await _tts(text, voice)
+        # Hesitations go in here rather than being asked of the model: the model
+        # writes what she means, and how she says it is a property of the voice.
+        # Keeping them apart means the text reply and the spoken one stay the
+        # same sentence, and the fillers never end up in the transcript.
+        mp3 = await _tts(prosody.humanize(text), voice)
         if not mp3:
             return []
         pcm = await _to_pcm(mp3)
@@ -144,8 +148,11 @@ async def _tts(text: str, voice: str) -> bytes:
     """Synthesise speech with edge-tts (no key, no account)."""
     import edge_tts  # noqa: PLC0415
 
+    rate, pitch = prosody.jitter()
     out = bytearray()
-    async for chunk in edge_tts.Communicate(text, voice).stream():
+    async for chunk in edge_tts.Communicate(
+        text, voice, rate=rate, pitch=pitch
+    ).stream():
         if chunk["type"] == "audio":
             out += chunk["data"]
     return bytes(out)

@@ -13,6 +13,9 @@ dependencies = [
   "python-dotenv>=1.0",
   "psutil>=7.2.2",
   "instagrapi>=2.16.24",
+  # Durable reminder/trigger storage. Render's free tier wipes the container
+  # disk on every deploy, so SQLite cannot hold anything that must outlive one.
+  "psycopg[binary]>=3.2",
 ]
 
 [project.scripts]
@@ -51,6 +54,7 @@ warn_unused_ignores = false
 [[tool.mypy.overrides]]
 module = [
   "numpy", "numpy.*",
+  "psycopg", "psycopg.*",
   "onnxruntime", "onnxruntime.*",
   "openwakeword", "openwakeword.*",
   "pvporcupine", "pvporcupine.*",

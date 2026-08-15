@@ -485,6 +485,54 @@ def _select_vector(
     return _build_vector(settings, embedder)
 
 
+def _postgres_dsn(settings: Settings) -> str | None:
+    """The Postgres DSN when durable storage is configured, else ``None``.
+
+    Reminders and triggers on SQLite live on the container's disk, which Render's
+    free tier wipes on every deploy — a reminder set minutes ago disappears, and
+    the trigger that fires reminders disappears with it. When a DSN is set these
+    move to Postgres and survive. Without one, nothing changes.
+    """
+    if not getattr(settings, "enable_postgres", False):
+        return None
+    secret = getattr(settings, "postgres_dsn", None)
+    dsn = secret.get_secret_value() if secret is not None else ""
+    return dsn or None
+
+
+def _durable_or_sqlite[StoreT](
+    settings: Settings, which: str, fallback: StoreT
+) -> StoreT:
+    """Return the Postgres store when it can be built, else the SQLite one.
+
+    Any failure — driver absent, database unreachable, bad DSN — logs loudly and
+    falls back rather than refusing to boot. An assistant that starts with
+    forgetful storage is worth more than one that will not start at all.
+    """
+    dsn = _postgres_dsn(settings)
+    if dsn is None:
+        return fallback
+    try:
+        from friday.reminders.pg_store import (  # noqa: PLC0415
+            PostgresReminderStore,
+            PostgresTriggerStore,
+        )
+
+        store = (
+            PostgresReminderStore(dsn) if which == "reminders"
+            else PostgresTriggerStore(dsn)
+        )
+        store.init_schema()
+    except Exception:  # noqa: BLE001 - never block startup on storage choice
+        logger.exception("postgres %s store unavailable; using SQLite", which)
+        return fallback
+    logger.info("using Postgres %s store (survives deploys)", which)
+    # The Postgres stores mirror the SQLite ones method for method; the cast
+    # states that structural equivalence, which the type system cannot infer
+    # across two unrelated concrete classes.
+    return cast("StoreT", store)
+
+
 def _build_reminder_store(settings: Settings) -> SQLiteReminderStore:
     """Build the local-first SQLite reminder store alongside the long-term DB.
 
@@ -1799,8 +1847,12 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     secret_vault = _build_secret_vault(settings)
     _run_secret_self_check(settings, repo_root)
 
-    reminder_store = _build_reminder_store(settings)
-    trigger_store = _build_trigger_store(settings)
+    reminder_store = _durable_or_sqlite(
+        settings, "reminders", _build_reminder_store(settings)
+    )
+    trigger_store = _durable_or_sqlite(
+        settings, "triggers", _build_trigger_store(settings)
+    )
     registry = _build_registry(
         settings, reminder_store, audit=audit, metrics=metrics, hash_audit=hash_audit
     )

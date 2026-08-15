@@ -453,8 +453,20 @@ def _select_long_term(settings: Settings) -> LongTermStore:
             if settings.postgres_dsn is not None
             else None
         )
+        try:
+            store = PostgresLongTermStore(dsn)
+        except Exception:  # noqa: BLE001 - a database must not be a boot dependency
+            # This connects eagerly in its constructor, so an unreachable database
+            # took the whole app down at import time: the process exited 1 and the
+            # deploy failed outright, taking Siri, Telegram and the HUD with it
+            # over a store that only holds long-term facts. Degrade to SQLite and
+            # say so loudly instead — a forgetful assistant beats an absent one.
+            logger.exception(
+                "Postgres long-term store unreachable; falling back to SQLite"
+            )
+            return _build_long_term(settings)
         logger.info("using Postgres long-term store")
-        return PostgresLongTermStore(dsn)
+        return store
     return _build_long_term(settings)
 
 

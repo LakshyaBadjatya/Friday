@@ -1,0 +1,53 @@
+# Keep FRIDAY awake so she can remind you.
+#
+# Render's free plan stops a web service after ~15 minutes without traffic, and a
+# stopped process runs no scheduler. That is the whole reason reminders never
+# arrived on their own: nothing was running to notice one had come due. The
+# service wakes on the next request, which meant reminders only ever fired while
+# somebody happened to be talking to her.
+#
+# So this pings /health every five minutes. Two notes on why that is safe:
+#
+#   * /health is the one route exempt from bearer auth and rate limiting, so no
+#     secret is needed here and none is stored.
+#   * Render's free tier allows 750 instance-hours a month and a month is ~730,
+#     so a service kept awake continuously still fits inside the allowance.
+#
+# GitHub's scheduler is best-effort — a five-minute cron often lands late under
+# load — so treat reminder delivery as accurate to roughly the nearest ten
+# minutes. If you want it tighter, cron-job.org offers a free one-minute cron;
+# point it at the same URL and delete this file.
+#
+# GitHub also disables scheduled workflows in repositories with no activity for
+# 60 days. If reminders ever go quiet again, check this workflow is still enabled
+# before suspecting the code.
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Wake the service
+        run: |
+          # --max-time is generous: a cold start on the free plan can take the
+          # better part of a minute, and giving up early would leave the service
+          # asleep, which is the exact thing this exists to prevent.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 \
+            https://friday-backend-oj8h.onrender.com/health || echo 000)
+          echo "health -> $code"
+          # Fail on a non-200: that means the service is down rather than merely
+          # asleep, and a silent green tick would hide it.
+          [ "$code" = "200" ]

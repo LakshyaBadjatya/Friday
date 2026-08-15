@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -259,7 +260,8 @@ async def get_state(request: Request) -> StateResponse:
             SessionState(session_id=session_id, mode=mode, short_term_size=size)
         )
 
-    return StateResponse(sessions=sessions, memory=_memory_stats(request))
+    memory = await anyio.to_thread.run_sync(_memory_stats, request)
+    return StateResponse(sessions=sessions, memory=memory)
 
 
 @router.get("/audit", response_model=AuditResponse)

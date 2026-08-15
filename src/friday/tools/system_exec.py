@@ -158,6 +158,14 @@ class RunCommandTool:
                     retriable=True,
                 ),
             )
+        except asyncio.CancelledError:
+            # An outer cancellation (e.g. a flow step timeout cancelling this
+            # coroutine) must not orphan the child process; reap it before the
+            # cancellation propagates.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
 
         returncode = process.returncode if process.returncode is not None else -1
         logger.info(
@@ -367,9 +375,6 @@ class OpenAppTool:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=settings.system_exec_timeout
-            )
         except (OSError, ValueError) as exc:
             logger.warning("open_app failed to spawn %r: %s", opener, exc)
             return ToolResult(
@@ -379,6 +384,11 @@ class OpenAppTool:
                     message=f"failed to open {args.target!r} via {opener}: {exc}",
                     retriable=False,
                 ),
+            )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=settings.system_exec_timeout
             )
         except TimeoutError:
             logger.warning("open_app timed out opening %r", args.target)
@@ -395,6 +405,14 @@ class OpenAppTool:
                     retriable=True,
                 ),
             )
+        except asyncio.CancelledError:
+            # An outer cancellation (e.g. a flow step timeout cancelling this
+            # coroutine) must not orphan the child process; reap it before the
+            # cancellation propagates.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
 
         returncode = process.returncode if process.returncode is not None else -1
         logger.info("open_app opened %r via %s exit=%s", args.target, opener, returncode)

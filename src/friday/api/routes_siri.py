@@ -37,6 +37,7 @@ from friday.logging import get_logger
 from friday.siri import context as siri_context
 from friday.siri import desk as siri_desk
 from friday.siri import drill as siri_drill
+from friday.siri import operators as siri_operators
 from friday.siri import tasks as siri_tasks
 from friday.siri.arithmetic import arithmetic_reply
 from friday.siri.speech import for_speech
@@ -167,7 +168,8 @@ _VOICE_RULES = (
 
 
 async def _fast_answer(
-    request: Request, query: str, history: list[Any], deadline: float
+    request: Request, query: str, history: list[Any], deadline: float,
+    session_id: str = _DEFAULT_SESSION,
 ) -> str | None:
     """A single persona'd LLM call — the low-latency voice path.
 
@@ -190,7 +192,14 @@ async def _fast_answer(
 
     orchestrator = getattr(request.app.state, "orchestrator", None)
     persona = "You are FRIDAY, a sharp, warm personal AI assistant."
-    getter = getattr(orchestrator, "_persona_text", None)
+    # A pinned specialist answers in their own charter, which is what makes
+    # "call EDITH" mean something on the turns after it.
+    pinned = siri_operators.system_prompt(request.app.state, session_id)
+    if pinned:
+        persona = pinned
+        getter = None
+    else:
+        getter = getattr(orchestrator, "_persona_text", None)
     if callable(getter):
         try:
             persona = getter() or persona
@@ -599,6 +608,13 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
     if creator is not None:
         return _reply(creator, raw=creator, mode="identity")
 
+    # "Call EDITH" pins a real specialist for this session instead of announcing
+    # one and changing nothing. Runs before the model so the claim is made by the
+    # code that carries it out, not by a model improvising.
+    op_reply = siri_operators.handle(app_state, session_id, query)
+    if op_reply is not None:
+        return _reply(op_reply, raw=op_reply, mode="operator")
+
     # Pure arithmetic is *computed*, never predicted. An LLM asked for "17 percent
     # of 2,480" returns whatever tokens usually follow that phrasing, which is how
     # a confidently wrong number gets spoken aloud. Anything that is not
@@ -689,7 +705,7 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
     settings = getattr(request.app.state, "settings", None)
     if getattr(settings, "siri_fast_path", True):
         try:
-            fast = await _fast_answer(request, query, history, deadline)
+            fast = await _fast_answer(request, query, history, deadline, session_id)
         except TimeoutError:
             # No budget left to also try the slower orchestrator — say so now,
             # while Siri is still listening, rather than answering into silence.
@@ -766,37 +782,122 @@ async def telegram_webhook(request: Request) -> Any:
         return JSONResponse(status_code=200, content={"ok": True})
 
     message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
-    text = (message.get("text") or "").strip()
     chat_id = str((message.get("chat") or {}).get("id") or "")
-    if not text or not chat_id:
+    if not chat_id:
         return JSONResponse(status_code=200, content={"ok": True})
 
-    owner = str(getattr(settings, "telegram_chat_id", "") or "")
-    if owner and chat_id != owner:
+    owner_early = str(getattr(settings, "telegram_chat_id", "") or "")
+    if owner_early and chat_id != owner_early:
         logger.warning("telegram webhook: ignoring non-owner chat")
         return JSONResponse(status_code=200, content={"ok": True})
 
-    if text.startswith("/"):  # /start, /help — Telegram's own command convention
-        reply = _TELEGRAM_HELP
-    else:
-        speech, raw, _mode, _action = await _produce(
-            request, text[:_MAX_QUERY], f"telegram:{chat_id}"
-        )
-        # Chat has no 600-character speaking limit and renders newlines, so the
-        # fuller text is the better answer when the two differ.
-        reply = raw or speech
+    # Attachments are NOT downloaded or understood. Saying so is the whole point:
+    # a photo arrives as a caption plus a file id, and answering the caption alone
+    # produced "it appears to be a document from your finance folder" about a photo
+    # nothing had looked at. An honest refusal is worth more than a fluent guess,
+    # so media short-circuits here rather than reaching a model that cannot see it.
+    media = next(
+        (kind for kind in _TELEGRAM_MEDIA if message.get(kind)),
+        None,
+    )
+    if media is not None:
+        return await _telegram_reply(settings, _cannot_see(media))
 
-    await anyio.to_thread.run_sync(send_telegram, settings, reply or _FALLBACK_SPEECH)
+    text = (message.get("text") or "").strip()
+    if not text:
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    # Telegram users expect slash commands, and the bot menu offers them. Each
+    # one expands to the plain phrasing the brain already understands, so there
+    # is exactly one implementation of every capability — a command cannot drift
+    # away from what typing the sentence does.
+    if text.startswith("/"):
+        command, _, argument = text[1:].partition(" ")
+        command = command.split("@", 1)[0].lower()  # /cmd@BotName in groups
+        if command in {"start", "help"}:
+            return await _telegram_reply(settings, _TELEGRAM_HELP)
+        expansion = _SLASH_COMMANDS.get(command)
+        if expansion is None:
+            return await _telegram_reply(
+                settings, f"I don't know /{command}, Boss. Send /help for the list."
+            )
+        text = f"{expansion} {argument}".strip() if argument else expansion
+
+    speech, raw, _mode, _action = await _produce(
+        request, text[:_MAX_QUERY], f"telegram:{chat_id}"
+    )
+    # Chat has no 600-character speaking limit and renders newlines, so the
+    # fuller text is the better answer when the two differ.
+    return await _telegram_reply(settings, raw or speech or _FALLBACK_SPEECH)
+
+
+async def _telegram_reply(settings: Any, text: str) -> JSONResponse:
+    """Send one reply and acknowledge the update.
+
+    Always 200: Telegram retries a non-200 for hours, so a failure here would
+    become a stampede of duplicate messages.
+    """
+    await anyio.to_thread.run_sync(send_telegram, settings, text)
     return JSONResponse(status_code=200, content={"ok": True})
 
 
-#: Sent for ``/start`` and any other slash command — Telegram users expect one.
+#: Attachment kinds Telegram may send. None of them are downloaded or read.
+_TELEGRAM_MEDIA = (
+    "photo", "voice", "audio", "video", "video_note", "document", "sticker",
+)
+#: What each attachment kind is called out loud in the refusal.
+_MEDIA_WORDS = {
+    "photo": "see photos",
+    "video": "watch videos",
+    "video_note": "watch video notes",
+    "voice": "listen to voice notes",
+    "audio": "listen to audio",
+    "document": "open documents",
+    "sticker": "see stickers",
+}
+
+
+def _cannot_see(kind: str) -> str:
+    """Say plainly that the attachment was not read, and what to do instead."""
+    verb = _MEDIA_WORDS.get(kind, "open attachments")
+    return (
+        f"I can't {verb} yet, Boss — I only read text, so I haven't looked at "
+        f"that one. Tell me what's in it and I'll take it from there."
+    )
+
+
+#: Slash command -> the plain phrasing it expands to. Every command runs the same
+#: path as typing the sentence, so a command can never drift from the behaviour it
+#: advertises; there is one implementation of each capability, not two.
+_SLASH_COMMANDS = {
+    "reminders": "what are my reminders",
+    "remind": "remind me to",
+    "brief": "brief me",
+    "quiz": "quiz me",
+    "log": "log this:",
+    "journal": "what did I do today",
+    "recall": "what was the last topic",
+    "roster": "who is on the roster",
+    "facts": "what do you know about me",
+    "protocols": "what protocols do I have",
+}
+
+#: Sent for ``/start`` and ``/help``.
 _TELEGRAM_HELP = (
-    "I'm FRIDAY. Just talk to me normally — same brain as Siri.\n\n"
-    "Try: 'remind me to call mum at 6', 'what are my reminders', "
-    "'what's 17 percent of 2480', 'brief me', 'quiz me on biology', "
-    "'log this: shipped the webhook', 'remember that my flight is on the 20th', "
-    "or 'what was the last topic'."
+    "I'm FRIDAY — same brain as Siri. Talk to me normally, or use a command:\n\n"
+    "/reminders — what's on your list\n"
+    "/remind <thing> at <time> — set one\n"
+    "/brief — your daily briefing\n"
+    "/quiz <deck> — drill flashcards\n"
+    "/log <entry> — write to your journal\n"
+    "/journal — what you did today\n"
+    "/recall — the last topic\n"
+    "/roster — the specialists I can call\n"
+    "/protocols — your saved routines\n"
+    "/facts — what I remember about you\n\n"
+    "Plain sentences work just as well: 'remind me to call mum at 6', "
+    "'what's 17 percent of 2480', 'call EDITH'.\n\n"
+    "I read text only — I can't see photos or hear voice notes yet."
 )
 
 

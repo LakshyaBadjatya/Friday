@@ -176,7 +176,7 @@ class _Ctx:
             local = now.astimezone(ZoneInfo(tz))
         except (ZoneInfoNotFoundError, ValueError):
             return None
-        label = local.strftime("%-I:%M %p").lstrip("0")
+        label = local.strftime("%I:%M %p").lstrip("0")
         asleep = local.hour >= 23 or local.hour < 7
         return label, asleep
 
@@ -308,7 +308,7 @@ class _Ctx:
         target = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= local_now:
             target += timedelta(days=1)
-        label = target.strftime("%-I:%M %p").lstrip("0") + " their time"
+        label = target.strftime("%I:%M %p").lstrip("0") + " their time"
         return target.astimezone(UTC).isoformat(), label
 
     # -- C: connection & fun ---------------------------------------------- #
@@ -363,8 +363,21 @@ class _Ctx:
         total = 0
         readable: list[str] = []
         for gid in self._group_ids():
-            msgs = self._fs.list(f"groups/{gid}/messages")
-            nudges = self._fs.list(f"groups/{gid}/nudges")
+            # groups/{gid}/messages has two writers with different field casing:
+            # the web SDK writes senderUid, the backend chat store writes
+            # sender_uid. There is no recipient/read field, so the only "incoming"
+            # signal is the sender — exclude the caller's own under either casing.
+            msgs = [
+                m
+                for m in self._fs.list(f"groups/{gid}/messages")
+                if (m.get("senderUid") or m.get("sender_uid")) not in (None, self._uid)
+            ]
+            # nudges carry a real toUid — count only those addressed to the caller.
+            nudges = [
+                n
+                for n in self._fs.list(f"groups/{gid}/nudges")
+                if n.get("toUid") == self._uid
+            ]
             total += len(msgs) + len(nudges)
             group = self._fs.get(f"groups/{gid}")
             if group and group.get("siriReadAloud"):

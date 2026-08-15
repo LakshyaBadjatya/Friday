@@ -41,9 +41,18 @@ _CREATE = re.compile(
 _LIST = re.compile(
     r"\b(?:what(?:'s|\s+are|\s+is)?\s+(?:my\s+)?(?:reminders?|on\s+my\s+list|due)"
     r"|list\s+(?:my\s+)?reminders?|any\s+reminders?|read\s+(?:me\s+)?my\s+reminders?"
+    r"|my\s+reminders?|show\s+(?:me\s+)?(?:my\s+)?reminders?"
+    r"|reminders?\s*\?|upcoming\s+reminders?|do\s+i\s+have\s+any\s+reminders?"
     r"|what\s+do\s+i\s+have\s+(?:to\s+do|coming\s+up))\b",
     re.IGNORECASE,
 )
+
+#: Anything that mentions reminders at all. A model asked "my reminders?" will
+#: happily invent "a meeting at 2 PM, a birthday gift for your sister" — it has no
+#: way to know it is guessing. So once the word appears and a store is wired, the
+#: store answers, always. Falling through to the model here does not risk a vague
+#: reply, it risks a confident fabrication about the owner's own life.
+_ABOUT_REMINDERS = re.compile(r"\breminders?\b|\bmy\s+list\b", re.IGNORECASE)
 #: Marking something finished.
 _COMPLETE = re.compile(
     r"\b(?:mark|tick)\s+(?:off\s+)?(?P<what>.+?)\s+(?:as\s+)?(?:done|completed?|off)\b"
@@ -84,6 +93,13 @@ def handle(store: Any, query: str, now: datetime, *, tz_name: str = "UTC") -> st
     created = _CREATE.match(text)
     if created is not None:
         return _speak_create(store, created.group("task"), now, tz_name)
+
+    # The word came up but no intent matched ("anything on my reminders?",
+    # "reminders for tomorrow"). Read the list rather than hand the turn to a
+    # model that would invent one. A slightly-off answer from the store beats a
+    # fluent fabrication about the owner's own commitments.
+    if _ABOUT_REMINDERS.search(text):
+        return _speak_list(store, now, tz_name)
     return None
 
 

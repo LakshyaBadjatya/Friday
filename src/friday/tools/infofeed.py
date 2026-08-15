@@ -37,6 +37,7 @@ from typing import Any
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
+import anyio
 import httpx
 from pydantic import BaseModel, Field
 
@@ -380,7 +381,7 @@ class InfofeedTool:
         is opened. ``follow_redirects=False`` ensures a 3xx response cannot
         bounce the request to a blocked address after the check.
         """
-        _validate_public_url(url)
+        await anyio.to_thread.run_sync(_validate_public_url, url)
         async with httpx.AsyncClient(
             timeout=self._timeout, follow_redirects=False
         ) as client:

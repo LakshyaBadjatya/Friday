@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -47,6 +48,15 @@ logger = logging.getLogger("friday.flows.engine")
 _OK = "ok"
 _FAIL = "fail"
 _PAUSE = "pause"
+
+# Per-run dry-run state. Held in context variables (not on the engine instance)
+# so concurrent run() calls on a shared FlowEngine never clobber each other's
+# simulate flag / DryRunBroker; the value still propagates across awaits and into
+# nested sub-flows within a single run, and is restored (token reset) on exit.
+_simulate_var: ContextVar[bool] = ContextVar("friday_flow_simulate", default=False)
+_dry_var: ContextVar[DryRunBroker | None] = ContextVar(
+    "friday_flow_dry", default=None
+)
 
 
 class _Broker(Protocol):
@@ -128,10 +138,6 @@ class FlowEngine:
         self._actor = actor
         self._channel = channel
         self._max_steps = max_steps
-        # Dry-run state: set while ``run(simulate=True)`` is executing so tool
-        # steps predict instead of execute (restored around nested sub-flows).
-        self._simulate = False
-        self._dry: DryRunBroker | None = None
 
     # -- planning ---------------------------------------------------------- #
     async def plan(self, goal: str) -> Flow:
@@ -302,13 +308,13 @@ class FlowEngine:
         side-effecting call — never half-completing silently. With ``simulate``,
         tool steps predict (a :class:`DryRunBroker`) instead of executing.
         """
-        prev_sim, prev_dry = self._simulate, self._dry
-        self._simulate = simulate
-        self._dry = DryRunBroker(self._broker) if simulate else None
+        sim_token = _simulate_var.set(simulate)
+        dry_token = _dry_var.set(DryRunBroker(self._broker) if simulate else None)
         try:
             return await self._drive(flow, confirmed=confirmed)
         finally:
-            self._simulate, self._dry = prev_sim, prev_dry
+            _simulate_var.reset(sim_token)
+            _dry_var.reset(dry_token)
 
     async def _drive(self, flow: Flow, *, confirmed: bool) -> Flow:
         """The run loop (wrapped by :meth:`run` for dry-run state management)."""
@@ -506,7 +512,7 @@ class FlowEngine:
             return _FAIL
         child.parent_flow_id = flow.id
         self._store.create(child)
-        child = await self.run(child, simulate=self._simulate)
+        child = await self.run(child, simulate=_simulate_var.get())
         if child.status == FlowStatus.SUCCEEDED:
             step.status = StepStatus.SUCCEEDED
             step.result = {"child_flow_id": child.id}
@@ -522,7 +528,8 @@ class FlowEngine:
     async def _run_tool_step(
         self, flow: Flow, step: FlowStep, *, confirmed: bool
     ) -> str:
-        broker = self._dry if self._simulate and self._dry is not None else self._broker
+        dry = _dry_var.get()
+        broker = dry if _simulate_var.get() and dry is not None else self._broker
         result = await broker.dispatch(
             step.tool or "",
             dict(step.args),

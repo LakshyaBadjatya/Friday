@@ -23,6 +23,8 @@ import re
 import urllib.request
 from typing import Any
 
+import anyio
+
 _UA = {"User-Agent": "FridayAssistant/1.0 (+digest)"}
 _TIMEOUT = 12
 
@@ -126,10 +128,10 @@ def _news_block(limit: int = 5) -> str | None:
 async def build_digest(lat: str = "", lon: str = "") -> str:
     """Assemble the morning brief text (weather + news), skipping dead sources."""
     parts: list[str] = ["☀️ Good morning, Boss. Here's your brief."]
-    weather = _weather_block(lat, lon)
+    weather = await anyio.to_thread.run_sync(_weather_block, lat, lon)
     if weather:
         parts.append(weather)
-    news = _news_block()
+    news = await anyio.to_thread.run_sync(_news_block)
     if news:
         parts.append(news)
     if len(parts) == 1:

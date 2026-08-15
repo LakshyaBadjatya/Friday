@@ -68,7 +68,12 @@ async def ws_voice(websocket: WebSocket) -> None:
 
     try:
         while True:
-            message: dict[str, Any] = await websocket.receive_json()
+            try:
+                message: dict[str, Any] = await websocket.receive_json()
+            except ValueError:
+                # A non-JSON text frame raises JSONDecodeError (a ValueError);
+                # skip the bad frame instead of crashing the whole socket.
+                continue
             # Echo control frames back (barge-in signaling scaffold); the full
             # duplex streaming UX is a later tier.
             await websocket.send_json({"type": "echo", "received": message})
@@ -103,7 +108,12 @@ async def ws_wake(websocket: WebSocket) -> None:
 
     try:
         while True:
-            message: dict[str, Any] = await websocket.receive_json()
+            try:
+                message: dict[str, Any] = await websocket.receive_json()
+            except ValueError:
+                # A non-JSON text frame raises JSONDecodeError (a ValueError);
+                # skip the bad frame instead of crashing the whole socket.
+                continue
             transcript = message.get("transcript", "") if isinstance(message, dict) else ""
             event = service.handle_transcript(transcript) if service is not None else None
             if event is not None:

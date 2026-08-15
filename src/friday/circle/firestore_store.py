@@ -42,13 +42,12 @@ class FirestoreCircleStore:
         return Group(**snap.to_dict()) if snap.exists else None
 
     def add_member(self, group_id: str, member: Member) -> None:
+        from firebase_admin import firestore  # noqa: PLC0415
+
         self._members(group_id).document(member.uid).set(member.model_dump(mode="json"))
-        ref = self._groups().document(group_id)
-        snap = ref.get()
-        uids = list(snap.to_dict().get("member_uids", [])) if snap.exists else []
-        if member.uid not in uids:
-            uids.append(member.uid)
-            ref.set({"member_uids": uids}, merge=True)
+        self._groups().document(group_id).set(
+            {"member_uids": firestore.ArrayUnion([member.uid])}, merge=True
+        )
 
     def get_member(self, group_id: str, uid: str) -> Member | None:
         snap = self._members(group_id).document(uid).get()
@@ -59,14 +58,14 @@ class FirestoreCircleStore:
         return [Member(**doc.to_dict()) for doc in docs]
 
     def remove_member(self, group_id: str, uid: str) -> bool:
+        from firebase_admin import firestore  # noqa: PLC0415
+
         ref = self._members(group_id).document(uid)
         existed = bool(ref.get().exists)
         ref.delete()
-        gref = self._groups().document(group_id)
-        snap = gref.get()
-        if snap.exists:
-            kept = [u for u in snap.to_dict().get("member_uids", []) if u != uid]
-            gref.set({"member_uids": kept}, merge=True)
+        self._groups().document(group_id).set(
+            {"member_uids": firestore.ArrayRemove([uid])}, merge=True
+        )
         return existed
 
     def groups_of(self, uid: str) -> set[str]:

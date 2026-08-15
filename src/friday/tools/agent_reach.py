@@ -267,6 +267,13 @@ class AgentReachTool:
                     retriable=True,
                 ),
             )
+        except asyncio.CancelledError:
+            # An outer cancellation must not orphan the child; reap it (and its
+            # stdout/stderr FDs) before the cancellation propagates.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
 
         if process.returncode != 0:
             detail = stderr.decode("utf-8", errors="replace").strip()

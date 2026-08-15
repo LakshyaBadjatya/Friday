@@ -138,6 +138,11 @@ class AutomationAgent:
         raw = state.scratchpad.get("job", {})
         if isinstance(raw, Job):
             return raw
+        if not raw:
+            # No job staged (``Job.model_validate({})`` would raise because
+            # ``max_steps`` is required): degrade to a safe no-op job that runs
+            # zero steps rather than crashing the turn with a ValidationError.
+            return Job(max_steps=1)
         return Job.model_validate(raw)
 
     # -- the bounded executor ----------------------------------------------- #

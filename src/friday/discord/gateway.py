@@ -32,7 +32,7 @@ from typing import Any, cast
 
 import anyio
 
-from friday.discord import banter, lang, vision
+from friday.discord import admin, banter, lang, vision
 from friday.discord.voice import VoiceConnection
 from friday.logging import get_logger
 
@@ -228,6 +228,91 @@ def _hers(app: Any) -> Any:
     return existing
 
 
+async def _do_roles(app: Any, content: str, guild: str) -> str | None:
+    """Create and/or hand out a role, reporting exactly what happened."""
+    role_name, who = admin.wants_role(content)
+    if not role_name and not who:
+        return None
+    settings = getattr(app.state, "settings", None)
+    secret = getattr(settings, "discord_bot_token", None)
+    token = secret.get_secret_value() if secret is not None else ""
+    if not token or not guild:
+        return None
+
+    said: list[str] = []
+    role_id = None
+    if role_name:
+        # Reuse an existing role of that name rather than making a duplicate —
+        # asking twice should be idempotent, not leave two identical roles.
+        role_id = await admin.find_role(token, guild, role_name)
+        if role_id:
+            said.append(f"**{role_name}** already exists")
+        else:
+            role_id, message = await admin.create_role(token, guild, role_name)
+            said.append(message)
+            if role_id is None:
+                return " ".join(said)
+
+    if who:
+        who = _resolve_person(app, who)
+        if role_id is None:
+            return "which role, Boss? make it first and i'll hand it over 🧍"
+        found = await admin.find_member(token, guild, who)
+        if found is None:
+            said.append(f"— but i can't find anyone called {who} here 🤔")
+            return " ".join(said)
+        user_id, shown = found
+        ok, message = await admin.assign_role(token, guild, user_id, role_id)
+        said.append(message if ok else message)
+        if ok:
+            said[-1] = f"— {shown} has it now 👑"
+    return " ".join(said) if said else None
+
+
+#: Titles that stand in for a person rather than naming them.
+_TITLES = ("the queen", "queen", "the princess", "princess", "her majesty")
+
+
+def _resolve_person(app: Any, who: str) -> str:
+    """Turn a title into the name it refers to.
+
+    "Give it to the queen" names nobody Discord has heard of. The real name is
+    in long-term memory rather than in this repository — the owner asked for it
+    to stay out — so it is looked up at the moment it is needed.
+    """
+    if who.strip().lower() not in _TITLES:
+        return who
+    store = getattr(app.state, "long_term", None)
+    if store is None:
+        return who
+    try:
+        for fact in store.query_facts("QUEEN_NAME_IS", limit=3):
+            text = getattr(fact, "text", "") or ""
+            if "QUEEN_NAME_IS" in text:
+                return text.split("QUEEN_NAME_IS", 1)[1].strip(" _:") or who
+    except Exception:  # noqa: BLE001 - a failed lookup keeps the literal title
+        return who
+    return who
+
+
+def guild_of(app: Any, channel: str) -> str:
+    """Which guild a channel belongs to, learned from traffic.
+
+    The message payload carries it, so it is recorded as messages arrive rather
+    than fetched: one REST call per message to learn something already in hand
+    would be wasteful.
+    """
+    return str(_guilds(app).get(channel, ""))
+
+
+def _guilds(app: Any) -> dict[str, str]:
+    existing = getattr(app.state, "_channel_guilds", None)
+    if not isinstance(existing, dict):
+        existing = {}
+        app.state._channel_guilds = existing  # noqa: SLF001 - app state is a namespace
+    return existing
+
+
 # --- voice ------------------------------------------------------------------ #
 def _voice(app: Any) -> dict[str, Any]:
     """Live voice connections, keyed by guild."""
@@ -391,6 +476,8 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     channel = str(message.get("channel_id") or "")
     if not channel:
         return
+    if message.get("guild_id"):
+        _guilds(app)[channel] = str(message["guild_id"])
 
     # Being @-mentioned or replied to is being spoken to, as plainly as typing
     # her name. A mention arrives as markup (<@id>) rather than the word
@@ -490,6 +577,14 @@ async def _compose(
     asked = lang.requested(content)
     if asked and banter.addressed(content):
         lang.set_for(app.state, discord_session(app), asked)
+
+    # Roles are done, not described. She said "i can do that" and then "nah,
+    # can't do that" about the same request, because nothing here could act and
+    # the model was guessing both times.
+    if banter.addressed(content):
+        done = await _do_roles(app, content, guild_of(app, channel))
+        if done:
+            return done
 
     # "friday wanna talk" / "friday join vc". If the asker is already sitting in
     # a channel she goes there now rather than telling them to do the thing they

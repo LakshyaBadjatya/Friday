@@ -241,6 +241,13 @@ async def _compose(
     if social is not None:
         return social
 
+    # "what are you doing" is small talk with a punchline attached, not an
+    # identity question — she answers it in the same register as her status line.
+    if banter.addressed(content):
+        doing = banter.doing_reply(content)
+        if doing is not None:
+            return doing
+
     if not forced and not banter.addressed(content):
         # Not talking to her. Occasionally she has something to say anyway.
         if banter.should_interject(app.state, channel):

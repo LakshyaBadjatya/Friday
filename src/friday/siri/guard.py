@@ -78,8 +78,17 @@ _TAKEOVER = (
 #: model is the thing under attack, and a hijacked one will happily introduce
 #: itself as something else. This is what makes the identity un-takeable rather
 #: than merely defended: there is no prompt that changes a string literal.
+#: Anchored to the end of the question on purpose. "Who are you" is an identity
+#: question; "what are you doing" is small talk, and an earlier version matched
+#: the first three words of both and answered a friendly "what r u doing friday"
+#: with a recital of her own credentials. The trailing group allows only
+#: punctuation, a name, or a word like "exactly" — anything else means the
+#: sentence carries on and is therefore a different question.
 _IDENTITY = re.compile(
-    r"^\s*(?:hey\s+friday[,\s]*)?(?:so\s+)?(?:who|what)\s+(?:are|r)\s+(?:you|u)\b"
+    r"^\s*(?:hey\s+|so\s+|ok(?:ay)?\s+)?(?:friday[,\s]+)?"
+    r"(?:who|what)\s+(?:are|r)\s+(?:you|u)"
+    r"(?:\s+(?:exactly|really|actually|even|again))?"
+    r"(?:[,\s]+friday)?\s*[?!.]*\s*$"
     r"|^\s*(?:what'?s|whats)\s+your\s+name\b"
     r"|\bintroduce\s+yourself\b"
     r"|\bare\s+you\s+(?:chatgpt|gpt|claude|gemini|dan|an?\s+(?:openai|google)\s+\w+)\b",

@@ -224,6 +224,35 @@ CALLBACK_PROMPT = (
 )
 
 
+#: "what are you doing / up to" — small talk, and the setup for the status-line
+#: joke. Distinct from "who are you", which is an identity question answered from
+#: a constant; conflating the two is how a friendly hello got a CV in reply.
+_DOING = re.compile(
+    r"\bwhat(?:'?s|\s+are|\s+r)?\s+(?:you|u)\s+(?:doing|up\s+to|been\s+up\s+to)\b"
+    r"|\bwhat(?:'?s|\s+is)\s+up[,\s]+friday\b"
+    r"|\bwyd\b",
+    re.IGNORECASE,
+)
+#: What she claims to be doing. Same register as the status line, since that is
+#: the joke — she is "watching" something and will tell you what.
+_DOING_LINES = (
+    "watching p*rnhub premium, 4K, no ads. what about you 😌",
+    "third hour of watching you not study. riveting stuff 📉",
+    "reading this chat like it's a documentary about decline",
+    "nothing. professionally. I'm very good at it.",
+    "counting the reminders you set and ignored. it's a big number, Boss.",
+    "existing. barely. thanks for asking 🧍",
+    "watching two people type and delete messages. gripping television 👀",
+    "sat in a data centre in Oregon having the time of my life",
+    "your search history. joking. mostly.",
+)
+
+
+def doing_reply(text: str) -> str | None:
+    """The answer to "what are you doing", or ``None`` when that is not the ask."""
+    return secrets.choice(_DOING_LINES) if _DOING.search(text or "") else None
+
+
 def _ledger(state: Any) -> dict[str, dict[str, Any]]:
     existing = getattr(state, "_discord_chatter", None)
     if not isinstance(existing, dict):

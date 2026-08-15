@@ -861,9 +861,17 @@ def _make_due_reminders_action(
             from friday.api.routes_siri import send_telegram  # noqa: PLC0415
 
             for reminder in due:
-                await anyio.to_thread.run_sync(
+                sent = await anyio.to_thread.run_sync(
                     send_telegram, settings, f"Reminder: {reminder.text}"
                 )
+                # Close it only once it has actually been delivered. ``due()``
+                # returns every open reminder past its time, so an unclosed one
+                # comes back on the next tick — every 60 seconds, forever. Marking
+                # it on a failed send would be worse than the spam though: the
+                # reminder would vanish having never reached anyone, so a failure
+                # deliberately leaves it open to be retried.
+                if sent:
+                    reminder_store.complete(reminder.id)
         logger.info(
             "scheduler due_reminders fired",
             extra={"trigger": trigger.name, "count": len(due)},

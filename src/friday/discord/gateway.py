@@ -252,6 +252,9 @@ async def join_voice(app: Any, socket: Any, guild: str, channel: str) -> Any:
     if existing is not None:
         existing.close()
     call = VoiceConnection(app, guild, channel)
+    known = getattr(app.state, "_voice_session", "")
+    if known:
+        call.credentials(session_id=str(known))
     calls[guild] = call
     await socket.send(json.dumps({
         "op": 4,
@@ -276,9 +279,16 @@ def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> Non
         return
 
     if user == me:
+        # Held at app level rather than on the call. Discord can deliver the
+        # bot's own voice state *before* the connection object exists, and the
+        # dropped session id is what produced "4006 session is no longer valid"
+        # — the handshake identified with a stale one from an earlier attempt.
+        session = str(data.get("session_id") or "")
+        if session:
+            app.state._voice_session = session  # noqa: SLF001
         call = _voice(app).get(guild)
-        if call is not None and channel:
-            call.credentials(session_id=str(data.get("session_id") or ""))
+        if call is not None and channel and session:
+            call.credentials(session_id=session)
         return
 
     # Remember where people are. Being told "join the vc" when the speaker is
@@ -314,7 +324,21 @@ async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) ->
     try:
         await call.run(_heard)
     except Exception:  # noqa: BLE001 - a dropped call must not kill the gateway
-        logger.exception("voice: call ended badly")
+        logger.warning("voice: call ended (%s)", "stale session"
+                       if call.stale() else "error", exc_info=not call.stale())
+        if call.stale():
+            # Discord rejected the credentials. Asking again produces a fresh
+            # pair; retrying with the dead ones would fail identically forever.
+            call.close()
+            _voice(app).pop(guild, None)
+            await anyio.sleep(1)
+            retry = await join_voice(app, socket, guild, channel)
+            try:
+                await retry.run(_heard)
+            except Exception:  # noqa: BLE001
+                logger.exception("voice: retry failed too")
+            finally:
+                retry.close()
     finally:
         call.close()
         _voice(app).pop(guild, None)
@@ -354,6 +378,7 @@ def _on_voice_server(app: Any, data: dict[str, Any]) -> None:
         call.credentials(
             token=str(data.get("token") or ""),
             endpoint=str(data.get("endpoint") or ""),
+            session_id=str(getattr(app.state, "_voice_session", "") or "") or None,
         )
 
 

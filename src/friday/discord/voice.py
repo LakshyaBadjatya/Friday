@@ -91,6 +91,9 @@ class VoiceConnection:
         self._speakers: dict[int, str] = {}
         #: The language last heard in this call; the reply voice follows it.
         self.language = "en"
+        #: Set when Discord rejects the handshake (4006), so the caller knows to
+        #: ask for fresh credentials rather than retrying with the same dead ones.
+        self._stale = False
         self._closed = False
 
     def credentials(
@@ -107,9 +110,12 @@ class VoiceConnection:
         if self.session_id and self.token and self.endpoint:
             self._credentials.set()
 
+    def stale(self) -> bool:
+        """Whether the last attempt died because the session was rejected."""
+        return self._stale
+
     async def run(self, on_speech: Any) -> None:
         """Hold the connection open, calling ``on_speech(text, user_id)`` per turn."""
-        from websockets.asyncio.client import connect  # noqa: PLC0415
 
         try:
             await asyncio.wait_for(self._credentials.wait(), timeout=20)
@@ -118,6 +124,17 @@ class VoiceConnection:
             return
 
         host = str(self.endpoint).split(":")[0]
+        try:
+            await self._identify_and_run(host, on_speech)
+        except Exception as exc:  # noqa: BLE001 - classify, then let it bubble
+            if "4006" in str(exc):
+                self._stale = True
+            raise
+
+    async def _identify_and_run(self, host: str, on_speech: Any) -> None:
+        """The handshake and the receive loop."""
+        from websockets.asyncio.client import connect  # noqa: PLC0415
+
         async with connect(f"wss://{host}/?v=8", max_size=2**22) as ws:
             self._ws = ws
             await ws.send(

@@ -248,9 +248,46 @@ _DOING_LINES = (
 )
 
 
-def doing_reply(text: str) -> str | None:
-    """The answer to "what are you doing", or ``None`` when that is not the ask."""
-    return secrets.choice(_DOING_LINES) if _DOING.search(text or "") else None
+#: "what are you watching/playing/listening to" — asking about the status line
+#: specifically, rather than the general "what are you up to".
+_DOING_SPECIFIC = re.compile(
+    r"\bwhat(?:'?s|\s+are|\s+r)?\s+(?:you|u)\s+"
+    r"(?P<verb>watching|playing|listening\s+to)\b",
+    re.IGNORECASE,
+)
+#: How she elaborates on whatever the status currently says.
+_PRESENCE_ASIDES = (
+    "{what}. it's grim.",
+    "{what}, obviously.",
+    "{what}. don't ask.",
+    "{what} 💀",
+    "{what}. riveting stuff.",
+    "{what}, same as always.",
+    "{what}. i've seen better.",
+)
+
+
+def doing_reply(text: str, presence: tuple[str, str] | None = None) -> str | None:
+    """The answer to "what are you doing", or ``None`` when that is not the ask.
+
+    When she is asked specifically what she is *watching* — and her status says
+    exactly that — the status is the answer. Saying "nothing, just chillin"
+    while the sidebar reads "Watching JEE mocks go badly" throws away a joke
+    that is already on screen.
+    """
+    body = text or ""
+    specific = _DOING_SPECIFIC.search(body)
+    if specific is not None and presence:
+        verb, what = presence
+        asked = specific.group("verb").lower().replace("listening to", "listening")
+        if asked.split()[0] in verb.lower():
+            return secrets.choice(_PRESENCE_ASIDES).format(what=what)
+        return f"not {asked}. {verb.lower()} {what}."
+    if specific is not None or _DOING.search(body):
+        if presence and secrets.randbelow(100) < 50:
+            return secrets.choice(_PRESENCE_ASIDES).format(what=presence[1])
+        return secrets.choice(_DOING_LINES)
+    return None
 
 
 #: "friday wanna talk" / "friday lets talk" / "friday vc" — the invitation.

@@ -107,7 +107,7 @@ async def _session(app: Any) -> None:
                     "properties": {
                         "os": "linux", "browser": "friday", "device": "friday",
                     },
-                    "presence": _presence(),
+                    "presence": _presence(app),
                 },
             })
         )
@@ -118,7 +118,7 @@ async def _session(app: Any) -> None:
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(_heartbeat, socket, interval)
-            tg.start_soon(_rotate_presence, socket)
+            tg.start_soon(_rotate_presence, socket, app)
             async for raw in socket:
                 event = json.loads(raw)
                 op = event.get("op")
@@ -155,15 +155,26 @@ async def _heartbeat(socket: Any, interval: float) -> None:
 #: private server — the owner was told and chose this anyway. His bot, his call.
 _PRESENCE_LINES = (
     ("Watching", "p*rnhub premium 💀"),
-    ("Playing", "with Boss's emotional stability"),
-    ("Listening to", "Boss lie about studying"),
+    ("Watching", "Boss reinvent a wheel that already shipped"),
     ("Watching", "JEE mocks go badly"),
-    ("Playing", "hard to get"),
     ("Watching", "two people flirt, badly 👀"),
-    ("Listening to", "excuses"),
-    ("Playing", "therapist, unpaid"),
     ("Watching", "the group chat decay"),
+    ("Watching", "project number six begin"),
+    ("Watching", "someone open a fifth browser tab about the Netherlands"),
+    ("Watching", "an unfinished repo gather dust"),
+    ("Playing", "with Boss's emotional stability"),
+    ("Playing", "hard to get"),
+    ("Playing", "therapist, unpaid"),
     ("Playing", "God (unemployed)"),
+    ("Playing", "the long game"),
+    ("Playing", "hide and seek with a deadline"),
+    ("Listening to", "Boss lie about studying"),
+    ("Listening to", "excuses, remastered"),
+    ("Listening to", "the sound of a 1190 SAT"),
+    ("Listening to", "someone say 'one last feature'"),
+    ("Listening to", "silence where a commit should be"),
+    ("Competing in", "the Overthinking Championship"),
+    ("Competing in", "who can start the most projects"),
 )
 #: Activity type ids in Discord's numbering.
 _ACTIVITY = {"Playing": 0, "Listening to": 2, "Watching": 3}
@@ -171,8 +182,14 @@ _ACTIVITY = {"Playing": 0, "Listening to": 2, "Watching": 3}
 _ROTATE_SECONDS = 900
 
 
-def _presence() -> dict[str, Any]:
+def _presence(app: Any = None) -> dict[str, Any]:
     verb, what = secrets.choice(_PRESENCE_LINES)
+    if app is not None:
+        # Recorded so "what are you watching" can be answered from what her
+        # status actually says. Answering "nothing, just chillin" while the
+        # status reads "Watching JEE mocks go badly" is a worse joke than
+        # either line on its own.
+        app.state._presence = (verb, what)  # noqa: SLF001
     return {
         "since": None,
         "activities": [{"name": what, "type": _ACTIVITY[verb]}],
@@ -181,12 +198,14 @@ def _presence() -> dict[str, Any]:
     }
 
 
-async def _rotate_presence(socket: Any) -> None:
+async def _rotate_presence(socket: Any, app: Any) -> None:
     """Change the status line periodically so it stays funny."""
     while True:
         await anyio.sleep(_ROTATE_SECONDS)
         with contextlib.suppress(Exception):
-            await socket.send(json.dumps({"op": _PRESENCE_UPDATE, "d": _presence()}))
+            await socket.send(
+                json.dumps({"op": _PRESENCE_UPDATE, "d": _presence(app)})
+            )
 
 
 async def _on_reaction(app: Any, token: str, data: dict[str, Any]) -> None:
@@ -604,7 +623,7 @@ async def _compose(
     # "what are you doing" is small talk with a punchline attached, not an
     # identity question — she answers it in the same register as her status line.
     if banter.addressed(content):
-        doing = banter.doing_reply(content)
+        doing = banter.doing_reply(content, getattr(app.state, "_presence", None))
         if doing is not None:
             return doing
 

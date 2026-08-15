@@ -195,6 +195,20 @@ async def _edit(app_id: str, token: str, content: str) -> None:
     await anyio.to_thread.run_sync(_send)
 
 
+#: ``/roast`` is opt-in per invocation by design. She teases the owner freely in
+#: normal conversation but never anyone else unprompted — a joke at the expense
+#: of someone who did not ask for it goes wrong fast, and a slash command someone
+#: deliberately typed is the consent.
+_ROAST_PROMPT = (
+    "Roast {target} in two or three lines. Be sharp and funny, land it, and stop. "
+    "Punch at things a person chose — their takes, their sleep schedule, their "
+    "gaming, their excuses — never at appearance, family, intelligence, or "
+    "anything they cannot change. This is affectionate ribbing between friends, "
+    "not cruelty; if you cannot make it funny without being mean, be gentler and "
+    "funnier instead."
+)
+
+
 def _spoken(payload: dict[str, Any]) -> str:
     """The words the user typed: a slash option's value, else the command name.
 
@@ -203,8 +217,21 @@ def _spoken(payload: dict[str, Any]) -> str:
     identical to Telegram's without a second mapping table to drift.
     """
     data = payload.get("data") or {}
+    name = str(data.get("name") or "").strip()
+
+    if name == "roast":
+        # The user option arrives as an id; the resolved block carries the name.
+        target = "whoever that is"
+        for option in data.get("options") or []:
+            uid = str(option.get("value") or "")
+            user = ((data.get("resolved") or {}).get("users") or {}).get(uid) or {}
+            target = (
+                user.get("global_name") or user.get("username") or target
+            )
+        return _ROAST_PROMPT.format(target=target)
+
     for option in data.get("options") or []:
         value = option.get("value")
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return str(data.get("name") or "").strip()
+    return name

@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import secrets
+import urllib.request
 from typing import Any, cast
 
 import anyio
@@ -200,6 +201,23 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
             else f"[image posted, described: {seen}] — react to this naturally."
         )
 
+    # Tagging a message and saying "friday remember this" keeps the *tagged*
+    # message. Discord puts it in referenced_message, which is the only place
+    # that text exists — without reading it, the instruction gets stored and the
+    # thing worth keeping is thrown away.
+    if banter.is_remember_this(content):
+        quoted = (message.get("referenced_message") or {}).get("content") or ""
+        await _send(token, channel, _keep(app, quoted.strip()))
+        return
+
+    # Sometimes an emoji is the whole reply. Reacting reads far more like someone
+    # half-watching the chat than another paragraph does.
+    emoji = banter.reaction_emoji(content)
+    if emoji is not None:
+        await _react(token, channel, str(message.get("id") or ""), emoji)
+        banter.note_message(app.state, channel)
+        return
+
     try:
         reply = await _compose(app, content, channel, forced=bool(seen and not
                                banter.addressed(content)))
@@ -228,6 +246,13 @@ async def _compose(
         if banter.should_interject(app.state, channel):
             return banter.interjection()
         return None
+
+    # Two bits that are the same turn with a different instruction attached,
+    # rather than separate pipelines that would drift from her normal voice.
+    if banter.is_settle(content):
+        content = f"{content}\n\n[{banter.SETTLE_PROMPT}]"
+    elif banter.is_callback(content):
+        content = f"{content}\n\n[{banter.CALLBACK_PROMPT}]"
 
     from friday.api.routes_siri import _MAX_QUERY, _produce  # noqa: PLC0415
 
@@ -259,11 +284,73 @@ class _GatewayRequest:
         self.query_params: dict[str, str] = {}
         self.headers: dict[str, str] = {}
 
+    async def body(self) -> bytes:
+        """No HTTP body exists for a gateway message.
+
+        ``_produce`` reads the body looking for GPS coordinates on the "near me"
+        path. Omitting this raised ``AttributeError`` on *every* Discord message
+        — she connected, set her status, and silently failed to answer anything.
+        Empty bytes is the honest answer: there are no coordinates in a chat
+        message, and that branch correctly declines to fire.
+        """
+        return b""
+
+
+def _keep(app: Any, quoted: str) -> str:
+    """Store a tagged message as a durable fact and say what was kept.
+
+    The confirmation quotes it back: "saved" alone gives no way to notice the
+    wrong message was captured, and a fact recalled weeks later is far too late
+    to find out.
+    """
+    if not quoted:
+        return "reply to the message you want me to keep, Boss 🧍"
+    store = getattr(app.state, "long_term", None)
+    if store is None:
+        return "my long-term memory isn't wired up, Boss."
+    body = quoted if len(quoted) <= 2000 else quoted[:2000].rstrip() + "…"
+    try:
+        store.add_fact(body, "discord")
+    except Exception:  # noqa: BLE001 - never lose the turn over storage
+        logger.exception("discord remember-this failed")
+        return "couldn't hold onto that one, Boss."
+    preview = body if len(body) <= 140 else body[:140].rstrip() + "…"
+    return f"locked in 🔒 — \"{preview}\""
+
+
+async def _react(token: str, channel: str, message_id: str, emoji: str) -> None:
+    """Add an emoji reaction to a message."""
+    if not message_id:
+        return
+    from urllib.parse import quote  # noqa: PLC0415
+
+    url = (
+        f"{_API}/channels/{channel}/messages/{message_id}"
+        f"/reactions/{quote(emoji)}/@me"
+    )
+    request = urllib.request.Request(  # noqa: S310
+        url,
+        data=b"",
+        method="PUT",
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Length": "0",
+            "User-Agent": "FRIDAY (https://friday.sukhma.in, 1.0)",
+        },
+    )
+
+    def _put() -> None:
+        try:
+            with urllib.request.urlopen(request, timeout=10):  # noqa: S310
+                return
+        except Exception:  # noqa: BLE001 - a missed reaction is not worth a crash
+            logger.warning("discord reaction failed")
+
+    await anyio.to_thread.run_sync(_put)
+
 
 async def _send(token: str, channel: str, content: str) -> None:
     """Post a message to a channel."""
-    import urllib.request  # noqa: PLC0415
-
     body = json.dumps({"content": content[:1900]}).encode()
     request = urllib.request.Request(  # noqa: S310
         f"{_API}/channels/{channel}/messages",

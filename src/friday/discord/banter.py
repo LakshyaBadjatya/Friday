@@ -140,6 +140,90 @@ def note_message(state: Any, channel_id: str) -> None:
     entry["count"] = int(entry["count"]) + 1
 
 
+#: "friday remember this" said while replying to a message — the tagged message
+#: is what gets kept, not the instruction.
+_REMEMBER_THIS = re.compile(
+    r"\bfriday[,\s]+(?:remember|save|keep|note)\s+(?:this|that|it)\b"
+    r"|\b(?:remember|save|keep)\s+(?:this|that)[,\s]+friday\b",
+    re.IGNORECASE,
+)
+#: "friday settle this" / "friday who's right" — a verdict, delivered with total
+#: confidence and no authority whatsoever.
+_SETTLE = re.compile(
+    r"\bfriday[,\s]+(?:settle\s+(?:this|it)|who'?s\s+right|decide|judge|"
+    r"pick\s+a\s+side|whose\s+side)\b",
+    re.IGNORECASE,
+)
+#: "friday remember when…" — dredging something up from the archive.
+_CALLBACK = re.compile(
+    r"\bfriday[,\s]+(?:remember\s+when|what\s+did\s+(?:i|we|he|she)\s+say"
+    r"|bring\s+up\s+something|dig\s+up)\b",
+    re.IGNORECASE,
+)
+
+#: Emoji she reacts with instead of talking. A reaction reads far more like a
+#: person half-watching the chat than another paragraph does.
+_REACTIONS = ("💀", "👀", "😭", "🫡", "🔥", "☠️", "🤨", "😔", "📈", "🧍")
+#: Cues that deserve a reaction rather than a reply, and nothing else.
+_REACT_ONLY = re.compile(
+    r"\b(?:lmao+|lmfao+|bruh|bro\b|istg|fr\s*fr|no\s+way|deadass|cooked|"
+    r"crashout|yapping|it'?s\s+over|we\s+are\s+so\s+back)\b",
+    re.IGNORECASE,
+)
+#: How often a react-only cue actually earns one. Reacting every time is as
+#: robotic as replying every time.
+_REACT_PERCENT = 35
+
+
+def is_remember_this(text: str) -> bool:
+    """Whether a tagged message is being handed to long-term memory."""
+    return bool(_REMEMBER_THIS.search(text or ""))
+
+
+def is_settle(text: str) -> bool:
+    """Whether she is being asked to arbitrate."""
+    return bool(_SETTLE.search(text or ""))
+
+
+def is_callback(text: str) -> bool:
+    """Whether she is being asked to dredge something up."""
+    return bool(_CALLBACK.search(text or ""))
+
+
+def reaction_emoji(text: str) -> str | None:
+    """An emoji to react with, or ``None`` to stay out of it.
+
+    Only fires on chat-noise cues she was not addressed in, and only sometimes:
+    a reaction on every single "bruh" is a bot, a reaction on some of them is
+    somebody half-watching.
+    """
+    if addressed(text or ""):
+        return None
+    if not _REACT_ONLY.search(text or ""):
+        return None
+    if secrets.randbelow(100) >= _REACT_PERCENT:
+        return None
+    return secrets.choice(_REACTIONS)
+
+
+#: Prompt fragments for the two model-backed bits, kept here with the rest of the
+#: voice so the personality lives in one file.
+SETTLE_PROMPT = (
+    "You have been asked to settle an argument. Pick ONE side and commit "
+    "completely, in under 40 words. Be decisive and a little unreasonable about "
+    "it — cite a made-up statistic or an imaginary precedent if it helps. This is "
+    "a bit, so never pick the cruel side, and if the disagreement is actually "
+    "serious drop the act and answer straight."
+)
+CALLBACK_PROMPT = (
+    "Dig one specific thing out of the conversation history above and bring it "
+    "back up, the way a friend does at the worst possible moment. Quote it. Keep "
+    "it under 30 words, and pick something the OWNER said, not his friend. If "
+    "there is nothing in the history worth resurfacing, say so plainly instead of "
+    "inventing a memory."
+)
+
+
 def _ledger(state: Any) -> dict[str, dict[str, Any]]:
     existing = getattr(state, "_discord_chatter", None)
     if not isinstance(existing, dict):

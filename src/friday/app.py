@@ -30,7 +30,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import anyio
 from fastapi import FastAPI
@@ -525,15 +525,24 @@ def _durable_or_sqlite[StoreT](
     if dsn is None:
         return fallback
     try:
+        from friday.memory.pg_stores import (  # noqa: PLC0415
+            PostgresJournalStore,
+            PostgresProtocolStore,
+            PostgresStudyStore,
+        )
         from friday.reminders.pg_store import (  # noqa: PLC0415
             PostgresReminderStore,
             PostgresTriggerStore,
         )
 
-        store = (
-            PostgresReminderStore(dsn) if which == "reminders"
-            else PostgresTriggerStore(dsn)
-        )
+        builders: dict[str, Any] = {
+            "reminders": PostgresReminderStore,
+            "triggers": PostgresTriggerStore,
+            "journal": PostgresJournalStore,
+            "study": PostgresStudyStore,
+            "protocols": PostgresProtocolStore,
+        }
+        store = builders[which](dsn)
         store.init_schema()
     except Exception:  # noqa: BLE001 - never block startup on storage choice
         logger.exception("postgres %s store unavailable; using SQLite", which)
@@ -1934,7 +1943,9 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     briefing = _build_briefing_service(
         settings, reminder_store, audit, metrics, llm
     )
-    journal_store = _build_journal_store(settings)
+    journal_store = _durable_or_sqlite(
+        settings, "journal", _build_journal_store(settings)
+    )
     journal_service = _build_journal_service(
         reminder_store, audit, metrics, llm, settings.owner_address
     )
@@ -1958,12 +1969,16 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         anomaly_detector,
         settings,
     )
-    protocol_store = _build_protocol_store(settings)
+    protocol_store = _durable_or_sqlite(
+        settings, "protocols", _build_protocol_store(settings)
+    )
     protocol_runner = _build_protocol_runner(registry)
     rag_ingestor = _build_rag_ingestor(settings, vector, long_term)
     meeting_store = _build_meeting_store(settings)
     meeting_capture = _build_meeting_capture(settings, llm, rag_ingestor)
-    study_store = _build_study_store(settings)
+    study_store = _durable_or_sqlite(
+        settings, "study", _build_study_store(settings)
+    )
     critic = _build_critic(llm)
     n8n_service = _build_n8n_service(settings, llm)
     # The persona roster (FRIDAY + eight least-privilege specialists). Always built

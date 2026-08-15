@@ -184,6 +184,14 @@ _VOICE_RULES = (
 )
 
 
+#: Imported here rather than at module scope to keep the Discord package
+#: optional: a build without it still serves Siri, Telegram and the HUD.
+try:  # pragma: no cover - import shape, not behaviour
+    from friday.discord.banter import DISCORD_VOICE as _DISCORD_VOICE
+except Exception:  # noqa: BLE001
+    _DISCORD_VOICE = _VOICE_RULES
+
+
 async def _fast_answer(
     request: Request, query: str, history: list[Any], deadline: float,
     session_id: str = _DEFAULT_SESSION,
@@ -211,6 +219,10 @@ async def _fast_answer(
     persona = "You are FRIDAY, a sharp, warm personal AI assistant."
     # A pinned specialist answers in their own charter, which is what makes
     # "call EDITH" mean something on the turns after it.
+    settings_v = getattr(request.app.state, "settings", None)
+    in_discord = session_id == str(
+        getattr(settings_v, "discord_session", "discord") or "discord"
+    )
     pinned = siri_operators.system_prompt(request.app.state, session_id)
     if pinned:
         persona = pinned
@@ -226,7 +238,12 @@ async def _fast_answer(
         with anyio.fail_after(deadline):
             resp = await llm.complete(
                 [
-                    Message(role="system", content=persona + _VOICE_RULES),
+                    Message(
+                        role="system",
+                        content=persona + (
+                            _DISCORD_VOICE if in_discord else _VOICE_RULES
+                        ),
+                    ),
                     *history,
                     # Restated after the history, not just before it. A jailbreak
                     # sent earlier in the session lives in that history, and
@@ -638,8 +655,18 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
 
     # The conversation so far, replayed into whichever path answers below.
     limit = _context_limit(request)
+    settings_now = getattr(app_state, "settings", None)
+    discord_session = str(getattr(settings_now, "discord_session", "discord") or "")
+    # The private room reads the rest of the house; the house never reads back in.
+    shared = (
+        str(getattr(settings_now, "owner_session", "friday") or "friday")
+        if session_id == discord_session
+        else None
+    )
     history = (
-        siri_context.recall(memory, session_id, max_messages=limit) if limit else []
+        siri_context.recall(memory, session_id, max_messages=limit, also_read=shared)
+        if limit
+        else []
     )
 
     # "What were we just talking about?" with an empty window: say so plainly

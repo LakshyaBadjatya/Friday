@@ -90,6 +90,7 @@ def recall(
     *,
     max_messages: int = DEFAULT_CONTEXT_MESSAGES,
     max_chars: int = DEFAULT_CONTEXT_CHARS,
+    also_read: str | None = None,
 ) -> list[Message]:
     """Return the bounded, chronological context window for ``session_id``.
 
@@ -102,7 +103,14 @@ def recall(
     if memory is None or not hasattr(memory, "history"):
         return []
     try:
-        stored = memory.history(session_id)
+        stored = list(memory.history(session_id))
+        if also_read:
+            # A one-way mirror. Discord reads the shared thread so she knows
+            # there what she was told by voice; nothing said in Discord is ever
+            # written back, which is what keeps the private room private. The
+            # borrowed turns go first so the room's own conversation stays
+            # nearest the question.
+            stored = list(memory.history(also_read))[-max_messages:] + stored
     except Exception:  # noqa: BLE001 - a broken memory must not break the turn
         return []
     if not stored:

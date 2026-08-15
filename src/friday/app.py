@@ -2723,6 +2723,23 @@ def create_app() -> FastAPI:
     graph is shared across requests.
     """
 
+    async def _discord_gateway(app: FastAPI) -> None:
+        """Hold the Discord socket open for the life of the process.
+
+        Slash commands need nothing standing; reading normal messages, the
+        interjections and the status line all need a live gateway. It lives in
+        this process because the keepalive cron already stops Render idling the
+        container — a second always-on host would be the alternative.
+        """
+        settings_now = getattr(app.state, "settings", None)
+        if not getattr(settings_now, "enable_discord", False):
+            return
+        if getattr(settings_now, "discord_bot_token", None) is None:
+            return
+        from friday.discord.gateway import run as run_gateway  # noqa: PLC0415
+
+        await run_gateway(app)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings = get_settings()
@@ -2735,11 +2752,13 @@ def create_app() -> FastAPI:
         _wire_emotion(app, settings)
         scheduler_task = _start_scheduler_loop(app, settings)
         emotion_capture_task = _start_emotion_capture(app, settings)
+        discord_task = asyncio.create_task(_discord_gateway(app))
         try:
             yield
         finally:
             await _stop_scheduler_loop(scheduler_task)
             await _stop_scheduler_loop(emotion_capture_task)
+            await _stop_scheduler_loop(discord_task)
             logger.info("FRIDAY shutting down")
 
     app = FastAPI(title="FRIDAY", version="0.1.0", lifespan=lifespan)

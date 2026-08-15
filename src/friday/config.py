@@ -660,6 +660,10 @@ class Settings(BaseSettings):
     # Needed only to push reminders *into* Discord unprompted; slash commands
     # work without it, because the follow-up uses the interaction's own token.
     discord_bot_token: SecretStr | None = None
+    # Discord keeps its own conversation, separate from the shared owner thread.
+    # It *reads* the shared history for context but never writes into it: the
+    # private room can see the rest of the house, the house cannot see in.
+    discord_session: str = "discord"
     # Shared secret for ``POST /telegram/webhook``. Telegram cannot send a bearer
     # header, so the bearer middleware cannot guard that route; the secret travels
     # in the URL Telegram is registered with instead, and is compared in constant

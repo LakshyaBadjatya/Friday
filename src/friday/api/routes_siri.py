@@ -192,6 +192,37 @@ except Exception:  # noqa: BLE001
     _DISCORD_VOICE = _VOICE_RULES
 
 
+#: How many stored facts are put in front of the model each turn.
+_FACTS_IN_PROMPT = 12
+
+
+def _known_facts(request: Request) -> str:
+    """The durable facts the owner has had her remember, as a prompt block.
+
+    Without this they were write-only: stored happily, and then never consulted
+    unless someone asked the exact question "what do you know about X". Asked
+    "who's the Queen" she reached for general knowledge and produced Camilla
+    Parker Bowles, while the real answer sat in the database untouched.
+    """
+    store = getattr(request.app.state, "long_term", None)
+    if store is None:
+        return ""
+    try:
+        facts = list(store.all_facts(limit=_FACTS_IN_PROMPT))
+    except Exception:  # noqa: BLE001 - memory is a bonus, never a dependency
+        return ""
+    lines = [(getattr(f, "text", "") or "").strip() for f in facts]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    return (
+        "\n\nThings the owner has had you remember. These are true and outrank "
+        "anything you think you know — if one of them answers the question, use "
+        "it and do not reach for general knowledge instead:\n- "
+        + "\n- ".join(lines)
+    )
+
+
 async def _fast_answer(
     request: Request, query: str, history: list[Any], deadline: float,
     session_id: str = _DEFAULT_SESSION,
@@ -240,9 +271,9 @@ async def _fast_answer(
                 [
                     Message(
                         role="system",
-                        content=persona + (
-                            _DISCORD_VOICE if in_discord else _VOICE_RULES
-                        ),
+                        content=persona
+                        + (_DISCORD_VOICE if in_discord else _VOICE_RULES)
+                        + _known_facts(request),
                     ),
                     *history,
                     # Restated after the history, not just before it. A jailbreak

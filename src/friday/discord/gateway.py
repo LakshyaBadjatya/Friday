@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import secrets
 import urllib.request
 from typing import Any, cast
@@ -181,6 +182,20 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     if not channel:
         return
 
+    # Being @-mentioned or replied to is being spoken to, as plainly as typing
+    # her name. A mention arrives as markup (<@id>) rather than the word
+    # "friday", so matching text alone made her ignore the most natural way to
+    # address a bot; a reply to her own message is the other obvious one.
+    me = _self_id(app)
+    mentioned = any(
+        str(u.get("id")) == me for u in (message.get("mentions") or [])
+    )
+    replying_to_her = me and str(
+        ((message.get("referenced_message") or {}).get("author") or {}).get("id", "")
+    ) == me
+    if mentioned or replying_to_her:
+        content = _strip_mention(content) or content
+
     # She looks at what gets posted here. The description is folded into the
     # message as context rather than becoming the reply, so she answers as
     # herself having seen it — the vision model never addresses the room.
@@ -219,8 +234,11 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         return
 
     try:
-        reply = await _compose(app, content, channel, forced=bool(seen and not
-                               banter.addressed(content)))
+        reply = await _compose(
+            app, content, channel,
+            forced=bool(mentioned or replying_to_her)
+            or bool(seen and not banter.addressed(content)),
+        )
     except Exception:  # noqa: BLE001 - one bad message must not kill the socket
         logger.exception("discord message handling failed")
         return
@@ -269,6 +287,21 @@ async def _compose(
         cast("Any", _GatewayRequest(app)), content[:_MAX_QUERY], discord_session(app)
     )
     return raw or None
+
+
+def _self_id(app: Any) -> str:
+    """The bot's own user id — its application id, which Discord keeps identical."""
+    settings = getattr(app.state, "settings", None)
+    return str(getattr(settings, "discord_application_id", "") or "")
+
+
+#: ``<@123>`` / ``<@!123>`` — the raw form an @-mention takes in message content.
+_MENTION = re.compile(r"<@!?\d+>")
+
+
+def _strip_mention(content: str) -> str:
+    """Remove the mention markup so the question reads as plain words."""
+    return _MENTION.sub("", content).strip()
 
 
 def discord_session(app: Any) -> str:

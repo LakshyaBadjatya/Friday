@@ -26,6 +26,7 @@ token.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -52,6 +53,10 @@ _EPHEMERAL = 64
 
 #: Discord's API base, for editing a deferred reply.
 _API = "https://discord.com/api/v10"
+
+#: Strong references to in-flight follow-ups. asyncio holds only a weak one, so
+#: without this a slow turn can be collected mid-await and the reply never lands.
+_IN_FLIGHT: set[asyncio.Task[None]] = set()
 
 
 def _enabled(request: Request) -> bool:
@@ -162,13 +167,15 @@ async def _followup(request: Request, text: str, app_id: str, token: str) -> Non
             logger.exception("discord interaction failed")
             await _edit(app_id, token, "That one broke on my end, Boss. Try again.")
 
-    tasks = getattr(request.app.state, "discord_tasks", None)
-    if tasks is not None:
-        tasks.start_soon(_work)
-        return
-    # No task group wired: run inline. Slower than a deferral is meant to be, but
-    # a late answer beats a placeholder that never resolves.
-    await _work()
+    # Detached deliberately. Awaiting the turn here meant the DEFERRED response
+    # was not sent until the model had already answered — twelve seconds into a
+    # three-second window — so Discord gave up and the placeholder sat on
+    # "thinking..." forever. The whole point of deferring is to acknowledge
+    # first and work second.
+    task = asyncio.create_task(_work())
+    # Held so the loop cannot garbage-collect a running task mid-flight.
+    _IN_FLIGHT.add(task)
+    task.add_done_callback(_IN_FLIGHT.discard)
 
 
 async def _edit(app_id: str, token: str, content: str) -> None:

@@ -57,6 +57,11 @@ SILENCE_SECONDS = 1.0
 #: How often the buffers are checked for a finished turn.
 _TICK_SECONDS = 0.25
 
+#: The canonical Opus silent frame. Discord's own documentation specifies these
+#: three bytes; encoding real silence would produce a larger frame that means
+#: the same thing, so the constant is used directly.
+_SILENCE = b"\xf8\xff\xfe"
+
 
 class VoiceConnection:
     """One live connection to one voice channel."""
@@ -127,7 +132,11 @@ class VoiceConnection:
         try:
             await self._identify_and_run(host, on_speech)
         except Exception as exc:  # noqa: BLE001 - classify, then let it bubble
-            if "4006" in str(exc):
+            # The close code arrives inside an ExceptionGroup from the task
+            # group, so str() on the outer exception says only "1 sub-exception"
+            # — checking it directly never matched, and the retry that was
+            # supposed to recover a rejected session never fired.
+            if _mentions_4006(exc):
                 self._stale = True
             raise
 
@@ -328,8 +337,25 @@ class VoiceConnection:
                 # audible drift over a sentence.
                 deadline += opus.FRAME_MS / 1000.0
                 await anyio.sleep(max(0.0, deadline - time.perf_counter()))
+            await self._trailing_silence(loop)
         finally:
             await self._set_speaking(False)
+
+    async def _trailing_silence(self, loop: Any) -> None:
+        """Five frames of Opus silence, which Discord's clients expect.
+
+        Without them the receiver keeps interpolating from the last real frame
+        and the final word smears into a tail that sounds like a dropout.
+        """
+        if self._udp is None or self._remote is None:
+            return
+        for _ in range(5):
+            with contextlib.suppress(Exception):
+                await loop.sock_sendto(
+                    self._udp, self._encrypt(_SILENCE), self._remote
+                )
+            self._sequence = (self._sequence + 1) & 0xFFFF
+            self._timestamp = (self._timestamp + opus.FRAME_SIZE) & 0xFFFFFFFF
 
     def _encrypt(self, frame: bytes) -> bytes:
         """Wrap one Opus frame in an encrypted RTP packet."""
@@ -388,6 +414,19 @@ class VoiceConnection:
             with contextlib.suppress(Exception):
                 self._udp.close()
             self._udp = None
+
+
+def _mentions_4006(exc: BaseException, depth: int = 0) -> bool:
+    """Whether a 4006 hides anywhere in an exception and its children."""
+    if depth > 4:
+        return False
+    if "4006" in str(exc):
+        return True
+    for child in getattr(exc, "exceptions", ()) or ():
+        if _mentions_4006(child, depth + 1):
+            return True
+    cause = exc.__cause__ or exc.__context__
+    return bool(cause and _mentions_4006(cause, depth + 1))
 
 
 def _self_id(app: Any) -> str:

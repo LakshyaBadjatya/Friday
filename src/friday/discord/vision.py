@@ -27,8 +27,12 @@ having seen the picture; the vision model never speaks to the room directly.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
+import socket
+import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 import anyio
 
@@ -65,7 +69,7 @@ def images_in(message: dict[str, Any]) -> list[dict[str, str]]:
     for att in message.get("attachments") or []:
         ctype = (att.get("content_type") or "").split(";")[0].strip().lower()
         url = att.get("url") or ""
-        if url and (ctype in _LOOKABLE or _looks_like_image(url)):
+        if url and _allowed_host(url) and (ctype in _LOOKABLE or _looks_like_image(url)):
             found.append({"url": url, "name": att.get("filename") or "image"})
     for embed in message.get("embeds") or []:
         for key in ("image", "thumbnail", "video"):
@@ -77,7 +81,40 @@ def images_in(message: dict[str, Any]) -> list[dict[str, str]]:
     return found[:_MAX_IMAGES]
 
 
+#: Hosts whose images are fetched. An allowlist rather than a blocklist because
+#: the URL is not as trustworthy as it looks: ``attachments`` comes from Discord's
+#: own CDN, but ``embeds`` does not have to — any bot in the channel can post a
+#: rich embed carrying an arbitrary URL. Without this, a ``.png`` on a link-local
+#: address would be fetched, inlined, and *described back into the chat*, which
+#: turns image reading into a credential-shaped exfiltration channel.
+_ALLOWED_HOSTS = (
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+    "images-ext-1.discordapp.net",
+    "images-ext-2.discordapp.net",
+    "media.tenor.com",
+    "c.tenor.com",
+    "i.imgur.com",
+)
+
+
+def _allowed_host(url: str) -> bool:
+    """Whether the URL points at a known image CDN over http(s)."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False  # never file://, ftp://, gopher://
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return any(host == allowed or host.endswith("." + allowed)
+               for allowed in _ALLOWED_HOSTS)
+
+
 def _looks_like_image(url: str) -> bool:
+    """An image extension *and* a host we are willing to fetch from."""
+    if not _allowed_host(url):
+        return False
     return url.split("?", 1)[0].lower().endswith(
         (".png", ".jpg", ".jpeg", ".webp", ".gif")
     )
@@ -110,13 +147,20 @@ async def describe(settings: Any, images: list[dict[str, str]]) -> str | None:
 
 def _fetch(url: str) -> str | None:
     """Download an image and return it as a ``data:`` URI, or ``None``."""
-    import urllib.request  # noqa: PLC0415
-
+    # Re-checked here even though the caller filtered: this is the function that
+    # actually opens a socket, and a guard that lives only at the call site stops
+    # protecting the moment someone adds a second caller.
+    if not _allowed_host(url) or not _resolves_publicly(url):
+        logger.warning("discord vision: refused a non-CDN or private-address URL")
+        return None
     try:
         request = urllib.request.Request(  # noqa: S310
             url, headers={"User-Agent": "FRIDAY (https://friday.sukhma.in, 1.0)"}
         )
-        with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310
+        # A CDN redirect could otherwise walk the fetch to an internal address,
+        # so redirects are refused outright rather than followed and re-checked.
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(request, timeout=15) as resp:  # noqa: S310
             declared = int(resp.headers.get("Content-Length") or 0)
             if declared > _MAX_BYTES:
                 logger.info("discord vision: attachment too large (%d bytes)", declared)
@@ -134,10 +178,40 @@ def _fetch(url: str) -> str | None:
     return f"data:{ctype};base64,{base64.b64encode(raw).decode()}"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse 3xx. A followed redirect is an unvalidated second request."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:  # noqa: D102
+        return None
+
+
+def _resolves_publicly(url: str) -> bool:
+    """Whether the host resolves only to public addresses.
+
+    The allowlist covers the name; this covers the address behind it. DNS can
+    point a permitted-looking host at loopback or a private range, and the
+    fetcher should refuse that even if the name passed.
+    """
+    host = (urlparse(url).hostname or "").rstrip(".")
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast):
+            return False
+    return bool(infos)
+
+
 def _ask(base: str, key: str, model: str, parts: list[dict[str, Any]]) -> str | None:
     """One vision completion. Blocking; callers run it in a worker thread."""
-    import urllib.request  # noqa: PLC0415
-
     body = json.dumps(
         {
             "model": model,

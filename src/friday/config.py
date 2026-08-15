@@ -638,6 +638,12 @@ class Settings(BaseSettings):
     # being stored as UTC. Any IANA name (``Europe/London``, ``America/New_York``);
     # an unknown name falls back to UTC rather than failing the turn.
     timezone: str = "Asia/Kolkata"
+    # Shared secret for ``POST /telegram/webhook``. Telegram cannot send a bearer
+    # header, so the bearer middleware cannot guard that route; the secret travels
+    # in the URL Telegram is registered with instead, and is compared in constant
+    # time. Empty means no secret check — then only the chat-id match protects it,
+    # which is weaker: set this on any public deployment.
+    telegram_webhook_secret: str = ""
 
     # --- Android TV front door (default off) ---
     # Gates the ``/tv`` surface (``/tv/ask``, ``/tv/command``, ``/tv/pair``,

@@ -479,6 +479,11 @@ def _try_circle(request: Request, query: str) -> str | None:
     return handle_intent(circle, status, caller_uid, intent, now=datetime.now(UTC))
 
 
+#: What one answered turn amounts to: ``(speech, raw, mode, action)``. ``speech``
+#: is the spoken/short form, ``raw`` the fuller text worth sharing or displaying.
+Answer = tuple[str, str, str | None, "dict[str, Any] | None"]
+
+
 @router.post("/siri/ask", response_model=None)
 async def siri_ask(request: Request) -> Any:
     """Answer one spoken query through the core loop; 404 when the flag is off."""
@@ -490,9 +495,23 @@ async def siri_ask(request: Request) -> Any:
         return JSONResponse(
             status_code=400, content={"detail": "missing query 'q'"}
         )
-    query = query[:_MAX_QUERY]
     want_json = request.query_params.get("format", "").lower() == "json"
     session_id = request.query_params.get("session") or _DEFAULT_SESSION
+    speech, raw, mode, action = await _produce(request, query[:_MAX_QUERY], session_id)
+    return _respond(speech, raw=raw, mode=mode, want_json=want_json, action=action)
+
+
+async def _produce(request: Request, query: str, session_id: str) -> Answer:
+    """Run one turn through every branch and return the answer, transport-free.
+
+    This is the whole assistant: the drill loop, reminders, arithmetic, distance,
+    the desk, the circle, the fast model path and the orchestrator, in the order
+    that makes them correct. It deliberately knows nothing about HTTP shapes, so
+    the Siri route and the Telegram bot are two thin adapters over *one* brain
+    rather than two implementations that drift apart — a reminder set by voice
+    and one set by chat must behave identically, and the only way to guarantee
+    that is for them to run the same code.
+    """
     memory = _memory(request)
     deadline = _deadline(request)
 
@@ -503,8 +522,8 @@ async def siri_ask(request: Request) -> Any:
         mode: str | None,
         action: dict[str, Any] | None = None,
         record: bool = True,
-    ) -> Any:
-        """Render the reply and, by default, record the turn in the context window.
+    ) -> Answer:
+        """Return the answer and, by default, record the turn in the context window.
 
         Every branch that actually answers goes through here, so the window holds
         the whole conversation — a distance answer, an Instagram read-out and an
@@ -513,7 +532,7 @@ async def siri_ask(request: Request) -> Any:
         """
         if record:
             siri_context.remember(memory, session_id, query, raw or speech)
-        return _respond(speech, raw=raw, mode=mode, want_json=want_json, action=action)
+        return speech, raw, mode, action
 
     # Mis-wired shortcut guard: the body is a literal variable label (e.g. "Dictated
     # Text"), not the spoken words. Speak an actionable fix instead of clarifying.
@@ -709,6 +728,76 @@ async def siri_ask(request: Request) -> Any:
     # The orchestrator already recorded this turn in the shared buffer; recording
     # it again here would double every orchestrator-answered exchange.
     return _reply(speech, raw=raw_text, mode=mode, record=False)
+
+
+@router.post("/telegram/webhook", response_model=None)
+async def telegram_webhook(request: Request) -> Any:
+    """Chat with FRIDAY in Telegram, through the same brain that answers Siri.
+
+    Telegram POSTs every message here. The text runs through :func:`_produce`, so
+    a reminder set by chat is the same reminder set by voice — same parser, same
+    store, same context window (the session id is the chat id, so each chat keeps
+    its own thread).
+
+    **Why this route is not behind the bearer middleware.** Telegram will not send
+    an ``Authorization`` header, so the usual gate cannot apply. Two things guard
+    it instead: the URL carries a secret path segment only Telegram is told
+    (``?secret=``, compared in constant time), and the sender's chat id must match
+    ``telegram_chat_id``. Without that second check anyone who found the bot could
+    spend the LLM budget and read back the owner's reminders.
+
+    Always answers HTTP 200, even on rejection. A non-200 makes Telegram retry the
+    same update for hours, so an error here would become a stampede.
+    """
+    if not _siri_enabled(request):
+        return _disabled()
+    settings = getattr(request.app.state, "settings", None)
+
+    secret = str(getattr(settings, "telegram_webhook_secret", "") or "")
+    if secret and not secrets.compare_digest(
+        request.query_params.get("secret", ""), secret
+    ):
+        logger.warning("telegram webhook: bad secret")
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    try:
+        update = await request.json()
+    except ValueError:
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
+    text = (message.get("text") or "").strip()
+    chat_id = str((message.get("chat") or {}).get("id") or "")
+    if not text or not chat_id:
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    owner = str(getattr(settings, "telegram_chat_id", "") or "")
+    if owner and chat_id != owner:
+        logger.warning("telegram webhook: ignoring non-owner chat")
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    if text.startswith("/"):  # /start, /help — Telegram's own command convention
+        reply = _TELEGRAM_HELP
+    else:
+        speech, raw, _mode, _action = await _produce(
+            request, text[:_MAX_QUERY], f"telegram:{chat_id}"
+        )
+        # Chat has no 600-character speaking limit and renders newlines, so the
+        # fuller text is the better answer when the two differ.
+        reply = raw or speech
+
+    await anyio.to_thread.run_sync(send_telegram, settings, reply or _FALLBACK_SPEECH)
+    return JSONResponse(status_code=200, content={"ok": True})
+
+
+#: Sent for ``/start`` and any other slash command — Telegram users expect one.
+_TELEGRAM_HELP = (
+    "I'm FRIDAY. Just talk to me normally — same brain as Siri.\n\n"
+    "Try: 'remind me to call mum at 6', 'what are my reminders', "
+    "'what's 17 percent of 2480', 'brief me', 'quiz me on biology', "
+    "'log this: shipped the webhook', 'remember that my flight is on the 20th', "
+    "or 'what was the last topic'."
+)
 
 
 def _discover_chat_id(token: str) -> str:

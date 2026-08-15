@@ -807,6 +807,16 @@ async def telegram_webhook(request: Request) -> Any:
     if not text:
         return JSONResponse(status_code=200, content={"ok": True})
 
+    # Replying to a message with "remember this" stores *that* message, not the
+    # words "remember this". Telegram hands the tagged message over in
+    # ``reply_to_message``, which is the only place its text exists — without
+    # this, the instruction gets remembered and the thing worth keeping is lost.
+    quoted = message.get("reply_to_message") or {}
+    quoted_text = (quoted.get("text") or quoted.get("caption") or "").strip()
+    if quoted_text and _REMEMBER_THIS.search(text):
+        stored = _remember_quoted(request, quoted_text)
+        return await _telegram_reply(settings, stored)
+
     # Telegram users expect slash commands, and the bot menu offers them. Each
     # one expands to the plain phrasing the brain already understands, so there
     # is exactly one implementation of every capability — a command cannot drift
@@ -840,6 +850,40 @@ async def _telegram_reply(settings: Any, text: str) -> JSONResponse:
     await anyio.to_thread.run_sync(send_telegram, settings, text)
     return JSONResponse(status_code=200, content={"ok": True})
 
+
+#: "remember this", "save that", "keep this" — said *while replying* to a message.
+_REMEMBER_THIS = re.compile(
+    r"\b(?:remember|save|keep|note|store)\s+(?:this|that|it)\b"
+    r"|^\s*(?:remember|save|keep|noted?)\s*[!.]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _remember_quoted(request: Request, quoted: str) -> str:
+    """Store a tagged message as a durable fact and confirm what was kept.
+
+    The confirmation quotes the stored text back deliberately: "Saved" alone
+    gives no way to notice that the wrong message was captured, and a fact
+    recalled months later is far too late to discover it.
+    """
+    store = getattr(request.app.state, "long_term", None)
+    if store is None:
+        return "My long-term memory isn't wired up yet, Boss."
+    body = quoted.strip()
+    if len(body) > _MAX_FACT:
+        body = body[:_MAX_FACT].rstrip() + "…"
+    try:
+        store.add_fact(body, "telegram")
+    except Exception:  # noqa: BLE001 - never lose the turn over storage
+        logger.exception("telegram remember-this failed")
+        return "I couldn't hold on to that, Boss."
+    preview = body if len(body) <= 160 else body[:160].rstrip() + "…"
+    return f"Kept it, Boss: {preview}"
+
+
+#: Longest fact stored from a tagged message — a forwarded wall of text is worth
+#: keeping, but not at the cost of crowding out everything else on recall.
+_MAX_FACT = 2000
 
 #: Attachment kinds Telegram may send. None of them are downloaded or read.
 _TELEGRAM_MEDIA = (

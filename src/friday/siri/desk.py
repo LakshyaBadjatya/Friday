@@ -49,6 +49,24 @@ _PROTOCOL_LIST = re.compile(
     r"\b(?:what|list|which)\s+(?:are\s+)?(?:my\s+)?(?:protocols?|routines?)\b",
     re.IGNORECASE,
 )
+#: Asking about the owner. "Who is Lakshya" is not a general-knowledge question —
+#: there are other people with that name and a model will happily describe one of
+#: them. In this assistant it always means *the owner*, so it is answered from his
+#: own stored facts rather than from whatever the model has read.
+_OWNER = re.compile(
+    r"\bwho\s+(?:is|was)\s+(?:lakshya(?:\s+badjatya)?|my\s+(?:master|owner|boss))\b"
+    r"|\btell\s+me\s+about\s+(?:lakshya(?:\s+badjatya)?|myself|me)\b"
+    r"|\bwho\s+am\s+i\b"
+    r"|\bwhat\s+do\s+you\s+know\s+about\s+(?:me|lakshya(?:\s+badjatya)?)\b",
+    re.IGNORECASE,
+)
+#: The part of the answer that never changes, whatever memory holds.
+_OWNER_BASE = (
+    "You're Lakshya Badjatya, Boss — my creator and the only person I answer to. "
+    "I'm FRIDAY: I run your reminders, your journal, your decks and your desk, "
+    "and I reach you through Siri and through Friday on Telegram."
+)
+
 #: "remember that X" / "keep in mind that X" — a durable fact about the user.
 _FACT_WRITE = re.compile(
     r"^(?:hey\s+friday[,\s]*)?(?:please\s+)?"
@@ -75,7 +93,8 @@ async def handle(state: Any, query: str, now: datetime) -> str | None:
     if not text:
         return None
     return (
-        _facts(state, text)
+        _owner(state, text)
+        or _facts(state, text)
         or _protocols_list(state, text)
         or await _protocol_run(state, text)
         or _journal(state, text, now)
@@ -174,6 +193,39 @@ def _protocols_list(state: Any, text: str) -> str | None:
         return "You haven't set up any protocols yet, Boss."
     names = ", ".join(p.name for p in items[:_SPEAK_LIMIT])
     return f"You have {names}, Boss."
+
+
+def _owner(state: Any, text: str) -> str | None:
+    """Answer "who is Lakshya" from the owner's own stored facts.
+
+    Handled here rather than left to the model for a specific reason: there are
+    other people with that name, and asked cold a model describes one of them, or
+    invents a plausible biography. In this assistant the name always means the
+    owner. The fixed half of the answer states who he is; the rest is whatever he
+    has actually told FRIDAY to remember, so it grows as he adds to it and stays
+    true because none of it was guessed.
+    """
+    if not _OWNER.search(text):
+        return None
+    store = getattr(state, "long_term", None)
+    remembered: list[str] = []
+    if store is not None:
+        try:
+            # His facts are stored as plain sentences, so there is no single
+            # keyword to match on — take the recent ones and let the base answer
+            # carry the rest.
+            remembered = [
+                (getattr(f, "text", "") or "").strip().rstrip(".")
+                for f in store.all_facts(limit=_SPEAK_LIMIT)
+            ]
+        except Exception:  # noqa: BLE001 - memory is a bonus, not a dependency
+            remembered = []
+    remembered = [line for line in remembered if line]
+    if not remembered:
+        return _OWNER_BASE
+    return f"{_OWNER_BASE} Here's what you've had me remember: " + ". ".join(
+        remembered
+    ) + "."
 
 
 def _facts(state: Any, text: str) -> str | None:

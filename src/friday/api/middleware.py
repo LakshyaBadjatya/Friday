@@ -41,7 +41,13 @@ from friday.security.rbac import AccessPolicy
 #: route, it just switches the bot off. The route is not unguarded: it checks a
 #: secret carried in its URL (constant-time) and that the sender is the
 #: configured owner, both enforced inside the handler.
-_OPEN_PATHS = frozenset({"/health", "/telegram/webhook"})
+#: ``/discord/interactions`` — same reasoning as Telegram, and the same mistake
+#: was made twice: Discord signs each request with Ed25519 and cannot add a
+#: bearer header, so the middleware answered 401 before the signature check ever
+#: ran and Discord reported the endpoint as unverifiable. The route authenticates
+#: its own callers by verifying that signature against the application's public
+#: key, and denies on every failure path.
+_OPEN_PATHS = frozenset({"/health", "/telegram/webhook", "/discord/interactions"})
 
 #: A clock returns a monotonically increasing seconds value.
 Clock = Callable[[], float]

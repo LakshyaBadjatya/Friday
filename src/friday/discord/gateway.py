@@ -30,7 +30,7 @@ from typing import Any, cast
 
 import anyio
 
-from friday.discord import banter
+from friday.discord import banter, vision
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.gateway")
@@ -179,15 +179,30 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     channel = str(message.get("channel_id") or "")
     if not channel:
         return
-    if not content:
-        # An attachment with no text. Counted towards interjections but not
-        # answered: she cannot see images, and guessing at one is how "a document
-        # from your finance folder" happened.
+
+    # She looks at what gets posted here. The description is folded into the
+    # message as context rather than becoming the reply, so she answers as
+    # herself having seen it — the vision model never addresses the room.
+    pictures = vision.images_in(message)
+    seen: str | None = None
+    if pictures and (banter.addressed(content) or not content):
+        seen = await vision.describe(getattr(app.state, "settings", None), pictures)
+
+    if not content and seen is None:
+        # Something was posted that could not be read. Counted towards
+        # interjections but never guessed at — inventing a description is how
+        # "a document from your finance folder" happened.
         banter.note_message(app.state, channel)
         return
+    if seen:
+        content = (
+            f"{content}\n\n[attached image, described: {seen}]" if content
+            else f"[image posted, described: {seen}] — react to this naturally."
+        )
 
     try:
-        reply = await _compose(app, content, channel)
+        reply = await _compose(app, content, channel, forced=bool(seen and not
+                               banter.addressed(content)))
     except Exception:  # noqa: BLE001 - one bad message must not kill the socket
         logger.exception("discord message handling failed")
         return
@@ -195,14 +210,20 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         await _send(token, channel, reply)
 
 
-async def _compose(app: Any, content: str, channel: str) -> str | None:
-    """The reply, or ``None`` to stay quiet."""
+async def _compose(
+    app: Any, content: str, channel: str, *, forced: bool = False
+) -> str | None:
+    """The reply, or ``None`` to stay quiet.
+
+    ``forced`` covers an image posted with no words: there is no name to match
+    on, but a picture dropped into the chat is worth a reaction.
+    """
     # Told to stop, or laughed at: fixed answers, no model, no argument.
     social = banter.reaction(content)
     if social is not None:
         return social
 
-    if not banter.addressed(content):
+    if not forced and not banter.addressed(content):
         # Not talking to her. Occasionally she has something to say anyway.
         if banter.should_interject(app.state, channel):
             return banter.interjection()

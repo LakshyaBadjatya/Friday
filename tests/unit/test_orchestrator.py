@@ -147,10 +147,12 @@ async def test_refusal_facial_recognition_is_honest_decline() -> None:
 
 
 async def test_clarify_returns_question_not_guess() -> None:
-    # Ambiguous, no clear intent -> router yields CLARIFY -> a question.
+    # Empty input -> router yields CLARIFY -> a question, with no LLM call.
+    # (Merely *unrecognised* phrasing is answered conversationally now; only
+    # input with nothing in it to answer still asks the user to say more.)
     llm = FakeLLM(responses=[])  # must NOT be consumed; clarify is deterministic
     orch = _make_orchestrator(llm)
-    state = GraphState(session_id="s3", user_input="the blue one over there")
+    state = GraphState(session_id="s3", user_input="   ")
 
     out = await orch.handle(state)
 
@@ -276,7 +278,7 @@ async def test_graph_clarify_turn_asks_question() -> None:
     graph = build_graph(orch)
 
     out = await graph.invoke(
-        GraphState(session_id="g2", user_input="the blue one over there")
+        GraphState(session_id="g2", user_input="   ")
     )
 
     assert out.mode is Mode.CLARIFY

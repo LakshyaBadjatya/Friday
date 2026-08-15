@@ -250,6 +250,10 @@ _SHORT_REAL_WORDS: frozenset[str] = frozenset({"my", "by", "ok", "no"})
 
 # Confidence levels. Kept as named constants so the threshold gate is legible.
 _HIGH_CONFIDENCE = 0.9
+#: For a turn that matched no keyword but is plainly ordinary language. Sits above
+#: ``route_min_confidence`` (0.55) on purpose: this is a decision to answer, and a
+#: value under the threshold would be demoted back to CLARIFY by the gate.
+_MEDIUM_CONFIDENCE = 0.6
 _LOW_CONFIDENCE = 0.2
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
@@ -423,12 +427,25 @@ def _classify(text: str) -> RouteDecision:
             confidence=_HIGH_CONFIDENCE,
         )
 
-    # Rule 8: word-like but no recognized intent -> ambiguous -> clarify.
+    # Rule 8: word-like but matching no specific intent -> just answer it.
+    #
+    # This used to clarify, and that was the wrong instinct. "Call EDITH" matches
+    # no research or tool keyword, so it landed here and came back as "I want to
+    # get this right rather than guess" — a question in place of an answer, for a
+    # request that was in no way unclear. Unrecognised is not the same as
+    # ambiguous: it usually means the phrasing is ordinary and simply is not on a
+    # keyword list, and a model handed the turn answers those perfectly well.
+    #
+    # Genuine non-questions are still caught upstream: Rule 1 takes empty input
+    # and Rule 1b takes gibberish, both of which really do need asking about.
+    #
+    # The confidence must clear ``route_min_confidence`` (0.55) or the threshold
+    # gate below would demote this straight back to CLARIFY and change nothing.
     return RouteDecision(
-        mode=Mode.CLARIFY,
+        mode=Mode.CONVERSATION,
         agent=None,
-        rationale="no clear research or conversational intent",
-        confidence=_LOW_CONFIDENCE,
+        rationale="no specific intent matched; answering conversationally",
+        confidence=_MEDIUM_CONFIDENCE,
     )
 
 

@@ -66,9 +66,12 @@ ROUTER_TABLE: list[tuple[str, Mode]] = [
     # --- Clarify: ambiguous / empty / gibberish ---
     ("", Mode.CLARIFY),
     ("   ", Mode.CLARIFY),
-    ("asdfghjkl", Mode.CLARIFY),
-    ("xyz qwerty", Mode.CLARIFY),
-    ("the blue one over there", Mode.CLARIFY),
+    # Unrecognised phrasing is answered, not queried back. These used to clarify;
+    # that produced a canned "could you say a bit more?" for perfectly ordinary
+    # requests like "call EDITH". Only empty input clarifies now (see below).
+    ("asdfghjkl", Mode.CONVERSATION),
+    ("xyz qwerty", Mode.CONVERSATION),
+    ("the blue one over there", Mode.CONVERSATION),
 ]
 
 
@@ -126,11 +129,20 @@ async def test_conversation_high_confidence() -> None:
     assert decision.confidence >= 0.55
 
 
-async def test_ambiguous_routes_to_clarify_low_confidence() -> None:
-    # Gibberish must clarify, never guess.
+async def test_unrecognized_input_is_answered_not_queried_back() -> None:
+    """Unrecognised is not ambiguous — the model gets the turn.
+
+    A canned clarifying question is worse than a real reply even for nonsense:
+    asked "asdfghjkl" a model says "I didn't catch that" in context, which is
+    what the clarify branch was reaching for anyway. Empty input still clarifies
+    (Rule 1) because there is genuinely nothing to answer.
+    """
     decision = await route(_state("asdfghjkl"))
-    assert decision.mode is Mode.CLARIFY
-    assert decision.confidence < 0.55
+    assert decision.mode is Mode.CONVERSATION
+    assert decision.confidence >= 0.55
+
+    empty = await route(_state("   "))
+    assert empty.mode is Mode.CLARIFY
 
 
 async def test_empty_routes_to_clarify() -> None:

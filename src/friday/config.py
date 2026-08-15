@@ -633,6 +633,11 @@ class Settings(BaseSettings):
     # follow-ups like "what was the last topic?" have context. Shared with ``/chat``
     # through the same short-term memory, keyed by ``?session=``. 0 disables recall.
     siri_context_messages: int = 12
+    # The wall clock a *person* means. "Remind me at six" is six where the user is
+    # standing, not six UTC, so every spoken time is resolved in this zone before
+    # being stored as UTC. Any IANA name (``Europe/London``, ``America/New_York``);
+    # an unknown name falls back to UTC rather than failing the turn.
+    timezone: str = "Asia/Kolkata"
 
     # --- Android TV front door (default off) ---
     # Gates the ``/tv`` surface (``/tv/ask``, ``/tv/command``, ``/tv/pair``,

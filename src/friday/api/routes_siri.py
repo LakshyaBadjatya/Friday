@@ -34,6 +34,7 @@ from friday.core.state import GraphState
 from friday.errors import FridayError
 from friday.logging import get_logger
 from friday.siri import context as siri_context
+from friday.siri import tasks as siri_tasks
 from friday.siri.arithmetic import arithmetic_reply
 from friday.siri.speech import for_speech
 
@@ -240,6 +241,12 @@ def _deadline(request: Request) -> float:
     except (TypeError, ValueError):
         return 12.0
     return deadline if deadline > 0 else 12.0
+
+
+def _timezone(request: Request) -> str:
+    """The IANA zone spoken times resolve in (see ``FRIDAY_TIMEZONE``)."""
+    settings = getattr(request.app.state, "settings", None)
+    return str(getattr(settings, "timezone", "UTC") or "UTC")
 
 
 def _context_limit(request: Request) -> int:
@@ -548,6 +555,19 @@ async def siri_ask(request: Request) -> Any:
     maths = arithmetic_reply(query)
     if maths is not None:
         return _reply(maths, raw=maths, mode="math")
+
+    # Reminders — matched and stored verbatim before any model sees the words,
+    # because a reminder the model paraphrased is a reminder that lies to you.
+    # Local SQLite, so it stays on the event loop; the threading above is for
+    # the branches that reach the network.
+    task_reply = siri_tasks.handle(
+        getattr(request.app.state, "reminder_store", None),
+        query,
+        datetime.now(UTC),
+        tz_name=_timezone(request),
+    )
+    if task_reply is not None:
+        return _reply(task_reply, raw=task_reply, mode="reminder")
 
     # Distance queries — geocoded + routed via OpenStreetMap (computed, not guessed).
     # Run in a worker thread: it is blocking urllib, and on the event loop it stalls

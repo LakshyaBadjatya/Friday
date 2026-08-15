@@ -32,8 +32,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from friday.config import Settings
 from friday.security.rbac import AccessPolicy
 
-#: Paths exempt from both auth and rate limiting (liveness must always answer).
-_HEALTH_PATH = "/health"
+#: Paths exempt from both auth and rate limiting.
+#:
+#: ``/health`` — liveness must always answer, or the platform kills the service.
+#:
+#: ``/telegram/webhook`` — Telegram delivers updates itself and cannot be told to
+#: attach an ``Authorization`` header, so a bearer gate here does not secure the
+#: route, it just switches the bot off. The route is not unguarded: it checks a
+#: secret carried in its URL (constant-time) and that the sender is the
+#: configured owner, both enforced inside the handler.
+_OPEN_PATHS = frozenset({"/health", "/telegram/webhook"})
 
 #: A clock returns a monotonically increasing seconds value.
 Clock = Callable[[], float]
@@ -80,7 +88,7 @@ class AuthMiddleware:
             return
 
         request = Request(scope, receive=receive)
-        if request.url.path == _HEALTH_PATH:
+        if request.url.path in _OPEN_PATHS:
             await self._app(scope, receive, send)
             return
 
@@ -163,7 +171,7 @@ class RateLimitMiddleware:
             return
 
         request = Request(scope, receive=receive)
-        if request.url.path == _HEALTH_PATH:
+        if request.url.path in _OPEN_PATHS:
             await self._app(scope, receive, send)
             return
 

@@ -70,6 +70,7 @@ falling back to a single local owner so curl and the HUD work without a token
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -92,6 +93,11 @@ from friday.vault.search import VaultSearch
 from friday.vault.solver import Solver
 
 logger = get_logger("friday.api.routes_vault")
+
+#: Strong references to in-flight pipeline tasks. asyncio only holds a weak
+#: reference to a running task, so without this a capture's processing can be
+#: collected mid-chain and simply never finish.
+_BACKGROUND: set[asyncio.Task[None]] = set()
 
 router = APIRouter()
 
@@ -352,6 +358,20 @@ async def commit_item(request: Request, item_id: str) -> JSONResponse:
         index.put_item(item)
     except FirestoreIndexError as exc:
         return _index_unavailable(exc)
+
+    # Hand the capture to the pipeline: OCR, classify, maybe solve. Fire and
+    # forget, because the phone is holding a spinner and this chain runs a model
+    # or two; the item's own status carries the progress instead. Without this a
+    # committed capture stops at UPLOADED forever — the photograph is stored and
+    # never read, which is the whole feature failing quietly.
+    pipeline = getattr(request.app.state, "vault_pipeline", None)
+    if pipeline is not None:
+        task = asyncio.create_task(pipeline.process(owner_uid, item.id))
+        # Hold a reference until it finishes: a bare create_task may be
+        # garbage-collected mid-flight, losing the processing silently.
+        _BACKGROUND.add(task)
+        task.add_done_callback(_BACKGROUND.discard)
+
     return JSONResponse(status_code=200, content=item.model_dump(mode="json"))
 
 

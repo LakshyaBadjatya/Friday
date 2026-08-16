@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import anyio
+import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -132,7 +133,7 @@ from friday.observability.replay import TurnRecorder
 from friday.observability.tracing import Tracer
 from friday.observability.usage import UsageLedger
 from friday.perception.clipboard import FakeClipboard
-from friday.perception.ocr import FakeOCR
+from friday.perception.ocr import FakeOCR, TesseractOCR
 from friday.perception.screen import (
     FakeScreen,
     PerceptionService,
@@ -222,6 +223,7 @@ from friday.vault.exam import ExamRunner
 from friday.vault.firestore_index import FirestoreVaultIndex
 from friday.vault.index import SQLiteVaultIndex, VaultIndex
 from friday.vault.notes import NoteWriter
+from friday.vault.pipeline import Pipeline
 from friday.vault.quota import QuotaGuard
 from friday.vault.search import VaultSearch
 from friday.vault.solver import Solver
@@ -2627,6 +2629,38 @@ def _wire_vault(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     )
     app.state.vault_search = VaultSearch(index, vector_store=None)
     app.state.vault_exam = ExamRunner(index=index, llm=llm)
+
+    # The pipeline the commit route hands each capture to. Without this wired,
+    # every committed item stops at UPLOADED with empty OCR text: stored, never
+    # read. That is exactly what a live deployment did before this existed.
+    #
+    # fetch_bytes is deliberately NOT the plan's `lambda public_id: b""`, which
+    # would OCR nothing while looking like it worked — the pipeline's own module
+    # docstring warns about precisely that. Vault assets upload as
+    # `type=authenticated`, so their delivery URL carries a signature and cannot
+    # be reconstructed from the public_id; the provider's verify() response is
+    # the one place that URL legitimately comes from.
+    def _fetch_capture_bytes(public_id: str) -> bytes:
+        info = cloudinary.verify(public_id)
+        url = str((info or {}).get("secure_url") or "")
+        if not url:
+            return b""
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return bytes(response.content)
+
+    app.state.vault_pipeline = Pipeline(
+        index=index,
+        # OCR is local and runs for every capture, locked or not. Without the
+        # perception extras there is nothing to read with, and an empty read is
+        # honest where a crash would cost the user their photograph.
+        ocr=TesseractOCR() if settings.enable_perception else FakeOCR(""),
+        organizer_llm=llm,
+        solver=app.state.vault_solver,
+        quota=app.state.vault_quota,
+        fetch_bytes=_fetch_capture_bytes,
+    )
 
 
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:

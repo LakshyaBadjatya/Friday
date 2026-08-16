@@ -294,6 +294,10 @@ def test_vault_commit_twice_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> No
             "bytes": 5,
             "format": "jpg",
         }
+        # No pipeline here: this test is about commit alone, and with one wired
+        # the capture races ahead to READY between the two calls, which would be
+        # testing the pipeline's speed rather than commit's idempotency.
+        client.app.state.vault_pipeline = None  # type: ignore[attr-defined]
         first = client.post(f"/vault/items/{item_id}/commit", json={})
         second = client.post(f"/vault/items/{item_id}/commit", json={})
     assert first.status_code == 200
@@ -922,3 +926,65 @@ def test_vault_exam_grade_nothing_gradable_is_422_not_500(monkeypatch: pytest.Mo
             f"/vault/exam/{session.id}/grade", json={"answer_item_ids": ["also-missing"]}
         )
     assert resp.status_code == 422
+
+
+def _seed_uploaded(client: TestClient, source: str = "camera") -> str:
+    """Sign, then simulate the phone having actually uploaded, and return the id.
+
+    Commit refuses (409) anything Cloudinary cannot confirm, so a test that
+    wants a successful commit has to put the asset where the provider will
+    find it.
+    """
+    signed = client.post("/vault/sign", json={"source": source}).json()
+    public_id = signed["upload"]["params"]["public_id"]
+    client.app.state.vault_cloudinary.assets[public_id] = {  # type: ignore[attr-defined]
+        "public_id": public_id,
+        "version": 7,
+        "format": "jpg",
+        "bytes": 5_774,
+        "width": 900,
+        "height": 300,
+        "resource_type": "image",
+        "secure_url": f"https://res.cloudinary.com/fake/{public_id}.jpg",
+    }
+    return str(signed["item_id"])
+
+
+# --------------------------------------------------------------------------- #
+# Commit hands the capture to the pipeline (Task 10 Step 5)
+# --------------------------------------------------------------------------- #
+def test_commit_kicks_off_processing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Commit must start the pipeline, or a filed capture is never read.
+
+    Without this the item stops at ``uploaded`` forever: no OCR, no
+    classification, never ``ready`` — which is the whole point of photographing
+    it. Verified against production, where exactly that happened.
+    """
+    seen: list[tuple[str, str]] = []
+
+    class _RecordingPipeline:
+        async def process(self, owner_uid: str, item_id: str) -> None:
+            seen.append((owner_uid, item_id))
+
+    with _client(monkeypatch, _settings()) as client:
+        client.app.state.vault_pipeline = _RecordingPipeline()  # type: ignore[attr-defined]
+        item_id = _seed_uploaded(client)
+        resp = client.post(f"/vault/items/{item_id}/commit", json={})
+
+    assert resp.status_code == 200
+    assert seen == [(_LOCAL_OWNER, item_id)]
+
+
+def test_commit_survives_a_missing_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build with no pipeline wired still commits; the capture is not lost."""
+    with _client(monkeypatch, _settings()) as client:
+        client.app.state.vault_pipeline = None  # type: ignore[attr-defined]
+        item_id = _seed_uploaded(client)
+        resp = client.post(f"/vault/items/{item_id}/commit", json={})
+    assert resp.status_code == 200
+
+
+def test_vault_pipeline_is_wired_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring itself: app.state carries a pipeline when the vault is on."""
+    with _client(monkeypatch, _settings()) as client:
+        assert getattr(client.app.state, "vault_pipeline", None) is not None  # type: ignore[attr-defined]

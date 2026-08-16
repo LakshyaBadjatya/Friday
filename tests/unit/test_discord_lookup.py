@@ -180,3 +180,53 @@ async def test_both_sources_silent_means_no_brief_not_a_crash(
     monkeypatch.setattr(lookup, "_wikipedia", _nothing)
     monkeypatch.setattr(lookup, "_THROTTLED_UNTIL", [])
     assert await lookup.brief("tell me about nothing at all", tool=Blocked()) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "topic"),
+    [
+        ("Friday What is the latest news in science sector", "science"),
+        ("what's happening in AI", "AI"),
+        ("any news on spacex", "spacex"),
+    ],
+)
+def test_a_news_question_is_a_lookup_and_keeps_only_the_topic(
+    text: str, topic: str
+) -> None:
+    """"latest news in science sector" was searched verbatim.
+
+    That matched trade-press pieces about "the life science sector" from
+    months earlier, so "latest" came back four months stale.
+    """
+    assert lookup.wants_lookup(text) is True
+    assert lookup._wants_news(text) is True
+    assert lookup._query(text) == topic
+
+
+def test_relative_times_are_human_and_survive_a_bad_date() -> None:
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    recent = datetime.now(UTC) - timedelta(hours=3)
+    assert "3 hours ago" == lookup._ago(recent.strftime("%a, %d %b %Y %H:%M:%S GMT"))
+    assert lookup._ago("not a date at all") == ""
+
+
+@pytest.mark.anyio
+async def test_headlines_are_reported_as_the_answer_not_as_a_maybe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """She offered to "try to find some recent breakthroughs" instead of any.
+
+    With headlines in hand the instruction has to say plainly that the looking
+    is done, or the persona's caution turns a fetched answer back into an offer.
+    """
+
+    async def _headlines(query: str) -> list[str]:
+        return ["- Something happened (The Guardian; 4 hours ago, Sun, 16 Aug 2026)"]
+
+    monkeypatch.setattr(lookup, "_news", _headlines)
+    brief = await lookup.brief("what is the latest news in science")
+    assert brief is not None
+    assert "The Guardian" in brief
+    assert "4 hours ago" in brief
+    assert "do not offer to look" in brief

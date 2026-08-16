@@ -146,6 +146,67 @@ def addressed(text: str) -> Any | None:
     return None if _NOT_ADDRESS.match(rest) else found
 
 
+#: What each operator's patch actually sounds like when somebody asks for it.
+#: Nobody says "EDITH, perform a security audit" — they say "check my devices",
+#: and that landed on FRIDAY, who has no security tools and made a joke instead
+#: of handing it to the operator who does.
+_DOMAINS: dict[str, tuple[str, ...]] = {
+    "EDITH": (
+        r"secur(?:e|ity|ing)", r"audit", r"hacked", r"breach", r"vulnerab",
+        r"password", r"2fa", r"two.factor", r"lock\s*down", r"lockdown",
+        r"malware", r"phish", r"exposed", r"leak(?:ed|ing)?", r"pentest",
+        r"harden", r"my\s+devices?",
+    ),
+    "ORACLE": (
+        r"remind", r"schedule", r"calendar", r"alarm", r"every\s+(?:day|week)",
+        r"at\s+\d{1,2}\s*(?:am|pm)", r"automat(?:e|ion)", r"cron", r"routine",
+    ),
+    "GECKO": (
+        r"stock", r"market", r"share\s+price", r"invest", r"portfolio",
+        r"crypto", r"nifty", r"sensex", r"ticker", r"should\s+i\s+buy",
+    ),
+    "KAREN": (r"send\s+(?:an?\s+)?(?:email|message|mail)", r"draft\s+an?\s+email",
+              r"reply\s+to\s+(?:the\s+)?(?:email|mail)", r"reach\s+out"),
+    "VERONICA": (r"caption", r"write\s+(?:me\s+)?a\s+(?:post|tweet|bio)",
+                 r"rephrase", r"reword", r"make\s+it\s+sound"),
+    "JOCASTA": (r"what\s+did\s+i\s+(?:say|tell\s+you)", r"do\s+you\s+remember",
+                r"remember\s+when", r"what\s+do\s+you\s+know\s+about\s+me"),
+    "VISION": (r"analys[ei]", r"analyz[ei]", r"compare\s+", r"break\s+(?:this\s+)?down",
+               r"deep\s+dive", r"investigate"),
+    "FORGE": (r"build\s+(?:me\s+)?an?\s+", r"deploy", r"my\s+(?:app|repo|code|project)",
+              r"compile", r"refactor", r"my\s+android\s+app", r"run\s+(?:the\s+)?command"),
+}
+
+_DOMAIN_RE = {
+    name: re.compile("|".join(f"(?:{p})" for p in patterns), re.IGNORECASE)
+    for name, patterns in _DOMAINS.items()
+}
+
+
+def for_domain(text: str) -> Any | None:
+    """The operator whose patch this request falls on, or ``None``.
+
+    Only consulted when nobody was named. Asking FRIDAY for something is not
+    wrong — she is the one being spoken to — but a request she has no tools for
+    should reach whoever does, rather than being deflected with a joke.
+    """
+    body = (text or "").strip()
+    if len(body) < 6:
+        return None
+    known = _operators()
+    for name, pattern in _DOMAIN_RE.items():
+        if name in known and pattern.search(body):
+            return known[name]
+    return None
+
+
+def handoff_line(operator: Any) -> str:
+    """What FRIDAY says as she passes it over."""
+    name = str(getattr(operator, "name", "") or "")
+    title = str(getattr(operator, "title", "") or "").lower()
+    return f"that's {name}'s patch — {title}. calling them in 👇"
+
+
 def persona_rule(operator: Any) -> str:
     """The instruction that makes this reply sound like the operator.
 
@@ -164,7 +225,14 @@ def persona_rule(operator: Any) -> str:
         f"not open with your name or your job unless asked. Same house rules as FRIDAY: "
         f"short, human, no corporate tone, no lecturing. If the question is "
         f"outside your speciality, still answer it — you are a person in a "
-        f"chat, not a help desk that forwards tickets.]"
+        f"chat, not a help desk that forwards tickets.\n\n"
+        f"If you are asked to do something you have no connected system for — a "
+        f"device that was never linked, an account you cannot see — say exactly "
+        f"that in one line, name what it would need to work, and offer to set it "
+        f"up. Do not deflect with a joke about what you are not, and do not "
+        f"imply you did something you did not do. 'I can't check that yet, "
+        f"nothing's linked — want me to walk you through connecting it?' is the "
+        f"answer; a quip about not being a hacker is not.]"
     )
 
 

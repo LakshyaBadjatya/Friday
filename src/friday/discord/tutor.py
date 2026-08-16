@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.request
+from datetime import UTC, datetime
 from typing import Any
 
 import anyio
@@ -112,6 +113,60 @@ def is_follow_up(channel: str, text: str) -> bool:
     return bool(_LAST.get(channel)) and bool(_FOLLOW_UP.search(text or ""))
 
 
+#: "how long until", "when will it", "how far", "convert that to km", "how many
+#: years". A question that is answered by arithmetic on numbers already in the
+#: conversation rather than by looking anything up.
+_COMPUTATION = re.compile(
+    r"\b(?:how\s+(?:long|far|fast|many|much|old)|when\s+will\s+(?:it|that|they|we)"
+    r"|convert\s+(?:it|that|this)?|in\s+(?:km|miles|kg|hours|days|years|minutes)\b"
+    r"|what(?:'s|\s+is)\s+(?:that|it|this)\s+in\b"
+    r"|calculate|work\s+(?:it|that)\s+out|per\s+(?:second|hour|day|year))\b",
+    re.IGNORECASE,
+)
+_HAS_NUMBER = re.compile(r"\d")
+
+
+def is_computation(channel: str, text: str) -> bool:
+    """Whether this is arithmetic on the conversation rather than a lookup.
+
+    Asked when Voyager 1 completes a light-day she answered "I couldn't find
+    anything" — true of the search and useless as an answer, because the
+    distance was already on screen, the speed is known, and the rest is a
+    division. It needed working out, not looking up.
+
+    A number has to be in play somewhere — in the question or in what was just
+    said — so "how many people are coming" stays ordinary conversation.
+    """
+    if not _COMPUTATION.search(text or ""):
+        return False
+    remembered = _LAST.get(channel)
+    context = " ".join(remembered) if remembered else ""
+    return bool(_HAS_NUMBER.search(text or "") or _HAS_NUMBER.search(context))
+
+
+async def compute(settings: Any, channel: str, text: str) -> str | None:
+    """Work out an answer using whatever numbers the conversation has produced."""
+    secret = getattr(settings, "gemini_api_key", None)
+    key = secret.get_secret_value() if secret is not None else ""
+    if not key:
+        return None
+    remembered = _LAST.get(channel)
+    context = ""
+    if remembered:
+        context = (
+            f"Earlier in this conversation:\nQ: {remembered[0]}\nA: {remembered[1]}\n\n"
+        )
+    # The model has no idea what day it is, so "in 5.6 years" came back as
+    # "around late 2029" — right arithmetic, wrong century-and-a-bit, because it
+    # was counting from whenever its training stopped.
+    today = datetime.now(UTC).date().isoformat()
+    prompt = f"Today's date is {today}.\n{context}The question now is: {text.strip()}"
+    answer = await anyio.to_thread.run_sync(_ask, key, prompt, _COMPUTE_PROMPT)
+    if answer:
+        _LAST[channel] = (text.strip(), answer)
+    return answer
+
+
 async def revisit(settings: Any, channel: str, text: str) -> str | None:
     """Re-work the previous problem in light of what was just said.
 
@@ -143,11 +198,42 @@ async def revisit(settings: Any, channel: str, text: str) -> str | None:
     return answer
 
 
-def _ask(key: str, question: str) -> str | None:
+#: A calculation in chat is not an exam answer. The full template produced four
+#: numbered sections and a substitution check for "how long until", which is a
+#: division — correct, and nothing anybody wanted to read in a message.
+_COMPUTE_PROMPT = (
+    "Work out the answer. Be accurate and brief: two or three lines of "
+    "arithmetic, then the answer with its units on its own line. Plain text, no "
+    "LaTeX, no headings, no numbered sections.\n\n"
+    "If the conversation already established a current value, the question is "
+    "almost always about the remainder from there, not the total from zero — "
+    "something already 22.9 billion km out that is asked when it reaches a "
+    "light-day needs the 3 billion km still to go, not the whole 25.9. Read it "
+    "that way unless the wording says otherwise.\n\n"
+    "Answer 'when' with a length of time from now, and a year where that is "
+    "sensible. Use standard constants freely. If a needed figure genuinely is "
+    "not available, say which one — do not say you could not find the answer "
+    "when it is a calculation you can do.\n\n"
+    "Treat any figure quoted earlier in the conversation as suspect if the "
+    "quantity changes with time — a distance that grows, a price, an age, a "
+    "population. Search results carry no date and are often years old. If the "
+    "figure has no date attached, do not build on it: work forward from a dated "
+    "milestone and a known rate instead, and say which you used. Voyager 1 "
+    "passed 100 AU on 2006-08-15 and moves about 3.57 AU per year, so its "
+    "distance today is that projection — an undated 'about 22.9 billion km' is "
+    "a 2022 number and using it puts the answer years out. Sanity-check the "
+    "result: if it disagrees sharply with what the asker expects, say so and "
+    "show which figure the difference hangs on."
+)
+
+
+def _ask(key: str, question: str, system: str = "") -> str | None:
     """One reasoning call. Blocking; callers use a worker thread."""
     body = json.dumps(
         {
-            "contents": [{"parts": [{"text": f"{_PROMPT}\n\nProblem:\n{question}"}]}],
+            "contents": [
+                {"parts": [{"text": f"{system or _PROMPT}\n\nProblem:\n{question}"}]}
+            ],
             "generationConfig": {
                 # Deterministic. A physics answer should not vary between asks,
                 # and sampling is what lets a plausible-looking wrong step

@@ -155,3 +155,53 @@ def test_a_long_answer_is_split_rather_than_truncated() -> None:
 
     assert split_for_discord("short") == ["short"]
     assert split_for_discord("   ") == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("friday can you check security of my devices please", "EDITH"),
+        ("remind me at 6pm to call mum", "ORACLE"),
+        ("should i buy nvidia stock", "GECKO"),
+        ("friday what did i tell you about the exam", "JOCASTA"),
+        ("deploy my android app", "FORGE"),
+        ("how are you", None),
+        ("lol", None),
+    ],
+)
+def test_a_request_reaches_whoever_holds_the_tools(
+    text: str, expected: str | None
+) -> None:
+    """Asked to check his devices, FRIDAY made a joke about being a librarian.
+
+    She has no security tools; EDITH does. A request nobody addressed should
+    reach the operator whose patch it lands on rather than being deflected by
+    the one who happens to be listening.
+    """
+    found = operators.for_domain(text)
+    assert getattr(found, "name", None) == expected
+
+
+def test_an_operator_must_say_what_is_missing_rather_than_joke() -> None:
+    rule = operators.persona_rule(operators.addressed("edith, status?"))
+    assert "no connected system for" in rule
+    assert "name what it would need" in rule
+
+
+def test_a_question_answered_by_arithmetic_is_not_a_search() -> None:
+    """"When will it complete 1 light day" got "I couldn't find anything".
+
+    True of the search and useless as an answer: the distance was on screen, the
+    speed is known, and the rest is a division.
+    """
+    from friday.discord import tutor  # noqa: PLC0415
+
+    tutor.remember("chan", "distance of voyager 1?", "about 22.9 billion km away")
+    assert tutor.is_computation("chan", "When will it complete 1 light day") is True
+    assert tutor.is_computation("chan", "in km") is True
+    assert tutor.is_computation("chan", "how long until it gets there") is True
+
+    # A number has to be in play, or it is just conversation.
+    tutor._LAST.pop("empty", None)
+    assert tutor.is_computation("empty", "how many people are coming") is False
+    assert tutor.is_computation("chan", "lol that is wild") is False

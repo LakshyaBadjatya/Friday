@@ -749,6 +749,16 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     # name used to get silence, or FRIDAY answering on its behalf.
     operator = operators.addressed(content)
 
+    # Nobody named, but the request lands on somebody's patch. Asked to check
+    # the security of his devices, FRIDAY — who has no security tools — answered
+    # "I'm not a hacker, Boss, I'm more like a librarian", which is a joke in
+    # place of the operator who actually holds those tools. She hands over now.
+    handoff = ""
+    if operator is None and banter.addressed(content):
+        operator = operators.for_domain(content)
+        if operator is not None:
+            handoff = operators.handoff_line(operator)
+
     try:
         reply = await _compose(
             app, content, channel,
@@ -766,6 +776,12 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         # falls through and answers as FRIDAY rather than saying nothing.
         sent = ""
         if operator is not None:
+            # She says who she is calling before they speak, so a handover reads
+            # as a handover rather than as a different bot interrupting.
+            if handoff:
+                await _send(
+                    token, channel, handoff, reply_to=str(message.get("id") or "")
+                )
             sent = await operators.speak(token, channel, operator, reply)
         # Threaded as a reply to the message she is answering, so a busy channel
         # stays readable and it is obvious which line she picked up.
@@ -895,6 +911,13 @@ async def _compose(
         if again:
             return again
 
+    # A question answered by arithmetic on what has already been said goes to
+    # the model that can actually do arithmetic, with those numbers in hand.
+    if tutor.is_computation(channel, content):
+        worked = await tutor.compute(settings, channel, content)
+        if worked:
+            return worked
+
     if banter.is_study_question(content):
         worked = await tutor.solve(settings, content)
         if worked:
@@ -942,6 +965,12 @@ async def _compose(
         persona=str(getattr(operator, "name", "") or ""),
         asked=spoken_by_human[:_MAX_QUERY],
     )
+    # Every answer is held, not just the worked ones. "in km" and "how long
+    # until" are answered from the last exchange, and that exchange is usually
+    # an ordinary reply — the distance to Voyager 1 arrived in normal chat and
+    # then had to be available to divide.
+    if raw:
+        tutor.remember(channel, spoken_by_human, raw)
     return raw or None
 
 

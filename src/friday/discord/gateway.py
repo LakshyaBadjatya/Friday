@@ -115,6 +115,12 @@ async def _session(app: Any) -> None:
         # Kept on app state so a message handler can ask the gateway to move
         # her into a voice channel; opcode 4 goes over *this* socket.
         app.state._discord_socket = socket  # noqa: SLF001 - app state is a namespace
+        # Any voice session from a previous connection is void now. Leaving the
+        # old connections around means they sit waiting for a handshake that
+        # cannot succeed.
+        for stale_call in list(_voice(app).values()):
+            stale_call.close()
+        _voice(app).clear()
         logger.info("discord gateway connected")
 
         async with anyio.create_task_group() as tg:
@@ -464,9 +470,13 @@ async def join_voice(app: Any, socket: Any, guild: str, channel: str) -> Any:
     if existing is not None:
         existing.close()
     call = VoiceConnection(app, guild, channel)
-    known = getattr(app.state, "_voice_session", "")
-    if known:
-        call.credentials(session_id=str(known))
+    # Deliberately NOT seeded from a cached session id. A previous version did
+    # that and made things worse: the main gateway reconnects, which invalidates
+    # every voice session issued on the old connection, so priming a new attempt
+    # with the last one handed Discord a dead id and earned a 4006 every time.
+    # Opcode 4 always produces a fresh VOICE_STATE_UPDATE; waiting for it is the
+    # only correct source.
+    app.state._voice_session = ""  # noqa: SLF001 - stale by definition now
     calls[guild] = call
     await socket.send(json.dumps({
         "op": 4,
@@ -496,10 +506,9 @@ def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> Non
         # dropped session id is what produced "4006 session is no longer valid"
         # — the handshake identified with a stale one from an earlier attempt.
         session = str(data.get("session_id") or "")
-        if session:
-            app.state._voice_session = session  # noqa: SLF001
         call = _voice(app).get(guild)
-        if call is not None and channel and session:
+        if session and call is not None and channel:
+            logger.info("voice: got session for guild %s", guild)
             call.credentials(session_id=session)
         return
 
@@ -523,11 +532,16 @@ async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) ->
     """Join the channel and start the listen/speak loop."""
     call = await join_voice(app, socket, guild, channel)
 
-    async def _heard(said: str, _user: str, code: str = "en") -> None:
+    async def _heard(said: str, user: str, code: str = "en") -> None:
         # The spoken language wins over any pinned preference: whatever they
         # just said out loud is what they want back.
-        lang.set_for(app.state, f"voice:{channel}", code)
-        reply = await _compose(app, said, f"voice:{channel}", forced=True)
+        session = discord_session(app)
+        lang.set_for(app.state, session, code)
+        # The same session the text channel uses, so a question asked aloud and
+        # followed up by typing is one conversation rather than two strangers.
+        reply = await _compose(
+            app, said, session, forced=True, asker=user, spoken=True
+        )
         if reply:
             await call.say(reply, language=code)
 
@@ -699,7 +713,7 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
 
 async def _compose(
     app: Any, content: str, channel: str, *, forced: bool = False,
-    asker: str = "",
+    asker: str = "", spoken: bool = False,
 ) -> str | None:
     """The reply, or ``None`` to stay quiet."""
     """The reply, or ``None`` to stay quiet.
@@ -734,9 +748,9 @@ async def _compose(
         call = next(iter(_voice(app).values()), None)
         if call is None:
             return "i'm not in a vc right now, Boss — get in one and i'll follow."
-        spoken = await _model(app, banter.strip_speak(content), channel)
-        if spoken:
-            await call.say(spoken)
+        line = await _model(app, banter.strip_speak(content), channel)
+        if line:
+            await call.say(line)
             return None  # said out loud; repeating it in text is noise
         return None
 
@@ -773,7 +787,7 @@ async def _compose(
 
     # Two bits that are the same turn with a different instruction attached,
     # rather than separate pipelines that would drift from her normal voice.
-    if channel.startswith("voice:") or forced and channel.startswith("voice"):
+    if spoken:
         content = f"{content}\n\n[{banter.VOICE_REPLY_RULES}]"
     if banter.is_settle(content):
         content = f"{content}\n\n[{banter.SETTLE_PROMPT}]"

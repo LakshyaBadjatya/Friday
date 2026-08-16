@@ -57,6 +57,28 @@ SILENCE_SECONDS = 1.0
 #: How often the buffers are checked for a finished turn.
 _TICK_SECONDS = 0.25
 
+#: Loudness a frame must reach to count as someone talking rather than room
+#: noise. Compared on mean absolute amplitude of 16-bit samples: breathing and
+#: fan noise sit far below this, speech sits well above it.
+_INTERRUPT_FLOOR = 500
+
+
+def _loud_enough(pcm: bytes) -> bool:
+    """Whether a decoded frame carries actual speech."""
+    if len(pcm) < 64:
+        return False
+    total = 0
+    # Every 32nd sample is plenty to judge loudness and keeps this cheap enough
+    # to run on every inbound packet.
+    step = 64
+    count = 0
+    for offset in range(0, len(pcm) - 1, step):
+        sample = int.from_bytes(pcm[offset : offset + 2], "little", signed=True)
+        total += abs(sample)
+        count += 1
+    return bool(count) and (total / count) > _INTERRUPT_FLOOR
+
+
 #: The canonical Opus silent frame. Discord's own documentation specifies these
 #: three bytes; encoding real silence would produce a larger frame that means
 #: the same thing, so the constant is used directly.
@@ -96,6 +118,10 @@ class VoiceConnection:
         self._speakers: dict[int, str] = {}
         #: The language last heard in this call; the reply voice follows it.
         self.language = "en"
+        #: Raised while she is talking if anyone else starts. Interrupting is
+        #: how people take a turn in conversation — a speaker who has to be
+        #: waited out is a recording, not someone you are talking to.
+        self._interrupted = asyncio.Event()
         #: Set when Discord rejects the handshake (4006), so the caller knows to
         #: ask for fresh credentials rather than retrying with the same dead ones.
         self._stale = False
@@ -129,6 +155,10 @@ class VoiceConnection:
             return
 
         host = str(self.endpoint).split(":")[0]
+        logger.info(
+            "voice: identifying on %s (session %s…, token %s…)",
+            host, str(self.session_id)[:6], str(self.token)[:6],
+        )
         try:
             await self._identify_and_run(host, on_speech)
         except Exception as exc:  # noqa: BLE001 - classify, then let it bubble
@@ -249,6 +279,11 @@ class VoiceConnection:
                 pcm = self._decoder(ssrc).decode(frame)
             except opus.OpusError:
                 continue
+            # Somebody talking over her ends her turn immediately. The check is
+            # on decoded audio rather than Discord's speaking flag, which fires
+            # on mic noise and would cut her off mid-word for a cough.
+            if self._speaking and _loud_enough(pcm):
+                self._interrupted.set()
             self._heard.setdefault(ssrc, bytearray()).extend(pcm)
             self._last_heard[ssrc] = time.monotonic()
 
@@ -320,12 +355,19 @@ class VoiceConnection:
         frames = await audio.speak(text, lang.voice_for(language or self.language))
         if not frames or self._udp is None or self._remote is None:
             return
+        self._interrupted.clear()
         await self._set_speaking(True)
         deadline = time.perf_counter()
         loop = asyncio.get_running_loop()
         try:
             for frame in frames:
                 if self._closed:
+                    break
+                if self._interrupted.is_set():
+                    # Cut off mid-sentence on purpose. Finishing the thought
+                    # after being interrupted is exactly what makes talking to
+                    # a machine feel like waiting for one.
+                    logger.info("voice: interrupted, stopping")
                     break
                 packet = self._encrypt(frame)
                 with contextlib.suppress(Exception):

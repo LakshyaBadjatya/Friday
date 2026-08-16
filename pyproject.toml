@@ -29,6 +29,7 @@ dependencies = [
   # a blank face. It was already present locally as a transitive extra, which
   # is exactly why the gap only showed up when the container was built.
   "pillow>=11.0",
+  "sympy>=1.13",
 ]
 
 [project.scripts]

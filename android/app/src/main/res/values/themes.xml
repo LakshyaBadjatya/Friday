@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The window beneath Compose. Without this the app flashes white on
+         launch before the dark surface is drawn, which on a phone opened in a
+         dark room is the most visible thing the app does. -->
+    <style name="Theme.Friday" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#06121F</item>
+        <item name="android:colorBackground">#06121F</item>
+        <item name="android:statusBarColor">#06121F</item>
+        <item name="android:navigationBarColor">#06121F</item>
+    </style>
+
+    <style name="Theme.Friday.Translucent" parent="@android:style/Theme.Translucent.NoTitleBar" />
+</resources>

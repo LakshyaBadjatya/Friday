@@ -15,7 +15,7 @@
         android:allowBackup="true"
         android:icon="@android:drawable/sym_def_app_icon"
         android:label="FRIDAY"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/Theme.Friday">
 
         <activity
             android:name=".MainActivity"
@@ -41,7 +41,7 @@
             android:name=".capture.ShareReceiverActivity"
             android:exported="true"
             android:noHistory="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            android:theme="@style/Theme.Friday.Translucent">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -54,7 +54,7 @@
             android:name=".capture.ScreenCaptureActivity"
             android:exported="false"
             android:noHistory="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+            android:theme="@style/Theme.Friday.Translucent" />
 
         <service
             android:name=".capture.ScreenCaptureService"

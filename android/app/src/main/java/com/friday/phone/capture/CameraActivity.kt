@@ -36,6 +36,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.friday.phone.sync.Filing
+import com.friday.phone.ui.FridayTheme
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -65,8 +66,11 @@ class CameraActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) { CaptureScreen() }
+            FridayTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) { CaptureScreen() }
             }
         }
     }
@@ -92,7 +96,10 @@ class CameraActivity : ComponentActivity() {
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("FRIDAY needs the camera to see what you are looking at.")
+                Text(
+                    "FRIDAY needs the camera to see what you are looking at.",
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
                 Button(
                     onClick = { ask.launch(Manifest.permission.CAMERA) },
                     modifier = Modifier.padding(top = 16.dp),
@@ -113,7 +120,11 @@ class CameraActivity : ComponentActivity() {
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 if (status.isNotEmpty()) {
-                    Text(status, modifier = Modifier.padding(bottom = 8.dp))
+                    Text(
+                        status,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = {

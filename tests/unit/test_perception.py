@@ -13,6 +13,7 @@ from __future__ import annotations
 import builtins
 import importlib
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,7 +24,7 @@ from friday.perception.clipboard import (
     FakeClipboard,
     SystemClipboard,
 )
-from friday.perception.ocr import FakeOCR, OCRProvider, TesseractOCR
+from friday.perception.ocr import FakeOCR, OCRProvider, TesseractOCR, TrOCROCR
 from friday.perception.screen import (
     FIXTURE_SCREEN_BYTES,
     FakeScreen,
@@ -261,3 +262,68 @@ def test_mss_screen_missing_backend_raises_helpful_error(
     with pytest.raises(ProviderError) as exc:
         screen.capture()
     assert "install-perception" in str(exc.value)
+
+
+def test_trocr_satisfies_the_ocr_protocol() -> None:
+    """The point of the adapter: the pipeline swaps it in with no other change."""
+    assert isinstance(TrOCROCR("models/ocr/trocr"), OCRProvider)
+
+
+async def test_trocr_missing_backend_raises_helpful_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ocr = TrOCROCR("models/ocr/trocr")
+    monkeypatch.setattr(builtins, "__import__", _fail_import_of("optimum", "transformers", "PIL"))
+    with pytest.raises(ProviderError) as exc:
+        await ocr.read(b"image")
+    assert "install-perception" in str(exc.value)
+
+
+async def test_trocr_returns_the_decoded_line_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decoded line comes back trimmed, not padded with the model's spacing."""
+
+    class _Processor:
+        def __call__(self, image: Any, return_tensors: str = "pt") -> Any:
+            return SimpleNamespace(pixel_values="pixels")
+
+        def batch_decode(self, generated: Any, skip_special_tokens: bool = True) -> list[str]:
+            return ["  2x + 1  "]
+
+    class _Model:
+        def generate(self, pixels: Any, max_length: int = 0) -> str:
+            return "tokens"
+
+    ocr = TrOCROCR("models/ocr/trocr")
+
+    def _load() -> tuple[object, object]:
+        return _Model(), _Processor()
+
+    monkeypatch.setattr(ocr, "_ensure_loaded", _load)
+
+    class _Image:
+        def convert(self, mode: str) -> str:
+            return "rgb"
+
+        def __enter__(self) -> _Image:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "PIL.Image.open", lambda _buffer: _Image(), raising=False
+    )
+    assert await ocr.read(b"image") == "2x + 1"
+
+
+async def test_trocr_caches_the_loaded_model() -> None:
+    """_ensure_loaded builds once and hands the same objects back."""
+    ocr = TrOCROCR("models/ocr/trocr")
+    ocr._model = object()
+    ocr._processor = object()
+    first = ocr._ensure_loaded()
+    second = ocr._ensure_loaded()
+    assert first[0] is second[0]
+    assert first[1] is second[1]

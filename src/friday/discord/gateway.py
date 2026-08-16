@@ -248,6 +248,43 @@ def _hers(app: Any) -> Any:
     return existing
 
 
+async def _do_nickname(app: Any, content: str, guild: str) -> str | None:
+    """Rename someone, and remember what they are now called.
+
+    Remembering matters as much as doing: she refused this once with an invented
+    rule about the Queen's nickname, and a rename nobody records is one she
+    cannot honour in conversation five minutes later.
+    """
+    who, nick = admin.wants_nickname(content)
+    if not who or not nick:
+        return None
+    settings = getattr(app.state, "settings", None)
+    secret = getattr(settings, "discord_bot_token", None)
+    token = secret.get_secret_value() if secret is not None else ""
+    if not token or not guild:
+        return None
+
+    found = await admin.find_member(token, guild, _resolve_person(app, who))
+    if found is None:
+        return f"can't find anyone called {who} here 🤔"
+    user_id, shown = found
+    ok, message = await admin.set_nickname(token, guild, user_id, nick)
+    if ok:
+        _remember(app, f"{shown} is also called {nick} — use that nickname.")
+    return message
+
+
+def _remember(app: Any, fact: str) -> None:
+    """Store a durable fact, quietly. Failure here never blocks the reply."""
+    store = getattr(app.state, "long_term", None)
+    if store is None:
+        return
+    try:
+        store.add_fact(fact, "discord")
+    except Exception:  # noqa: BLE001 - remembering is a bonus, not the job
+        logger.warning("could not store fact")
+
+
 async def _do_roles(app: Any, content: str, guild: str) -> str | None:
     """Create and/or hand out a role, reporting exactly what happened."""
     role_name, who = admin.wants_role(content)
@@ -581,9 +618,9 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     mentioned = any(
         str(u.get("id")) == me for u in (message.get("mentions") or [])
     )
-    replying_to_her = me and str(
+    replying_to_her = bool(me) and str(
         ((message.get("referenced_message") or {}).get("author") or {}).get("id", "")
-    ) == me
+    ) == me and str((message.get("author") or {}).get("id") or "") != me
     if mentioned or replying_to_her:
         content = _strip_mention(content) or content
 
@@ -683,6 +720,9 @@ async def _compose(
         done = await _do_roles(app, content, guild_of(app, channel))
         if done:
             return done
+        renamed = await _do_nickname(app, content, guild_of(app, channel))
+        if renamed:
+            return renamed
 
     # "friday wanna talk" / "friday join vc". If the asker is already sitting in
     # a channel she goes there now rather than telling them to do the thing they
@@ -730,6 +770,7 @@ async def _compose(
     content = (
         content
         + banter.speaker_rule(is_owner or not owner, banter.queen_title())
+        + banter.GENDER_RULE
         + banter.NO_INVENTING
     )
     # Someone writing Polish gets Polish back without having to ask — the

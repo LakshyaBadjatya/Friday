@@ -137,6 +137,51 @@ async def find_member(token: str, guild: str, name: str) -> tuple[str, str] | No
     return (str(user.get("id")), str(shown)) if user.get("id") else None
 
 
+#: "call the second owner amster", "set the second owner's nickname to X", "nickname her Amster".
+NICKNAME = re.compile(
+    r"\b(?:set\s+)?(?:the\s+)?nick(?:name)?\s+(?:of\s+)?(?P<who>[@\w' ]{1,40}?)"
+    r"\s+(?:to|as)\s+(?P<nick>.{1,32}?)\s*$"
+    r"|\bcall\s+(?P<who2>[@\w' ]{1,40}?)\s+(?P<nick2>.{1,32}?)\s+from\s+now\b"
+    r"|\bnickname\s+(?P<who3>[@\w' ]{1,40}?)\s+(?P<nick3>.{1,32}?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def wants_nickname(text: str) -> tuple[str | None, str | None]:
+    """Parse "set X's nickname to Y" into ``(person, nickname)``."""
+    match = NICKNAME.search((text or "").strip())
+    if match is None:
+        return None, None
+    who = (match.group("who") or match.group("who2") or match.group("who3") or "")
+    nick = (match.group("nick") or match.group("nick2") or match.group("nick3") or "")
+    who = who.strip().lstrip("@").rstrip("'s").strip()
+    return (who or None), (nick.strip().strip("\"'") or None)
+
+
+async def set_nickname(
+    token: str, guild: str, user: str, nick: str
+) -> tuple[bool, str]:
+    """Change a member's server nickname.
+
+    Discord refuses this for the owner of the server no matter what permissions
+    the bot has — a server owner's nickname can only be changed by themselves —
+    so that case gets its own explanation rather than the generic one.
+    """
+    body = json.dumps({"nick": nick[:32]}).encode()
+    ok, data = await _call(
+        "PATCH", f"/guilds/{guild}/members/{user}", token, body
+    )
+    if ok:
+        return True, f"done — they're **{nick}** now 🐹"
+    code = (data or {}).get("code") if isinstance(data, dict) else None
+    if code == 50013:
+        return False, (
+            "discord won't let me — i need **Manage Nicknames**, and nobody can "
+            "rename the server owner but themselves 🧍"
+        )
+    return False, _explain(data, "couldn't change that nickname")
+
+
 async def _call(
     method: str, path: str, token: str, body: bytes | None
 ) -> tuple[bool, Any]:

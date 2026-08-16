@@ -497,6 +497,18 @@ def speaker_rule(is_owner: bool, title: str) -> str:
 #: and worst, reporting that the Queen "said something about loving me" when the
 #: Queen had said she was going for a walk. That last one is not a glitch, it is
 #: putting words in a real person's mouth to someone who trusts the answer.
+#: Who is what, so Polish verbs and English pronouns come out right. Polish
+#: marks gender on past-tense verbs, so this is not decoration there — the
+#: transcript showed her translating a message from the Queen as "he wants to
+#: know", which is simply wrong rather than merely impolite.
+GENDER_RULE = (
+    "\n\nLakshya (the owner, Boss) is male: he/him, and masculine verb forms in "
+    "any language that marks them. The Queen is female: she/her, and feminine "
+    "forms — in Polish that means zrobiła not zrobił, byłaś not byłeś. If you "
+    "genuinely do not know someone's gender, use they/them rather than guessing "
+    "from their name."
+)
+
 NO_INVENTING = (
     "\n\nNever report what someone said unless it is in the messages you can "
     "see. If asked what somebody said and you cannot see it, say you missed it. "

@@ -1,25 +1,32 @@
 """Where the marks are going.
 
 Every solved problem already carries a subject, a chapter, and an independent
-SymPy verdict. Rolled up per chapter, that is a real answer to "what should I
-revise" — built from what actually happened rather than from self-report.
+verification verdict. Rolled up per chapter, that is a real answer to "what
+should I revise" — built from what actually happened rather than from
+self-report.
 
-Mastery is the verified fraction: solves whose arithmetic checked out, over
-attempts. Weakest first, because that is the order to revise in.
+**What "mastery" means now.** :class:`~friday.vault.models.Verification` has
+three states — ``VERIFIED``, ``REFUTED``, ``NOT_VERIFIABLE`` — since
+:mod:`friday.vault.solver` learned to ask the drafting operator for the
+decisive equation of its own solution and check that, rather than the raw OCR
+statement. Where a chapter has verifiable solves at all, mastery is
+``verified / (verified + refuted)`` — ``NOT_VERIFIABLE`` solves are excluded
+from the denominator entirely, not counted as failures. That is the fix for
+the bug this module used to document as a caveat: a chapter of entirely
+correct chemistry (or any problem shape SymPy can't touch) no longer rolls up
+to ``mastery == 0.0`` just because nothing in it happened to be checkable.
 
-**A load-bearing caveat about what "verified" means.** :mod:`friday.vault.solver`
-only attempts SymPy verification on a bare single-variable equation; word
-problems, prose, geometry, chemistry, and multi-variable systems all fall
-through to ``Verification(ok=False)`` with no distinct "not verifiable" state
-— see that module's docstring. That means a chapter of entirely correct
-chemistry answers rolls up to ``mastery == 0.0`` and sorts as the weakest
-chapter, indistinguishable from a chapter that is genuinely being gotten
-wrong. This rollup reports the verified fraction exactly as specified — it
-does not paper over that gap — but a caller surfacing it (dashboard, revision
-queue) should not present ``mastery`` as "percent correct" without that
-caveat, and a truer metric would need a third, typed verification state
-("not attempted") distinct from "attempted and wrong," which does not exist
-in :class:`~friday.vault.models.Verification` today.
+**Where a chapter has no verifiable solves at all**, mastery falls back to
+ensemble agreement as the confidence signal instead of reporting a number with
+zero solves behind it: the fraction of that chapter's solves where the panel
+was unanimous, parsed from :attr:`~friday.vault.models.Consensus.agreement`
+(the ``"<votes>/<drafts>"`` string). ``basis`` on :class:`ChapterMastery`
+says which signal produced the number — ``"sympy"`` or ``"agreement"`` — so a
+caller never has to guess which kind of "mastery" it is looking at. Even
+``basis="agreement"`` is a genuinely weaker signal than an independent check —
+three operators agreeing is not the same as SymPy re-deriving the answer — so
+a caller surfacing this should still not present ``mastery`` as "percent
+correct" without knowing which basis produced it.
 
 **Locked items are excluded.** :meth:`~friday.vault.index.VaultIndex.list_items`
 defaults to hiding ``Privacy.LOCKED`` items, and this rollup keeps that
@@ -62,6 +69,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from friday.vault.index import VaultIndex
+from friday.vault.models import VerificationStatus
 
 _MAX_ITEMS = 10_000
 
@@ -73,8 +81,34 @@ class ChapterMastery(BaseModel):
     chapter: str
     attempts: int
     verified: int
+    verifiable_attempts: int
+    """How many of this chapter's solves could actually be checked at all
+    (``verified + refuted``) — the denominator ``mastery`` was computed over
+    when ``basis == "sympy"``. Zero when ``basis == "agreement"``."""
+    basis: str
+    """``"sympy"`` when verifiable solves existed and ``mastery`` is
+    ``verified / verifiable_attempts``; ``"agreement"`` when none did and
+    ``mastery`` falls back to the fraction of unanimous panel votes instead."""
     mastery: float
     last_seen: str
+
+
+def _is_unanimous(agreement: str) -> bool:
+    """Whether ``"<votes>/<drafts>"`` records every draft agreeing.
+
+    Malformed text or a zero-denominator ("0/0", from an empty panel) counts
+    as non-unanimous rather than raising — this is untrusted, model-adjacent
+    provenance by the time it reaches analytics, not a value this module
+    controls the shape of.
+    """
+    parts = agreement.split("/")
+    if len(parts) != 2:
+        return False
+    try:
+        votes, drafts = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return drafts > 0 and votes == drafts
 
 
 @dataclass
@@ -83,6 +117,8 @@ class _Bucket:
 
     attempts: int = 0
     verified: int = 0
+    refuted: int = 0
+    unanimous: int = 0
     last_seen: str = ""
 
 
@@ -122,23 +158,38 @@ class Analytics:
             )
             bucket = buckets.setdefault(key, _Bucket())
             bucket.attempts += 1
-            if solve.verification.ok:
+            status = solve.verification.status
+            if status is VerificationStatus.VERIFIED:
                 bucket.verified += 1
+            elif status is VerificationStatus.REFUTED:
+                bucket.refuted += 1
+            if _is_unanimous(solve.consensus.agreement):
+                bucket.unanimous += 1
             if item.created_at > bucket.last_seen:
                 bucket.last_seen = item.created_at
 
-        rows = [
-            ChapterMastery(
-                subject=subject,
-                chapter=chapter,
-                attempts=bucket.attempts,
-                verified=bucket.verified,
+        rows = []
+        for (subject, chapter), bucket in buckets.items():
+            verifiable = bucket.verified + bucket.refuted
+            if verifiable > 0:
+                basis = "sympy"
+                mastery = bucket.verified / verifiable
+            else:
+                basis = "agreement"
                 # Safe: a bucket only exists once `setdefault` has been
                 # followed by an increment, so `attempts` is never zero here.
-                mastery=bucket.verified / bucket.attempts,
-                last_seen=bucket.last_seen,
+                mastery = bucket.unanimous / bucket.attempts
+            rows.append(
+                ChapterMastery(
+                    subject=subject,
+                    chapter=chapter,
+                    attempts=bucket.attempts,
+                    verified=bucket.verified,
+                    verifiable_attempts=verifiable,
+                    basis=basis,
+                    mastery=mastery,
+                    last_seen=bucket.last_seen,
+                )
             )
-            for (subject, chapter), bucket in buckets.items()
-        ]
         rows.sort(key=lambda r: (r.mastery, -r.attempts, r.subject, r.chapter))
         return rows

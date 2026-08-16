@@ -9,6 +9,7 @@ from friday.vault.models import (
     CaptureSource,
     Classification,
     CloudinaryAsset,
+    Draft,
     ExamSession,
     ExamSessionStatus,
     Item,
@@ -16,6 +17,8 @@ from friday.vault.models import (
     Note,
     Privacy,
     Solve,
+    Verification,
+    VerificationStatus,
 )
 
 
@@ -135,11 +138,12 @@ def test_solve_round_trips_drafts_and_consensus() -> None:
                 "model_id": "claude",
                 "steps": ["step 1", "step 2"],
                 "final_answer": "9.8 m/s^2",
+                "equation": "10*v = 98",
                 "confidence": 0.8,
                 "latency_ms": 1200,
             }
         ],
-        verification={"engine": "sympy", "ok": True, "detail": "checks out"},
+        verification={"engine": "sympy", "status": "verified", "detail": "checks out"},
         consensus={"final_answer": "9.8 m/s^2", "agreement": "3/3", "judged": True},
         dissent=["ORACLE disagreed initially"],
         created_at="2026-08-16T10:00:00+00:00",
@@ -147,9 +151,15 @@ def test_solve_round_trips_drafts_and_consensus() -> None:
     restored = Solve.model_validate(solve.model_dump())
     assert restored.drafts[0].final_answer == "9.8 m/s^2"
     assert restored.drafts[0].steps == ["step 1", "step 2"]
+    assert restored.drafts[0].equation == "10*v = 98"
     assert restored.verification.ok is True
     assert restored.consensus.agreement == "3/3"
     assert restored.dissent == ["ORACLE disagreed initially"]
+
+
+def test_draft_equation_defaults_to_empty_string() -> None:
+    draft = Draft(operator="VISION", final_answer="9 V")
+    assert draft.equation == ""
 
 
 def test_note_round_trips_item_links() -> None:
@@ -222,3 +232,34 @@ def test_note_requires_created_at() -> None:
 def test_exam_session_requires_started_at() -> None:
     with pytest.raises(ValidationError):
         ExamSession(id="e4", owner_uid="u1")  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_ok"),
+    [
+        (VerificationStatus.VERIFIED, True),
+        (VerificationStatus.REFUTED, False),
+        (VerificationStatus.NOT_VERIFIABLE, False),
+    ],
+)
+def test_verification_status_round_trips_and_ok_reflects_only_verified(
+    status: VerificationStatus, expected_ok: bool
+) -> None:
+    verification = Verification(status=status, detail="d")
+    restored = Verification.model_validate(verification.model_dump())
+    assert restored.status is status
+    assert restored.ok is expected_ok
+
+
+def test_verification_defaults_to_not_verifiable() -> None:
+    assert Verification().status is VerificationStatus.NOT_VERIFIABLE
+    assert Verification().ok is False
+
+
+def test_verification_ok_is_not_a_settable_field() -> None:
+    """``ok`` is a read-only view onto ``status`` now — passing it as a
+    constructor kwarg must not silently flip the outcome (pydantic's default
+    ``extra="ignore"`` drops it, so status keeps its own default)."""
+    verification = Verification(status=VerificationStatus.REFUTED, ok=True)  # type: ignore[call-arg]
+    assert verification.status is VerificationStatus.REFUTED
+    assert verification.ok is False

@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from friday.providers.llm import LLMProvider, LLMResponse, Message, ToolSpec
+from friday.vault.models import VerificationStatus
 from friday.vault.solver import Solver, normalise_answer, verify_with_sympy
 
 
@@ -29,18 +30,22 @@ def test_normalise_answer_does_not_mangle_non_trailing_decimals() -> None:
 
 
 def test_sympy_confirms_correct_algebra() -> None:
-    assert verify_with_sympy("2*x + 4 = 10", "x = 3").ok is True
+    result = verify_with_sympy("2*x + 4 = 10", "x = 3")
+    assert result.ok is True
+    assert result.status is VerificationStatus.VERIFIED
 
 
 def test_sympy_catches_a_confident_wrong_answer() -> None:
     result = verify_with_sympy("2*x + 4 = 10", "x = 5")
     assert result.ok is False
+    assert result.status is VerificationStatus.REFUTED
     assert "3" in result.detail
 
 
 def test_sympy_declines_gracefully_on_prose() -> None:
     result = verify_with_sympy("explain photosynthesis", "it makes sugar")
     assert result.ok is False
+    assert result.status is VerificationStatus.NOT_VERIFIABLE
     assert "not verifiable" in result.detail
 
 
@@ -246,3 +251,101 @@ async def test_solve_carries_a_required_created_at_timestamp() -> None:
         item_ids=["i1"], ocr_text="x"
     )
     assert solve.created_at != ""
+
+
+# --- Change 2: verification runs against the chosen draft's own equation ---
+
+
+@pytest.mark.asyncio
+async def test_a_good_equation_with_a_right_answer_is_verified() -> None:
+    """The chosen draft's equation, not the raw OCR statement, is what gets
+    checked — this is what lets a raw word problem (no bare equation
+    anywhere in the OCR text) verify at all."""
+    llm = _ScriptedLLM(
+        [
+            '{"final_answer": "x = 3", "equation": "2*x + 4 = 10", "steps": []}',
+            '{"final_answer": "x = 3", "equation": "2*x + 4 = 10", "steps": []}',
+            '{"final_answer": "x = 3", "equation": "2*x + 4 = 10", "steps": []}',
+        ]
+    )
+    solve = await Solver(llm, operators=["VISION", "ORACLE", "GECKO"]).solve(
+        item_ids=["i1"],
+        ocr_text="Solve for x: 2x + 4 = 10, in volts.",
+    )
+    assert solve.verification.status is VerificationStatus.VERIFIED
+    assert solve.verification.ok is True
+
+
+@pytest.mark.asyncio
+async def test_a_good_equation_with_a_wrong_answer_is_refuted() -> None:
+    """The case that justifies the whole feature: a model that sets up the
+    equation correctly but then slips on the arithmetic must be caught, not
+    waved through as 'not verifiable' the way raw-OCR verification would."""
+    llm = _ScriptedLLM(
+        [
+            '{"final_answer": "x = 5", "equation": "2*x + 4 = 10", "steps": []}',
+            '{"final_answer": "x = 5", "equation": "2*x + 4 = 10", "steps": []}',
+            '{"final_answer": "x = 5", "equation": "2*x + 4 = 10", "steps": []}',
+        ]
+    )
+    solve = await Solver(llm, operators=["VISION", "ORACLE", "GECKO"]).solve(
+        item_ids=["i1"],
+        ocr_text="Solve for x: 2x + 4 = 10, in volts.",
+    )
+    assert solve.verification.status is VerificationStatus.REFUTED
+    assert solve.verification.ok is False
+    assert "3" in solve.verification.detail
+
+
+@pytest.mark.asyncio
+async def test_an_empty_equation_falls_back_to_the_raw_statement() -> None:
+    """A chosen draft that (honestly) supplies no equation — chemistry naming,
+    prose, and so on — falls back to attempting the raw OCR statement, same
+    as before this feature existed, and reports NOT_VERIFIABLE when that also
+    has nothing to parse."""
+    llm = _ScriptedLLM(
+        [
+            '{"final_answer": "it makes sugar", "equation": "", "steps": []}',
+            '{"final_answer": "it makes sugar", "equation": "", "steps": []}',
+            '{"final_answer": "it makes sugar", "equation": "", "steps": []}',
+        ]
+    )
+    solve = await Solver(llm, operators=["VISION", "ORACLE", "GECKO"]).solve(
+        item_ids=["i1"], ocr_text="explain photosynthesis"
+    )
+    assert solve.verification.status is VerificationStatus.NOT_VERIFIABLE
+    assert solve.verification.ok is False
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_equation_is_not_verifiable_and_never_crashes() -> None:
+    llm = _ScriptedLLM(
+        [
+            '{"final_answer": "x = 3", "equation": "2*x + ) = (( 10", "steps": []}',
+            '{"final_answer": "x = 3", "equation": "2*x + ) = (( 10", "steps": []}',
+            '{"final_answer": "x = 3", "equation": "2*x + ) = (( 10", "steps": []}',
+        ]
+    )
+    solve = await Solver(llm, operators=["VISION", "ORACLE", "GECKO"]).solve(
+        item_ids=["i1"], ocr_text="whatever the OCR saw"
+    )
+    assert solve.verification.status is VerificationStatus.NOT_VERIFIABLE
+
+
+@pytest.mark.asyncio
+async def test_an_equation_in_a_different_variable_than_the_answer_still_verifies() -> None:
+    """The operator may name the equation's variable differently from how it
+    phrases the final answer ("y" in the equation, "x = 3" in the answer) —
+    verification compares by value, not by symbol name, same as
+    ``verify_with_sympy`` already did for the raw-statement path."""
+    llm = _ScriptedLLM(
+        [
+            '{"final_answer": "x = 3", "equation": "2*y + 4 = 10", "steps": []}',
+            '{"final_answer": "x = 3", "equation": "2*y + 4 = 10", "steps": []}',
+            '{"final_answer": "x = 3", "equation": "2*y + 4 = 10", "steps": []}',
+        ]
+    )
+    solve = await Solver(llm, operators=["VISION", "ORACLE", "GECKO"]).solve(
+        item_ids=["i1"], ocr_text="whatever the OCR saw"
+    )
+    assert solve.verification.status is VerificationStatus.VERIFIED

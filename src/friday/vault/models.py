@@ -115,16 +115,54 @@ class Draft(BaseModel):
     model_id: str = ""
     steps: list[str] = Field(default_factory=list)
     final_answer: str = ""
+    equation: str = ""
+    """The decisive step of the solution as a single-variable equation in
+    plain ASCII SymPy can parse (e.g. ``"2*x + 4 = 10"``), or ``""`` when the
+    problem does not reduce to one. Requested from the operator itself, so
+    verifying against it is weaker than a truly independent derivation — see
+    :mod:`friday.vault.solver` for the honest limitation."""
     confidence: float = 0.0
     latency_ms: int = 0
+
+
+class VerificationStatus(StrEnum):
+    """What the independent check actually established.
+
+    ``ok: bool`` used to conflate "re-derived and disagreed" with "could not
+    be checked at all" — both fell to ``ok=False``, so a chapter of correct
+    but unverifiable answers (word problems, chemistry, prose) looked
+    indistinguishable from a chapter that was genuinely being gotten wrong.
+    This status makes the three outcomes distinct.
+    """
+
+    VERIFIED = "verified"
+    """Re-derived independently and agreed with the chosen draft."""
+
+    REFUTED = "refuted"
+    """Re-derived independently and DISAGREED with the chosen draft."""
+
+    NOT_VERIFIABLE = "not_verifiable"
+    """Could not be checked at all — no equation, unparseable, multi-variable,
+    or no solution. This is not a verdict on correctness either way."""
 
 
 class Verification(BaseModel):
     """The independent check on the drafts' arithmetic."""
 
     engine: str = "sympy"
-    ok: bool = False
+    status: VerificationStatus = VerificationStatus.NOT_VERIFIABLE
     detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """Read-only: ``True`` only when the check ran and agreed.
+
+        Kept so existing readers that only care about "did it check out"
+        do not need to learn the three-way status. It is deliberately not a
+        settable field — the status is the source of truth, ``ok`` is a view
+        onto it.
+        """
+        return self.status is VerificationStatus.VERIFIED
 
 
 class Consensus(BaseModel):

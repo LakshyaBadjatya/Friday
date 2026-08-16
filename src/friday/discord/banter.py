@@ -330,6 +330,33 @@ _ALREADY_IN_VC = (
 )
 
 
+#: "speak in vc", "say something in vc", "talk in the call".
+#: "speak in vc", "say hello in vc", "say happy birthday in the call". Whatever
+#: sits between the verb and "in vc" is the thing to say — an earlier version
+#: only allowed "something/it/that" there and missed the most natural phrasing
+#: of all, which is simply naming the words.
+_SPEAK_IN_VC = re.compile(
+    r"\b(?:speak|say|talk|tell\s+(?:them|her|him))\s+(?P<what>.{0,80}?)\s*"
+    r"(?:in|on|over|to)\s+(?:the\s+)?(?:vc|voice(?:\s+chat)?|call)\b",
+    re.IGNORECASE,
+)
+
+
+def wants_to_speak(text: str) -> bool:
+    """Whether she is being asked to say something out loud, not type it."""
+    return bool(_SPEAK_IN_VC.search(text or ""))
+
+
+def strip_speak(text: str) -> str:
+    """What she was actually asked to say, out of the instruction wrapping it."""
+    match = _SPEAK_IN_VC.search(text or "")
+    what = (match.group("what") or "").strip(" ,.") if match else ""
+    # Words like "something" are the instruction, not the content.
+    if what.lower() in {"", "something", "it", "that", "anything", "hi", "hey"}:
+        return "say a short hello out loud."
+    return f"Say this out loud, naturally: {what}"
+
+
 def wants_voice(text: str) -> bool:
     """Whether she is being invited into a voice channel."""
     return bool(_WANNA_TALK.search(text or ""))

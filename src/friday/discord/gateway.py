@@ -728,6 +728,18 @@ async def _compose(
         if renamed:
             return renamed
 
+    # "friday say something in vc" — she is already in the call, so the reply
+    # belongs out loud rather than in the text channel where nobody asked for it.
+    if banter.addressed(content) and banter.wants_to_speak(content):
+        call = next(iter(_voice(app).values()), None)
+        if call is None:
+            return "i'm not in a vc right now, Boss — get in one and i'll follow."
+        spoken = await _model(app, banter.strip_speak(content), channel)
+        if spoken:
+            await call.say(spoken)
+            return None  # said out loud; repeating it in text is noise
+        return None
+
     # "friday wanna talk" / "friday join vc". If the asker is already sitting in
     # a channel she goes there now rather than telling them to do the thing they
     # have plainly already done — which is what made her look broken.
@@ -768,6 +780,14 @@ async def _compose(
     elif banter.is_callback(content):
         content = f"{content}\n\n[{banter.CALLBACK_PROMPT}]"
 
+    # Checked on what the human actually wrote, *before* the rules are appended:
+    # GENDER_RULE contains "zrobiła" and "byłaś" as examples, so running the
+    # detector afterwards saw Polish in every single message and pinned the
+    # session to it permanently. "friday talk in english" worked for exactly one
+    # reply and was overridden on the next turn by my own prompt text.
+    if lang.looks_polish(content):
+        lang.set_for(app.state, discord_session(app), "pl")
+
     role = _who_is(app, asker)
     content = (
         content
@@ -779,12 +799,6 @@ async def _compose(
         + banter.NOT_DEFENSIVE
         + banter.NO_INVENTING
     )
-    # Someone writing Polish gets Polish back without having to ask — the
-    # transcript showed her answering a Polish question in English, which reads
-    # as not having understood it.
-    if lang.looks_polish(content):
-        lang.set_for(app.state, discord_session(app), "pl")
-
     from friday.api.routes_siri import _MAX_QUERY, _produce  # noqa: PLC0415
 
     # cast: _produce only ever touches ``.app.state``, so the stand-in satisfies

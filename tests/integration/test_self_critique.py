@@ -204,7 +204,14 @@ async def test_clarify_turn_is_not_critiqued(
     synth_llm = FakeLLM(responses=[])  # clarify is deterministic; no synth call
     spy = _RecordingLLM()
     orch = _orchestrator(synth_llm, SelfCritic(spy))  # type: ignore[arg-type]
-    state = GraphState(session_id="c6", user_input="the blue one over there")
+    # Gibberish, because "the blue one over there" no longer clarifies: the
+    # router used to downgrade anything it did not recognise to CLARIFY, which
+    # is what produced "i want to get this right rather than guess" instead of
+    # an answer. Ordinary-but-unmatched wording is now answered conversationally
+    # and CLARIFY is reserved for input with nothing in it to answer. The
+    # property under test — a clarify turn is never critiqued — is unchanged, so
+    # it just needs a turn that still clarifies.
+    state = GraphState(session_id="c6", user_input="!!! ??? ###")
 
     out = await orch.handle(state)
 

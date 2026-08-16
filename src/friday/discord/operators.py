@@ -40,6 +40,7 @@ from typing import Any
 
 import anyio
 
+from friday.discord import emblem
 from friday.logging import get_logger
 from friday.roster import ROSTER
 
@@ -180,6 +181,11 @@ async def speak(
     if hook is None:
         return ""
     hook_id, hook_token = hook
+    # Discord fetches the avatar itself, so this has to be a public URL. With
+    # no public base it stays empty and the operator posts under its name with
+    # the default face — plainer, not broken.
+    if not avatar:
+        avatar = emblem.avatar_url(emblem.public_base(), getattr(operator, "name", ""))
     payload: dict[str, Any] = {
         "content": text[:1900],
         "username": str(getattr(operator, "name", "") or "OPERATOR")[:80],

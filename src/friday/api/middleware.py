@@ -48,6 +48,15 @@ from friday.security.rbac import AccessPolicy
 #: its own callers by verifying that signature against the application's public
 #: key, and denies on every failure path.
 _OPEN_PATHS = frozenset({"/health", "/telegram/webhook", "/discord/interactions"})
+#: Open by prefix rather than exact match. The operator emblems are fetched by
+#: Discord's own CDN, which carries no credentials and never will; they are
+#: generated images of nine circles, with nothing to protect.
+_OPEN_PREFIXES = ("/discord/emblem/",)
+
+
+def _is_open(path: str) -> bool:
+    """Whether a path is reachable without authentication."""
+    return path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES)
 
 #: A clock returns a monotonically increasing seconds value.
 Clock = Callable[[], float]
@@ -94,7 +103,7 @@ class AuthMiddleware:
             return
 
         request = Request(scope, receive=receive)
-        if request.url.path in _OPEN_PATHS:
+        if _is_open(request.url.path):
             await self._app(scope, receive, send)
             return
 
@@ -177,7 +186,7 @@ class RateLimitMiddleware:
             return
 
         request = Request(scope, receive=receive)
-        if request.url.path in _OPEN_PATHS:
+        if _is_open(request.url.path):
             await self._app(scope, receive, send)
             return
 

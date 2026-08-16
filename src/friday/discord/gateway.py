@@ -923,8 +923,14 @@ async def _compose(
 
     # cast: _produce only ever touches ``.app.state``, so the stand-in satisfies
     # it at runtime; the annotation says Request because every other caller is one.
+    # The operator's name goes to the anchor, not into the prompt text. The
+    # anchor refuses persona switches asked for in a message — correctly, that
+    # is the jailbreak shape — so the only way for EDITH to answer as EDITH is
+    # for the router to say so out of band.
     _speech, raw, _mode, _action = await _produce(
-        cast("Any", _GatewayRequest(app)), content[:_MAX_QUERY], discord_session(app)
+        cast("Any", _GatewayRequest(app)), content[:_MAX_QUERY],
+        discord_session(app),
+        persona=str(getattr(operator, "name", "") or ""),
     )
     return raw or None
 

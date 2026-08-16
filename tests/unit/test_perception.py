@@ -67,9 +67,32 @@ def _fail_import_of(*modules: str) -> Any:
     ],
 )
 def test_module_import_requires_no_heavy_lib(module: str) -> None:
-    importlib.import_module(module)
-    for heavy in ("cv2", "ultralytics", "pytesseract", "PIL", "mss", "pyperclip"):
-        assert heavy not in sys.modules, f"{module} pulled in heavy lib {heavy}"
+    """Importing the module must not drag a heavy library in with it.
+
+    The heavy libraries and the module under test are both evicted from
+    ``sys.modules`` first, so this asks what it means to ask. Checking the live
+    ``sys.modules`` alone only held while no earlier test in the run had
+    imported one of them — it passed by luck of alphabetical ordering, and any
+    unrelated test that touched Pillow turned it red.
+    """
+    heavy_libs = ("cv2", "ultralytics", "pytesseract", "PIL", "mss", "pyperclip")
+
+    def _owned_by(names: tuple[str, ...]) -> list[str]:
+        return [
+            loaded
+            for loaded in list(sys.modules)
+            if loaded in names or any(loaded.startswith(f"{n}.") for n in names)
+        ]
+
+    evicted = {name: sys.modules.pop(name) for name in _owned_by(heavy_libs)}
+    for name in _owned_by((module,)):
+        del sys.modules[name]
+    try:
+        importlib.import_module(module)
+        for heavy in heavy_libs:
+            assert heavy not in sys.modules, f"{module} pulled in heavy lib {heavy}"
+    finally:
+        sys.modules.update(evicted)
 
 
 # --------------------------------------------------------------------------- #

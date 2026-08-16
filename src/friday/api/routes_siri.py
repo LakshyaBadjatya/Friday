@@ -239,7 +239,7 @@ def _known_facts(request: Request) -> str:
 
 async def _fast_answer(
     request: Request, query: str, history: list[Any], deadline: float,
-    session_id: str = _DEFAULT_SESSION,
+    session_id: str = _DEFAULT_SESSION, operator: str = "",
 ) -> str | None:
     """A single persona'd LLM call — the low-latency voice path.
 
@@ -295,7 +295,7 @@ async def _fast_answer(
                     # sent earlier in the session lives in that history, and
                     # whatever comes last carries the most weight — so the last
                     # word is always hers.
-                    Message(role="system", content=siri_guard.ANCHOR),
+                    Message(role="system", content=siri_guard.anchor_for(operator)),
                     Message(role="user", content=_augment_teaching(query)),
                 ]
             )
@@ -595,7 +595,9 @@ async def siri_ask(request: Request) -> Any:
     return _respond(speech, raw=raw, mode=mode, want_json=want_json, action=action)
 
 
-async def _produce(request: Request, query: str, session_id: str) -> Answer:
+async def _produce(
+    request: Request, query: str, session_id: str, *, persona: str = ""
+) -> Answer:
     """Run one turn through every branch and return the answer, transport-free.
 
     This is the whole assistant: the drill loop, reminders, arithmetic, distance,
@@ -656,7 +658,7 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
     # thing under attack — a hijacked one introduces itself as whatever it was
     # told to be — so "who are you" is not a question it gets to answer. No
     # prompt rewrites a string literal.
-    identity = siri_guard.identity_reply(query)
+    identity = siri_guard.identity_reply_for(persona, query)
     if identity is not None:
         return _reply(identity, raw=identity, mode="identity", record=False)
 
@@ -848,7 +850,9 @@ async def _produce(request: Request, query: str, session_id: str) -> Answer:
     settings = getattr(request.app.state, "settings", None)
     if getattr(settings, "siri_fast_path", True):
         try:
-            fast = await _fast_answer(request, query, history, deadline, session_id)
+            fast = await _fast_answer(
+                request, query, history, deadline, session_id, persona
+            )
         except TimeoutError:
             # No budget left to also try the slower orchestrator — say so now,
             # while Siri is still listening, rather than answering into silence.

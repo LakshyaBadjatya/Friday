@@ -34,8 +34,8 @@ from datetime import datetime
 from typing import Any
 
 import anyio
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 
 from friday.api.routes_siri import _MAX_QUERY, _produce, _session_id
 from friday.logging import get_logger
@@ -356,3 +356,24 @@ def _spoken(payload: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return name
+
+
+@router.get("/discord/emblem/{name}.png", response_model=None)
+async def operator_emblem(name: str) -> Response:
+    """The arc reactor for one operator, as a PNG.
+
+    Discord fetches this itself when a webhook message names an ``avatar_url``,
+    so it is served unauthenticated — it is a generated image of a circle, and
+    the CDN has no credentials to present anyway. Cached hard: the drawing is
+    deterministic and never changes for a given name.
+    """
+    from friday.discord import emblem  # noqa: PLC0415
+
+    data = emblem.render(name)
+    if data is None:
+        raise HTTPException(status_code=404, detail="no such operator")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=604800, immutable"},
+    )

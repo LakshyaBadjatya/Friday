@@ -1,6 +1,7 @@
-"""``/vault`` — the flagged vault REST API (core upload surface, Task 7).
+"""``/vault`` — the flagged vault REST API (Task 7: upload surface + Task 8:
+solver/notes/search/analytics/exam).
 
-Six surfaces, all gated behind ``FRIDAY_ENABLE_VAULT`` (read off the startup
+All surfaces are gated behind ``FRIDAY_ENABLE_VAULT`` (read off the startup
 settings on ``app.state``); when the flag is off every one is ``404`` so the
 feature simply does not exist for callers (mirroring ``/study`` and
 ``/perception``):
@@ -16,10 +17,28 @@ feature simply does not exist for callers (mirroring ``/study`` and
 * ``GET    /vault/items/{id}`` -> one item.
 * ``DELETE /vault/items/{id}`` -> deletes the Cloudinary asset, then the index row.
 * ``GET    /vault/quota`` -> the owner's storage :class:`~friday.vault.quota.Usage`.
-
-Solver, notes, search, analytics and exam routes are NOT part of this surface —
-they are wired in a later task; this module only ever imports the vault's
-models/index/cloudinary/quota primitives.
+* ``POST   /vault/items/{id}/solve`` -> re-runs :class:`~friday.vault.solver.Solver`
+  over one item's extracted text and persists the resulting
+  :class:`~friday.vault.models.Solve`. ``403`` when the item is locked — a
+  locked capture's text must never reach a model provider, so this is checked
+  before the solver is ever called, not left to the solver to enforce.
+* ``POST   /vault/notes`` ``{item_ids, prompt?}`` -> writes a
+  :class:`~friday.vault.models.Note` over the given items via
+  :class:`~friday.vault.notes.NoteWriter` (which itself drops locked/missing
+  sources before any model call — see that module).
+* ``GET    /vault/notes`` / ``GET /vault/notes/{id}`` -> the owner's notes.
+* ``GET    /vault/search?q=&limit=`` -> :class:`~friday.vault.search.VaultSearch`
+  hits (locked items are excluded by construction — see that module).
+* ``GET    /vault/analytics`` -> the owner's chapter mastery rollup from
+  :class:`~friday.vault.analytics.Analytics` (also excludes locked items).
+* ``POST   /vault/exam/start`` ``{paper_item_ids, duration_s?}`` -> opens a timed
+  :class:`~friday.vault.exam.ExamRunner` session.
+* ``POST   /vault/exam/{session_id}/grade`` ``{answer_item_ids}`` -> marks the
+  session. ``404`` (never ``403``) when the session is unknown or belongs to
+  another owner — :meth:`~friday.vault.exam.ExamRunner.grade` raises
+  ``KeyError`` for both cases deliberately, so a caller cannot use the status
+  code to probe for another owner's session ids; this route preserves that by
+  mapping both to the same 404.
 
 **The upload handshake is the security-critical part.** The phone never holds the
 Cloudinary API secret: ``sign`` hands it a signature scoped to one upload, and
@@ -59,12 +78,18 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
+from friday.errors import ProviderError
 from friday.logging import get_logger
+from friday.vault.analytics import Analytics
 from friday.vault.cloudinary import CloudinaryProvider
+from friday.vault.exam import ExamRunner
 from friday.vault.firestore_index import FirestoreIndexError
 from friday.vault.index import VaultIndex
 from friday.vault.models import CaptureSource, CloudinaryAsset, Item, ItemStatus, Privacy
+from friday.vault.notes import NoteWriter
 from friday.vault.quota import QuotaGuard
+from friday.vault.search import VaultSearch
+from friday.vault.solver import Solver
 
 logger = get_logger("friday.api.routes_vault")
 
@@ -82,6 +107,26 @@ class SignRequest(BaseModel):
     privacy: Privacy = Privacy.PRIVATE
     space: str = "private"
     device_id: str = Field(default="", max_length=200)
+
+
+class NoteRequest(BaseModel):
+    """JSON body for ``POST /vault/notes`` — ``item_ids`` is required."""
+
+    item_ids: list[str]
+    prompt: str = ""
+
+
+class ExamStartRequest(BaseModel):
+    """JSON body for ``POST /vault/exam/start`` — ``paper_item_ids`` is required."""
+
+    paper_item_ids: list[str]
+    duration_s: int = 0
+
+
+class ExamGradeRequest(BaseModel):
+    """JSON body for ``POST /vault/exam/{session_id}/grade``."""
+
+    answer_item_ids: list[str]
 
 
 def _vault_enabled(request: Request) -> bool:
@@ -142,6 +187,44 @@ def _get_quota(request: Request) -> QuotaGuard:
     if not isinstance(quota, QuotaGuard):  # pragma: no cover - startup guard
         raise RuntimeError("vault quota guard is not initialized on app.state")
     return quota
+
+
+def _get_solver(request: Request) -> Solver:
+    """Pull the process-wide :class:`Solver` off ``app.state``."""
+    solver = getattr(request.app.state, "vault_solver", None)
+    if solver is None:  # pragma: no cover - startup guard
+        raise RuntimeError("vault solver is not initialized on app.state")
+    return solver  # type: ignore[no-any-return]
+
+
+def _get_notes(request: Request) -> NoteWriter:
+    """Pull the process-wide :class:`NoteWriter` off ``app.state``."""
+    notes = getattr(request.app.state, "vault_notes", None)
+    if notes is None:  # pragma: no cover - startup guard
+        raise RuntimeError("vault note writer is not initialized on app.state")
+    return notes  # type: ignore[no-any-return]
+
+
+def _get_search(request: Request) -> VaultSearch:
+    """Pull the process-wide :class:`VaultSearch` off ``app.state``."""
+    search = getattr(request.app.state, "vault_search", None)
+    if search is None:  # pragma: no cover - startup guard
+        raise RuntimeError("vault search is not initialized on app.state")
+    return search  # type: ignore[no-any-return]
+
+
+def _get_exam(request: Request) -> ExamRunner:
+    """Pull the process-wide :class:`ExamRunner` off ``app.state``."""
+    exam = getattr(request.app.state, "vault_exam", None)
+    if exam is None:  # pragma: no cover - startup guard
+        raise RuntimeError("vault exam runner is not initialized on app.state")
+    return exam  # type: ignore[no-any-return]
+
+
+def _provider_error(exc: ProviderError) -> JSONResponse:
+    """Map a model-provider failure to a clean 502 rather than a 500 traceback."""
+    logger.warning("vault provider error", extra={"error": str(exc)})
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
 async def _validate(
@@ -364,3 +447,209 @@ async def get_quota(request: Request) -> JSONResponse:
     except FirestoreIndexError as exc:
         return _index_unavailable(exc)
     return JSONResponse(status_code=200, content=usage.model_dump())
+
+
+@router.post("/vault/items/{item_id}/solve", response_model=None)
+async def solve_item(request: Request, item_id: str) -> JSONResponse:
+    """Re-run the always-full ensemble on one item and persist the result.
+
+    404 when disabled or the item is unknown to (or not owned by) the caller.
+    403 when the item is :attr:`~friday.vault.models.Privacy.LOCKED`
+    (``may_leave_for_model()`` is ``False``) — checked here, before the solver
+    is ever invoked, so a locked capture's extracted text never reaches a
+    model provider. The solver itself never raises on a provider failure (a
+    dead operator just drops out of the panel — see
+    :mod:`friday.vault.solver`), so no provider-error handling is needed here.
+    """
+    if not _vault_enabled(request):
+        return _disabled()
+    owner_uid = _owner_uid(request)
+    index = _get_index(request)
+    try:
+        item = index.get_item(owner_uid, item_id)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    if item is None:
+        return _not_found()
+    if not item.may_leave_for_model():
+        return JSONResponse(status_code=403, content={"detail": "item is locked"})
+
+    solver = _get_solver(request)
+    ocr_text = item.ocr_text.strip() or item.caption.strip()
+    solve = await solver.solve(item_ids=[item_id], ocr_text=ocr_text)
+
+    item.solve_id = solve.id
+    try:
+        index.put_solve(solve)
+        index.put_item(item)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    return JSONResponse(status_code=200, content=solve.model_dump(mode="json"))
+
+
+@router.post("/vault/notes", response_model=None)
+async def create_note(request: Request) -> JSONResponse:
+    """Write a note over ``item_ids``. 404 when disabled, 422 without ``item_ids``.
+
+    Missing or locked source items are silently dropped by
+    :class:`~friday.vault.notes.NoteWriter` before any model call; when none
+    survive, a minimal (empty) note is still created and persisted rather than
+    the call failing — see that module's docstring. A provider failure inside
+    note generation also never raises (it degrades to a bare-bones note), so
+    no provider-error handling is needed here.
+    """
+    if not _vault_enabled(request):
+        return _disabled()
+    body, error = await _validate(request, NoteRequest)
+    if error is not None:
+        return error
+    assert isinstance(body, NoteRequest)
+
+    owner_uid = _owner_uid(request)
+    notes = _get_notes(request)
+    try:
+        note = await notes.write(owner_uid, body.item_ids, prompt=body.prompt)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    return JSONResponse(status_code=200, content=note.model_dump(mode="json"))
+
+
+@router.get("/vault/notes", response_model=None)
+async def list_notes(request: Request, limit: int = 100) -> JSONResponse:
+    """List the caller's notes. 404 when disabled."""
+    if not _vault_enabled(request):
+        return _disabled()
+    owner_uid = _owner_uid(request)
+    index = _get_index(request)
+    try:
+        notes = index.list_notes(owner_uid, limit=limit)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    return JSONResponse(
+        status_code=200,
+        content={"notes": [n.model_dump(mode="json") for n in notes], "count": len(notes)},
+    )
+
+
+@router.get("/vault/notes/{note_id}", response_model=None)
+async def get_note(request: Request, note_id: str) -> JSONResponse:
+    """One note. 404 when disabled, unknown, or owned by another caller.
+
+    ``VaultIndex.get_note`` is scoped to ``(owner_uid, note_id)`` — the same
+    ownership-by-query guarantee the item routes rely on — so a note id that
+    exists but belongs to a different owner simply misses and 404s.
+    """
+    if not _vault_enabled(request):
+        return _disabled()
+    owner_uid = _owner_uid(request)
+    index = _get_index(request)
+    try:
+        note = index.get_note(owner_uid, note_id)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    if note is None:
+        return _not_found()
+    return JSONResponse(status_code=200, content=note.model_dump(mode="json"))
+
+
+@router.get("/vault/search", response_model=None)
+async def search_vault(request: Request, q: str = "", limit: int = 20) -> JSONResponse:
+    """Search the caller's vault. 404 when disabled.
+
+    Locked items never appear in the results — see
+    :mod:`friday.vault.search` for why that guarantee holds even when a
+    vector store is configured.
+    """
+    if not _vault_enabled(request):
+        return _disabled()
+    owner_uid = _owner_uid(request)
+    search = _get_search(request)
+    try:
+        hits = await search.search(owner_uid, q, limit=limit)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    return JSONResponse(
+        status_code=200,
+        content={"hits": [h.model_dump() for h in hits], "count": len(hits)},
+    )
+
+
+@router.get("/vault/analytics", response_model=None)
+async def get_analytics(request: Request) -> JSONResponse:
+    """The caller's per-chapter mastery rollup. 404 when disabled.
+
+    Built fresh over the shared index on every call — :class:`Analytics` is a
+    thin, stateless wrapper with no other collaborators, so it needs no seam
+    on ``app.state``. Locked items are excluded — see
+    :mod:`friday.vault.analytics`.
+    """
+    if not _vault_enabled(request):
+        return _disabled()
+    owner_uid = _owner_uid(request)
+    index = _get_index(request)
+    try:
+        rows = Analytics(index).rollup(owner_uid)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    return JSONResponse(
+        status_code=200,
+        content={"chapters": [r.model_dump() for r in rows], "count": len(rows)},
+    )
+
+
+@router.post("/vault/exam/start", response_model=None)
+async def start_exam(request: Request) -> JSONResponse:
+    """Open a timed exam session over an already-photographed paper.
+
+    404 when disabled, 422 without ``paper_item_ids``. Sessions live in the
+    :class:`~friday.vault.exam.ExamRunner`'s own in-process dict, not the
+    index — see that module's docstring for why that is deliberate — so no
+    ``FirestoreIndexError`` handling applies here.
+    """
+    if not _vault_enabled(request):
+        return _disabled()
+    body, error = await _validate(request, ExamStartRequest)
+    if error is not None:
+        return error
+    assert isinstance(body, ExamStartRequest)
+
+    owner_uid = _owner_uid(request)
+    exam = _get_exam(request)
+    session = exam.start(owner_uid, body.paper_item_ids, duration_s=body.duration_s)
+    return JSONResponse(status_code=200, content=session.model_dump(mode="json"))
+
+
+@router.post("/vault/exam/{session_id}/grade", response_model=None)
+async def grade_exam(request: Request, session_id: str) -> JSONResponse:
+    """Mark the answer script against the paper. 404 when disabled or malformed body 422s.
+
+    404 (never 403) when ``session_id`` is unknown or belongs to a different
+    owner: :meth:`~friday.vault.exam.ExamRunner.grade` raises ``KeyError`` for
+    both cases on purpose, so a caller cannot use the status code to probe for
+    another owner's session ids — this route preserves that by mapping both
+    to the same 404 rather than distinguishing them. 422 when nothing in the
+    paper/answer items resolves to gradable text (every item missing, locked,
+    or textless). 502 on a model-provider failure — the one case
+    :meth:`ExamRunner.grade` deliberately lets propagate rather than
+    swallowing, so it is mapped here instead of leaking a 500.
+    """
+    if not _vault_enabled(request):
+        return _disabled()
+    body, error = await _validate(request, ExamGradeRequest)
+    if error is not None:
+        return error
+    assert isinstance(body, ExamGradeRequest)
+
+    owner_uid = _owner_uid(request)
+    exam = _get_exam(request)
+    try:
+        session = await exam.grade(owner_uid, session_id, body.answer_item_ids)
+    except KeyError:
+        return JSONResponse(status_code=404, content={"detail": "exam session not found"})
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    except ProviderError as exc:
+        return _provider_error(exc)
+    except FirestoreIndexError as exc:
+        return _index_unavailable(exc)
+    return JSONResponse(status_code=200, content=session.model_dump(mode="json"))

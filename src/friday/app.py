@@ -218,9 +218,13 @@ from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
 from friday.tools.weather import WeatherTool
 from friday.tools.web_search import WebSearchTool
 from friday.vault.cloudinary import CloudinaryProvider, CloudinarySigner, FakeCloudinary
+from friday.vault.exam import ExamRunner
 from friday.vault.firestore_index import FirestoreVaultIndex
 from friday.vault.index import SQLiteVaultIndex, VaultIndex
+from friday.vault.notes import NoteWriter
 from friday.vault.quota import QuotaGuard
+from friday.vault.search import VaultSearch
+from friday.vault.solver import Solver
 from friday.voice.capture import MicCapture
 from friday.voice.emotion_stream import EmotionStreamAnalyzer, feed_analyzer
 from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity
@@ -2554,16 +2558,17 @@ def _wire_perception(app: FastAPI, settings: Settings) -> None:
     app.state.perception = _build_perception_service()
 
 
-def _wire_vault(app: FastAPI, settings: Settings) -> None:
-    """Build and stash the vault's index + Cloudinary provider + quota guard.
+def _wire_vault(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
+    """Build and stash the vault's index, Cloudinary provider, quota guard, and
+    the solver/notes/search/exam seams that run over the shared LLM.
 
-    The ``/vault`` routes read ``app.state.vault_index``, ``app.state.vault_cloudinary``
-    and ``app.state.vault_quota``. Building it only when ``enable_vault`` is set keeps
-    the offline default untouched (the routes self-guard on the flag and 404 when
-    off) and constructs no seam otherwise. Unlike the other Tier-2 ``_wire_*``
-    functions this does not read from the shared :class:`AppRuntime` — the vault is
-    a self-contained module with its own index/provider/quota, and the solver
-    (which *would* need the shared LLM) is wired in a later task.
+    The ``/vault`` routes read ``app.state.vault_index``, ``app.state.vault_cloudinary``,
+    ``app.state.vault_quota``, ``app.state.vault_solver``, ``app.state.vault_notes``,
+    ``app.state.vault_search`` and ``app.state.vault_exam`` (``Analytics`` needs
+    none of this — it is a stateless wrapper the ``/vault/analytics`` route builds
+    fresh over ``vault_index`` on every call). Building any of it only when
+    ``enable_vault`` is set keeps the offline default untouched (the routes
+    self-guard on the flag and 404 when off) and constructs no seam otherwise.
 
     Index backend: ``settings.vault_index_backend == "sqlite"`` selects the
     local-first :class:`~friday.vault.index.SQLiteVaultIndex` (test/offline
@@ -2576,6 +2581,18 @@ def _wire_vault(app: FastAPI, settings: Settings) -> None:
     configured; otherwise the deterministic in-memory
     :class:`~friday.vault.cloudinary.FakeCloudinary` — this fallback is what keeps
     the vault's integration tests fully offline (no network, no credentials).
+
+    ``llm``: the same live LLM the rest of the app uses (matching how
+    :func:`_wire_ensemble` is handed it), so the always-full solver panel, note
+    writing, and exam grading are free by default and never construct a second
+    provider seam. :class:`~friday.vault.solver.Solver`'s roster is
+    ``settings.vault_solver_operators`` (comma-separated code-names).
+    :class:`~friday.vault.notes.NoteWriter`'s optional RAG/study fan-out reuses
+    whatever ``_wire_rag``/``_wire_study`` already stashed on ``app.state``
+    (``None`` when that surface is off — ``_wire_vault`` runs after both in
+    ``_install_runtime``). :class:`~friday.vault.search.VaultSearch` has no
+    vector store wired yet (keyword-only search); nothing on ``app.state`` is
+    shaped for it today, so this passes ``None`` rather than inventing one.
     """
     if not settings.enable_vault:
         return
@@ -2600,6 +2617,16 @@ def _wire_vault(app: FastAPI, settings: Settings) -> None:
         quota_gb=settings.vault_quota_gb,
         daily_solve_cap=settings.vault_daily_solve_cap,
     )
+    operators = [op.strip() for op in settings.vault_solver_operators.split(",") if op.strip()]
+    app.state.vault_solver = Solver(llm, operators=operators)
+    app.state.vault_notes = NoteWriter(
+        index=index,
+        llm=llm,
+        ingestor=getattr(app.state, "rag_ingestor", None),
+        study_store=getattr(app.state, "study_store", None),
+    )
+    app.state.vault_search = VaultSearch(index, vector_store=None)
+    app.state.vault_exam = ExamRunner(index=index, llm=llm)
 
 
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
@@ -2706,7 +2733,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_system(app, settings, runtime)
     _wire_n8n(app, settings, runtime)
     _wire_perception(app, settings)
-    _wire_vault(app, settings)
+    _wire_vault(app, settings, runtime.llm)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
     _wire_plugins(app, settings, runtime)

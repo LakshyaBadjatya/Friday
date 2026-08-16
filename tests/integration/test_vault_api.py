@@ -33,9 +33,24 @@ from fastapi.testclient import TestClient
 
 from friday.api.routes_vault import _LOCAL_OWNER
 from friday.config import Settings, get_settings
+from friday.providers.llm import FakeLLM, LLMResponse
+from friday.vault.exam import ExamRunner
 from friday.vault.firestore_index import FirestoreIndexError
-from friday.vault.models import CaptureSource, Classification, Item, ItemStatus, Privacy
+from friday.vault.models import (
+    CaptureSource,
+    Classification,
+    Consensus,
+    Item,
+    ItemStatus,
+    Note,
+    Privacy,
+    Solve,
+    Verification,
+    VerificationStatus,
+)
+from friday.vault.notes import NoteWriter
 from friday.vault.quota import QuotaGuard
+from friday.vault.solver import Solver
 
 
 def _settings(**overrides: object) -> Settings:
@@ -491,3 +506,419 @@ def test_vault_index_outage_surfaces_as_503(monkeypatch: pytest.MonkeyPatch) -> 
         assert client.delete("/vault/items/x").status_code == 503
         assert client.post("/vault/sign", json={}).status_code == 503
         assert client.post("/vault/items/x/commit", json={}).status_code == 503
+
+
+# --------------------------------------------------------------------------- #
+# Disabled -> 404 on every Task 8 surface too
+# --------------------------------------------------------------------------- #
+def test_vault_disabled_solve_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.post("/vault/items/x/solve")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "vault disabled"
+
+
+def test_vault_disabled_notes_post_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.post("/vault/notes", json={"item_ids": []})
+    assert resp.status_code == 404
+
+
+def test_vault_disabled_notes_list_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.get("/vault/notes")
+    assert resp.status_code == 404
+
+
+def test_vault_disabled_note_get_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.get("/vault/notes/x")
+    assert resp.status_code == 404
+
+
+def test_vault_disabled_search_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.get("/vault/search?q=x")
+    assert resp.status_code == 404
+
+
+def test_vault_disabled_analytics_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.get("/vault/analytics")
+    assert resp.status_code == 404
+
+
+def test_vault_disabled_exam_start_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.post("/vault/exam/start", json={"paper_item_ids": []})
+    assert resp.status_code == 404
+
+
+def test_vault_disabled_exam_grade_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _disabled_settings()) as client:
+        resp = client.post("/vault/exam/x/grade", json={"answer_item_ids": []})
+    assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# solve
+# --------------------------------------------------------------------------- #
+_DRAFT_REPLY = (
+    '{"subject": "algebra", "statement": "2x+4=10", "latex": "", '
+    '"steps": ["subtract 4", "divide by 2"], "final_answer": "x = 3", '
+    '"equation": "2*x + 4 = 10", "confidence": 0.9}'
+)
+
+
+def test_vault_solve_persists_and_returns_solve(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_item(
+            Item(
+                id="i1",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                ocr_text="2*x + 4 = 10",
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+        # All three operators agree, so no judge call is spent -- three drafts is
+        # exactly enough script for the whole panel.
+        client.app.state.vault_solver = Solver(
+            FakeLLM([LLMResponse(text=_DRAFT_REPLY) for _ in range(3)]),
+            operators=["VISION", "ORACLE", "GECKO"],
+        )
+
+        resp = client.post("/vault/items/i1/solve")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["consensus"]["final_answer"] == "x = 3"
+        assert body["verification"]["status"] == "verified"
+
+        item = client.get("/vault/items/i1").json()
+        assert item["solve_id"] == body["id"]
+
+
+def test_vault_solve_locked_item_is_403_and_never_calls_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_item(
+            Item(
+                id="i1",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                privacy=Privacy.LOCKED,
+                ocr_text="2*x + 4 = 10",
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+        # An empty script: if the route ever reached the solver, the very first
+        # provider call would raise -- proving the 403 is returned before that.
+        client.app.state.vault_solver = Solver(FakeLLM([]), operators=["VISION"])
+
+        resp = client.post("/vault/items/i1/solve")
+        assert resp.status_code == 403
+
+        item = client.get("/vault/items/i1").json()
+        assert item["solve_id"] is None
+
+
+def test_vault_solve_unknown_item_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        client.app.state.vault_solver = Solver(FakeLLM([]), operators=["VISION"])
+        resp = client.post("/vault/items/does-not-exist/solve")
+    assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# notes
+# --------------------------------------------------------------------------- #
+_NOTE_REPLY = (
+    '{"title": "EMF and internal resistance", "subject": "physics", '
+    '"chapter": "circuits", "markdown": "# EMF\\nWork the drop.", '
+    '"cards": [{"front": "What is EMF?", "back": "Energy per unit charge."}]}'
+)
+
+
+def test_vault_note_generated_over_items_and_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_item(
+            Item(
+                id="i1",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                ocr_text="A cell of emf 2V and internal resistance 1 ohm...",
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+        client.app.state.vault_notes = NoteWriter(
+            index=index,
+            llm=FakeLLM([LLMResponse(text=_NOTE_REPLY)]),
+            ingestor=None,
+            study_store=None,
+        )
+
+        resp = client.post("/vault/notes", json={"item_ids": ["i1"], "prompt": "keep it short"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["title"] == "EMF and internal resistance"
+        assert body["item_ids"] == ["i1"]
+        note_id = body["id"]
+
+        # The source item now points back at the note.
+        item = client.get("/vault/items/i1").json()
+        assert note_id in item["note_ids"]
+
+        listed = client.get("/vault/notes").json()
+        assert listed["count"] == 1
+        assert listed["notes"][0]["id"] == note_id
+
+        fetched = client.get(f"/vault/notes/{note_id}").json()
+        assert fetched["id"] == note_id
+
+
+def test_vault_note_missing_item_ids_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        resp = client.post("/vault/notes", json={})
+    assert resp.status_code == 422
+
+
+def test_vault_note_empty_or_nonexistent_item_ids_still_returns_a_minimal_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No source material -> the model is never called, but a real note id comes back."""
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        client.app.state.vault_notes = NoteWriter(
+            index=index, llm=FakeLLM([]), ingestor=None, study_store=None
+        )
+
+        empty = client.post("/vault/notes", json={"item_ids": []})
+        assert empty.status_code == 200
+        assert empty.json()["item_ids"] == []
+        assert empty.json()["markdown"] == ""
+
+        missing = client.post("/vault/notes", json={"item_ids": ["does-not-exist"]})
+        assert missing.status_code == 200
+        assert missing.json()["item_ids"] == []
+
+
+def test_vault_note_provider_failure_still_returns_a_usable_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead model degrades to a bare-bones note, never a 500 traceback."""
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_item(
+            Item(
+                id="i1",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                ocr_text="some raw extracted ocr text",
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+        client.app.state.vault_notes = NoteWriter(
+            index=index, llm=FakeLLM([]), ingestor=None, study_store=None
+        )
+
+        resp = client.post("/vault/notes", json={"item_ids": ["i1"]})
+        assert resp.status_code == 200
+        assert "some raw extracted ocr text" in resp.json()["markdown"]
+
+
+def test_vault_note_owned_by_someone_else_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller cannot read another owner's note by id."""
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_note(
+            Note(id="foreign-note", owner_uid="someone-else", created_at="2024-01-01T00:00:00Z")
+        )
+        resp = client.get("/vault/notes/foreign-note")
+    assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# search
+# --------------------------------------------------------------------------- #
+def test_vault_search_returns_hits_and_excludes_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_item(
+            Item(
+                id="1",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                ocr_text="resistance in a series circuit",
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+        index.put_item(
+            Item(
+                id="2",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                ocr_text="resistance is futile but locked",
+                privacy=Privacy.LOCKED,
+                created_at="2024-01-02T00:00:00Z",
+            )
+        )
+
+        resp = client.get("/vault/search?q=resistance")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [h["item_id"] for h in body["hits"]] == ["1"]
+        assert body["count"] == 1
+
+
+def test_vault_search_no_query_returns_no_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        resp = client.get("/vault/search")
+    assert resp.status_code == 200
+    assert resp.json() == {"hits": [], "count": 0}
+
+
+# --------------------------------------------------------------------------- #
+# analytics
+# --------------------------------------------------------------------------- #
+def test_vault_analytics_returns_rollup(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_solve(
+            Solve(
+                id="s1",
+                item_ids=["i1"],
+                created_at="2024-01-01T00:00:00Z",
+                verification=Verification(status=VerificationStatus.VERIFIED),
+                consensus=Consensus(final_answer="x = 3", agreement="3/3"),
+            )
+        )
+        index.put_item(
+            Item(
+                id="i1",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                solve_id="s1",
+                classification=Classification(subject="math", chapter="algebra"),
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+
+        resp = client.get("/vault/analytics")
+        assert resp.status_code == 200
+        chapters = resp.json()["chapters"]
+        assert len(chapters) == 1
+        assert chapters[0]["subject"] == "math"
+        assert chapters[0]["chapter"] == "algebra"
+        assert chapters[0]["mastery"] == 1.0
+        assert chapters[0]["basis"] == "sympy"
+
+
+# --------------------------------------------------------------------------- #
+# exam
+# --------------------------------------------------------------------------- #
+_GRADING_REPLY = (
+    '{"questions": [{"q": "Q1", "marks_awarded": 1, "marks_total": 1, '
+    '"feedback": "correct"}], "total": 1}'
+)
+
+
+def test_vault_exam_start_then_grade_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        index = client.app.state.vault_index
+        index.put_item(
+            Item(
+                id="paper",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                ocr_text="Q1: what is 2 + 2?",
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+        index.put_item(
+            Item(
+                id="answer",
+                owner_uid=_LOCAL_OWNER,
+                source=CaptureSource.CAMERA,
+                ocr_text="Q1: 4",
+                created_at="2024-01-01T00:00:00Z",
+            )
+        )
+        client.app.state.vault_exam = ExamRunner(
+            index=index, llm=FakeLLM([LLMResponse(text=_GRADING_REPLY)])
+        )
+
+        started = client.post(
+            "/vault/exam/start", json={"paper_item_ids": ["paper"], "duration_s": 600}
+        )
+        assert started.status_code == 200
+        session = started.json()
+        assert session["status"] == "open"
+        session_id = session["id"]
+
+        graded = client.post(
+            f"/vault/exam/{session_id}/grade", json={"answer_item_ids": ["answer"]}
+        )
+        assert graded.status_code == 200
+        body = graded.json()
+        assert body["status"] == "graded"
+        assert body["total"] == 1.0
+        assert body["grading"][0]["q"] == "Q1"
+
+
+def test_vault_exam_grade_unknown_session_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        client.app.state.vault_exam = ExamRunner(
+            index=client.app.state.vault_index, llm=FakeLLM([])
+        )
+        resp = client.post("/vault/exam/does-not-exist/grade", json={"answer_item_ids": []})
+    assert resp.status_code == 404
+
+
+def test_vault_exam_grade_foreign_owner_session_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller cannot grade a session that belongs to a different owner.
+
+    ``ExamRunner.grade`` raises ``KeyError`` for both an unknown session and a
+    session owned by someone else, on purpose (see the module docstring) --
+    this proves the route maps that to 404, not 403, so the response can never
+    be used to distinguish "doesn't exist" from "exists but isn't yours".
+    """
+    with _client(monkeypatch, _settings()) as client:
+        runner = ExamRunner(index=client.app.state.vault_index, llm=FakeLLM([]))
+        client.app.state.vault_exam = runner
+        session = runner.start("someone-else", ["paper"], duration_s=0)
+
+        resp = client.post(f"/vault/exam/{session.id}/grade", json={"answer_item_ids": []})
+    assert resp.status_code == 404
+
+
+def test_vault_exam_start_missing_paper_item_ids_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        resp = client.post("/vault/exam/start", json={})
+    assert resp.status_code == 422
+
+
+def test_vault_exam_grade_missing_answer_item_ids_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _client(monkeypatch, _settings()) as client:
+        runner = ExamRunner(index=client.app.state.vault_index, llm=FakeLLM([]))
+        client.app.state.vault_exam = runner
+        session = runner.start(_LOCAL_OWNER, ["paper"], duration_s=0)
+
+        resp = client.post(f"/vault/exam/{session.id}/grade", json={})
+    assert resp.status_code == 422
+
+
+def test_vault_exam_grade_nothing_gradable_is_422_not_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every item textless/missing -> a clean 422, not a leaked 500."""
+    with _client(monkeypatch, _settings()) as client:
+        runner = ExamRunner(index=client.app.state.vault_index, llm=FakeLLM([]))
+        client.app.state.vault_exam = runner
+        session = runner.start(_LOCAL_OWNER, ["does-not-exist"], duration_s=0)
+
+        resp = client.post(
+            f"/vault/exam/{session.id}/grade", json={"answer_item_ids": ["also-missing"]}
+        )
+    assert resp.status_code == 422

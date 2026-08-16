@@ -388,11 +388,12 @@ async def _maybe_stand_in(
     as her. She answers *for* him, never as him — a reply that genuinely passed
     as him would be deceiving someone who never agreed to talk to a machine.
     """
-    settings = getattr(app.state, "settings", None)
-    owner = str(getattr(settings, "discord_owner_id", "") or "")
     author = str((message.get("author") or {}).get("id") or "")
     content = (message.get("content") or "").strip()
-    if not owner or author == owner or len(content.split()) < _STAND_IN_MIN_WORDS:
+    # Standing in is for when *Lakshya* has gone quiet on a message meant for
+    # him. The Queen is an owner too, so she is the one who might be left
+    # waiting — nobody else's message earns it.
+    if _who_is(app, author) != "queen" or len(content.split()) < _STAND_IN_MIN_WORDS:
         return
 
     message_id = str(message.get("id") or "")
@@ -507,10 +508,8 @@ def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> Non
     # to know which channel that is — the invitation carries no id.
     _where(app)[user] = (guild, str(channel)) if channel else None
 
-    settings = getattr(app.state, "settings", None)
-    owner = str(getattr(settings, "discord_owner_id", "") or "")
-    if owner and user != owner:
-        return  # only the owner pulls her into a call
+    if _owner_ids(app) and _who_is(app, user) == "guest":
+        return  # only an owner pulls her into a call
 
     if channel:
         tg.start_soon(_follow_into_voice, app, socket, guild, str(channel))
@@ -604,10 +603,8 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         return
     if message.get("guild_id"):
         _guilds(app)[channel] = str(message["guild_id"])
-    settings_now = getattr(app.state, "settings", None)
-    owner_id = str(getattr(settings_now, "discord_owner_id", "") or "")
     author_id = str((message.get("author") or {}).get("id") or "")
-    if owner_id and author_id == owner_id:
+    if _who_is(app, author_id) == "owner":
         _owner_seen(app)[channel] = time.monotonic()
 
     # Being @-mentioned or replied to is being spoken to, as plainly as typing
@@ -771,12 +768,12 @@ async def _compose(
     elif banter.is_callback(content):
         content = f"{content}\n\n[{banter.CALLBACK_PROMPT}]"
 
-    settings = getattr(app.state, "settings", None)
-    owner = str(getattr(settings, "discord_owner_id", "") or "")
-    is_owner = bool(owner) and asker == owner
+    role = _who_is(app, asker)
     content = (
         content
-        + banter.speaker_rule(is_owner or not owner, banter.queen_title())
+        + banter.speaker_rule(
+            role == "owner", banter.queen_title(), name=role
+        )
         + banter.TITLE_RULE
         + banter.GENDER_RULE
         + banter.NOT_DEFENSIVE
@@ -810,6 +807,28 @@ _NUDGE = re.compile(
 def _is_nudge(content: str) -> bool:
     """Whether the message is a prod rather than a question."""
     return bool(_NUDGE.match((content or "").strip()))
+
+
+def _owner_ids(app: Any) -> list[str]:
+    """Every owner id, from a comma-separated setting.
+
+    A list rather than a single value because there are two of them; the earlier
+    single-owner shape made one of them a guest whose instructions were refused.
+    """
+    settings = getattr(app.state, "settings", None)
+    raw = str(getattr(settings, "discord_owner_id", "") or "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _who_is(app: Any, user_id: str) -> str:
+    """``owner``, ``queen`` or ``guest`` — used to pick how she addresses them."""
+    owners = _owner_ids(app)
+    if not owners:
+        return "owner"  # unconfigured: treat everyone as trusted, as before
+    if not user_id or user_id not in owners:
+        return "guest"
+    # The first id is Lakshya by convention; any other owner is the Queen.
+    return "owner" if user_id == owners[0] else "queen"
 
 
 def _self_id(app: Any) -> str:

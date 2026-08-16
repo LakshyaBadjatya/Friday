@@ -653,9 +653,11 @@ class Settings(BaseSettings):
     enable_discord: bool = False
     discord_public_key: SecretStr | None = None
     discord_application_id: str = ""
-    # Only this Discord user is answered. Empty means anyone who can reach the
-    # application's commands can spend the model budget and read the owner's
-    # reminders, so set it on any server with other people in it.
+    # Who owns her on Discord. Comma-separated, because there are two of them
+    # and an assistant that treats one as the owner and the other as a guest
+    # gets the address wrong, refuses her instructions, and says so out loud.
+    # Empty means anyone reaching the commands can spend the model budget and
+    # read private data, so set it on any server with other people in it.
     discord_owner_id: str = ""
     # Needed only to push reminders *into* Discord unprompted; slash commands
     # work without it, because the follow-up uses the interaction's own token.

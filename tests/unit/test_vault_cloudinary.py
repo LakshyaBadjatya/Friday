@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 
+import httpx
 import pytest
+import respx
 
 from friday.errors import ProviderError
 from friday.vault.cloudinary import CloudinarySigner, FakeCloudinary, sign_params
@@ -131,3 +133,84 @@ async def test_fake_delete_removes_the_asset() -> None:
     fake.assets["vault/u1/i1"] = {"version": 1, "format": "jpg", "bytes": 10}
     assert await fake.delete("vault/u1/i1") is True
     assert fake.verify("vault/u1/i1") is None
+
+
+# --------------------------------------------------------------------------- #
+# CloudinarySigner.verify / delete — the trust boundary itself.
+#
+# This is the one piece of logic that decides whether FRIDAY believes a phone's
+# "I uploaded it" claim, so its branching (found / not found / network error)
+# is worth pinning down with respx rather than only exercising via the fakes.
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+def test_verify_returns_metadata_when_cloudinary_confirms_the_asset() -> None:
+    signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
+    route = respx.get(
+        "https://api.cloudinary.com/v1_1/c/resources/image/authenticated/vault/u1/i1"
+    ).mock(return_value=httpx.Response(200, json={"bytes": 1234, "format": "jpg", "version": 7}))
+
+    body = signer.verify("vault/u1/i1")
+
+    assert body == {"bytes": 1234, "format": "jpg", "version": 7}
+    # The Admin API call must itself be authenticated with key/secret, not left open.
+    assert route.calls.last.request.headers["authorization"].startswith("Basic ")
+
+
+@respx.mock
+def test_verify_returns_none_when_cloudinary_has_no_such_asset() -> None:
+    # A phone claiming an upload Cloudinary never received must not be trusted —
+    # this is the exact lie the verify step exists to catch.
+    signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
+    respx.get("https://api.cloudinary.com/v1_1/c/resources/image/authenticated/vault/u1/nope").mock(
+        return_value=httpx.Response(404, json={"error": {"message": "not found"}})
+    )
+
+    assert signer.verify("vault/u1/nope") is None
+
+
+@respx.mock
+def test_verify_returns_none_on_network_failure() -> None:
+    signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
+    respx.get("https://api.cloudinary.com/v1_1/c/resources/image/authenticated/vault/u1/i1").mock(
+        side_effect=httpx.ConnectError("boom")
+    )
+
+    assert signer.verify("vault/u1/i1") is None
+
+
+@respx.mock
+async def test_delete_returns_true_only_on_cloudinarys_ok_result() -> None:
+    signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
+    route = respx.post("https://api.cloudinary.com/v1_1/c/image/destroy").mock(
+        return_value=httpx.Response(200, json={"result": "ok"})
+    )
+
+    assert await signer.delete("vault/u1/i1") is True
+    sent = dict(httpx.QueryParams(route.calls.last.request.content.decode()))
+    assert sent["public_id"] == "vault/u1/i1"
+    assert sent["signature"] == sign_params(
+        {"public_id": "vault/u1/i1", "timestamp": 1, "type": "authenticated"}, "s"
+    )
+
+
+@respx.mock
+async def test_delete_returns_false_when_cloudinary_reports_not_found() -> None:
+    # "not found" from Cloudinary must not be reported as a successful delete.
+    signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
+    respx.post("https://api.cloudinary.com/v1_1/c/image/destroy").mock(
+        return_value=httpx.Response(200, json={"result": "not found"})
+    )
+
+    assert await signer.delete("vault/u1/i1") is False
+
+
+@respx.mock
+async def test_delete_returns_false_on_network_failure() -> None:
+    signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
+    respx.post("https://api.cloudinary.com/v1_1/c/image/destroy").mock(
+        side_effect=httpx.ConnectError("boom")
+    )
+
+    assert await signer.delete("vault/u1/i1") is False

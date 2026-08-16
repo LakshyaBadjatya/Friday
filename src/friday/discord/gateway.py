@@ -34,7 +34,7 @@ from typing import Any, cast
 
 import anyio
 
-from friday.discord import admin, banter, lang, vision
+from friday.discord import admin, banter, lang, lookup, vision
 from friday.discord.voice import VoiceConnection
 from friday.logging import get_logger
 
@@ -855,6 +855,14 @@ async def _compose(
     # one. Prompting the chat model to "be careful" was not enough — it produced
     # three sign and formula errors on one circuit and stated all of them
     # confidently.
+    # A question about the world gets read up on before it gets answered. She
+    # was refusing these outright — correct under the no-inventing rule, and
+    # still the wrong answer when the fact is a search away.
+    if lookup.wants_lookup(content):
+        found = await lookup.brief(content)
+        if found:
+            content = f"{content}\n\n{found}"
+
     if banter.is_study_question(content):
         from friday.discord import tutor  # noqa: PLC0415
 

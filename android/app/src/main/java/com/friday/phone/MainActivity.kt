@@ -34,6 +34,7 @@ import com.friday.phone.capture.ScanActivity
 import com.friday.phone.sync.QueueDb
 import com.friday.phone.sync.UploadWorker
 import com.friday.phone.ui.FridayTheme
+import com.friday.phone.ui.SetupActivity
 import com.friday.phone.voice.VoiceActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

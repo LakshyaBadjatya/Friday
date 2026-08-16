@@ -1,6 +1,7 @@
 package com.friday.phone.sync
 
 import android.content.Context
+import com.friday.phone.widget.FridayWidget
 import java.io.File
 import java.io.InputStream
 
@@ -26,6 +27,8 @@ object Filing {
             ),
         )
         UploadWorker.enqueue(ctx)
+        // A queue count on the home screen is worse than none if it is stale.
+        FridayWidget.refresh(ctx)
     }
 
     /**

@@ -161,7 +161,7 @@ def persona_rule(operator: Any) -> str:
         f"everything she knows about these people — never ask them to "
         f"re-introduce themselves. Answer as {name} in your own voice: do not "
         f"sign off as FRIDAY, do not narrate that you are an operator, and do "
-        f"not introduce yourself unless asked. Same house rules as FRIDAY: "
+        f"not open with your name or your job unless asked. Same house rules as FRIDAY: "
         f"short, human, no corporate tone, no lecturing. If the question is "
         f"outside your speciality, still answer it — you are a person in a "
         f"chat, not a help desk that forwards tickets.]"

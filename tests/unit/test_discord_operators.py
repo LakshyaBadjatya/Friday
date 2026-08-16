@@ -92,3 +92,21 @@ async def test_an_operator_cannot_be_talked_into_pinging_everyone(
     assert await operators.speak("tok", "chan", edith, "@everyone hi") == "999"
     assert sent["username"] == "EDITH"
     assert sent["allowed_mentions"] == {"parse": ["users"]}
+
+
+def test_the_persona_rule_does_not_trip_the_identity_guard() -> None:
+    """The rules we append must not read as a question the guard answers.
+
+    "edith how are you" came back as the canned "who are you" reply because the
+    persona rule contained the words "introduce yourself" and the guard was
+    scanning the fully assembled prompt. The real fix is that intent is now read
+    from the human's words — this pins the second half, that the rule text is
+    not itself question-shaped, so the next detector added upstream does not
+    inherit the same trap.
+    """
+    from friday.siri import guard  # noqa: PLC0415
+
+    for name in ("EDITH", "ORACLE", "GECKO", "VISION"):
+        rule = operators.persona_rule(operators.addressed(f"{name.lower()} hi"))
+        assert guard._IDENTITY.search(rule) is None, name
+        assert guard.blocked(rule) is None, name

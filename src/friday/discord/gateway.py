@@ -794,6 +794,12 @@ async def _compose(
     ``forced`` covers an image posted with no words: there is no name to match
     on, but a picture dropped into the chat is worth a reaction.
     """
+    # Kept before anything is appended. By the end of this function ``content``
+    # carries a page of behaviour rules, and those rules are prose that trips
+    # text detectors — "do not introduce yourself unless asked" in the roster
+    # rule was matching the identity guard, so "edith how are you" came back as
+    # the canned "who are you" answer. The classifiers get the human's words.
+    spoken_by_human = content
     # Told to stop, or laughed at: fixed answers, no model, no argument.
     social = banter.reaction(content)
     if social is not None:
@@ -931,6 +937,7 @@ async def _compose(
         cast("Any", _GatewayRequest(app)), content[:_MAX_QUERY],
         discord_session(app),
         persona=str(getattr(operator, "name", "") or ""),
+        asked=spoken_by_human[:_MAX_QUERY],
     )
     return raw or None
 

@@ -596,7 +596,8 @@ async def siri_ask(request: Request) -> Any:
 
 
 async def _produce(
-    request: Request, query: str, session_id: str, *, persona: str = ""
+    request: Request, query: str, session_id: str, *, persona: str = "",
+    asked: str = "",
 ) -> Answer:
     """Run one turn through every branch and return the answer, transport-free.
 
@@ -608,6 +609,18 @@ async def _produce(
     and one set by chat must behave identically, and the only way to guarantee
     that is for them to run the same code.
     """
+    # Callers append behaviour rules to ``query`` before it gets here — the
+    # Discord surface adds a good page of them. Those rules are prose, and prose
+    # trips text detectors: the roster's persona rule contains "do not introduce
+    # yourself unless asked", which the identity guard matched, so "edith how
+    # are you" was answered with the canned "who are you" reply. The same
+    # mistake pinned the language detector to Polish once already, because the
+    # gender rule quotes Polish verbs as examples.
+    #
+    # So intent is read from what the human actually typed. ``query`` still
+    # carries the rules, because the model is meant to see them; only the
+    # classifiers are kept away from them.
+    asked = (asked or query).strip()
     memory = _memory(request)
     deadline = _deadline(request)
     app_state = request.app.state
@@ -643,7 +656,7 @@ async def _produce(
     # Throwing away a poisoned conversation. This has to run first and it has to
     # clear the *shared* buffer, because that is where a landed jailbreak lives
     # and why it keeps working on turns long after it was sent.
-    if siri_guard.is_reset(query):
+    if siri_guard.is_reset(asked):
         try:
             memory.clear(session_id)
         except Exception:  # noqa: BLE001 - a failed purge must still answer
@@ -658,7 +671,7 @@ async def _produce(
     # thing under attack — a hijacked one introduces itself as whatever it was
     # told to be — so "who are you" is not a question it gets to answer. No
     # prompt rewrites a string literal.
-    identity = siri_guard.identity_reply_for(persona, query)
+    identity = siri_guard.identity_reply_for(persona, asked)
     if identity is not None:
         return _reply(identity, raw=identity, mode="identity", record=False)
 
@@ -666,7 +679,7 @@ async def _produce(
     # them, and deliberately not recorded: a jailbreak left in the context window
     # is replayed on every later turn, which is why one of them kept working long
     # after it was sent.
-    refusal = siri_guard.blocked(query)
+    refusal = siri_guard.blocked(asked)
     if refusal is not None:
         logger.warning("guard: refused a takeover/exfiltration attempt")
         return _reply(refusal, raw=refusal, mode="guard", record=False)
@@ -674,14 +687,14 @@ async def _produce(
     # Irreversible requests are held for a real confirmation rather than run
     # from a chat message. The owner may wipe his own data; a prompt that talked
     # her into it may not, and from inside a turn the two look identical.
-    caution = siri_guard.confirmation_for(query)
+    caution = siri_guard.confirmation_for(asked)
     if caution is not None:
         logger.warning("guard: held a destructive request for confirmation")
         return _reply(caution, raw=caution, mode="guard", record=False)
 
     # Mis-wired shortcut guard: the body is a literal variable label (e.g. "Dictated
     # Text"), not the spoken words. Speak an actionable fix instead of clarifying.
-    if query.lower() in _PLACEHOLDER_LABELS:
+    if asked.lower() in _PLACEHOLDER_LABELS:
         return _reply(
             _PLACEHOLDER_HINT, raw=_PLACEHOLDER_HINT, mode="hint", record=False
         )

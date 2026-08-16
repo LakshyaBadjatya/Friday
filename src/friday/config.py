@@ -270,6 +270,31 @@ class Settings(BaseSettings):
     # reschedules the card. Reuses ``memory_db_path`` (no new path setting).
     enable_study: bool = False
 
+    # --- Vault: private storage + solver + notes (Tier 2; default off) ---
+    # Gates the whole ``/vault`` REST surface; off by default so the offline
+    # build exposes no vault routes (each -> 404). Bytes live in Cloudinary
+    # (private/authenticated delivery), metadata in Firestore or a local SQLite
+    # index. The backend is the only writer of record.
+    enable_vault: bool = False
+    # Cloudinary account. The cloud name is not a secret (it appears in every
+    # delivery URL); the key/secret are ``SecretStr`` so they never reach a log.
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: SecretStr | None = None
+    cloudinary_api_secret: SecretStr | None = None
+    # Metadata index backend: ``firestore`` in production, ``sqlite`` for local
+    # and test runs (no network, no credentials).
+    vault_index_backend: str = "firestore"
+    vault_sqlite_path: str = "data/vault.db"
+    # Storage budget in gigabytes; a warning is raised past 80% of it.
+    vault_quota_gb: float = 25.0
+    # Maximum ensemble solves per day; ``0`` disables the cap entirely. Bounds
+    # the provider spend of the always-full ensemble.
+    vault_daily_solve_cap: int = 200
+    # Roster code-names that draft a solution, comma-separated.
+    vault_solver_operators: str = "VISION,ORACLE,GECKO"
+    # The shared space both owners can push into ("" disables sharing).
+    vault_shared_space_id: str = ""
+
     # --- Hardware / system monitoring (Tier 2; default off) ---
     # Gates the whole ``/system`` REST surface (stats + check) *and* the scheduler
     # ``system_check`` action; off by default so the offline build exposes no

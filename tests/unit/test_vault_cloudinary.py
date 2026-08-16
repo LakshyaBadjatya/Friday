@@ -10,6 +10,7 @@ import respx
 
 from friday.errors import ProviderError
 from friday.vault.cloudinary import CloudinarySigner, FakeCloudinary, sign_params
+from friday.vault.models import CloudinaryAsset
 
 
 def test_sign_params_matches_cloudinary_algorithm() -> None:
@@ -118,18 +119,18 @@ def test_signer_refuses_with_partial_credentials(kwargs: dict[str, str]) -> None
         CloudinarySigner(**kwargs)
 
 
-def test_delivery_url_changes_with_the_clock_and_embeds_ttl() -> None:
-    # A signed delivery URL that didn't actually expire would defeat the
-    # point of using type=authenticated in the first place.
-    clock = {"now": 1700000000}
-    signer = CloudinarySigner(
-        cloud_name="c", api_key="k", api_secret="s", clock=lambda: clock["now"]
+def test_fake_upload_params_carries_a_real_signature() -> None:
+    # FakeCloudinary used to hand back a hard-coded "fake-signature" — a place
+    # a real behavioural divergence from CloudinarySigner could hide, which is
+    # exactly how the doubled-folder bug went unnoticed. Pin the fake down to
+    # actually computing its signature the same way the real adapter does.
+    fake = FakeCloudinary(cloud_name="fake", api_secret="fake-secret")
+    payload = fake.upload_params(owner_uid="u1", item_id="i1")
+    assert payload.params["signature"] == sign_params(
+        {"timestamp": 0, "public_id": "vault/u1/i1", "type": "authenticated"},
+        "fake-secret",
     )
-    first = signer.delivery_url("vault/u1/i1", ttl_s=60)
-    clock["now"] += 1
-    second = signer.delivery_url("vault/u1/i1", ttl_s=60)
-    assert first != second
-    assert "ttl_s=60" in first
+    assert "folder" not in payload.params
 
 
 def test_fake_verifies_only_what_it_was_given() -> None:
@@ -226,3 +227,20 @@ async def test_delete_returns_false_on_network_failure() -> None:
     )
 
     assert await signer.delete("vault/u1/i1") is False
+
+
+def test_cloudinary_asset_round_trips_secure_url() -> None:
+    # secure_url is what the backend now serves directly at read time (no
+    # extra API call, no hand-rolled URL) — it must survive model round-trips
+    # untouched, including the default for assets recorded before this field
+    # existed.
+    asset = CloudinaryAsset(
+        public_id="vault/u1/i1",
+        version=7,
+        format="png",
+        bytes=1234,
+        secure_url="https://res.cloudinary.com/c/image/authenticated/s--sig--/v7/vault/u1/i1.png",
+    )
+    restored = CloudinaryAsset.model_validate(asset.model_dump())
+    assert restored.secure_url == asset.secure_url
+    assert CloudinaryAsset(public_id="x", version=1, format="jpg", bytes=1).secure_url == ""

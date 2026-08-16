@@ -51,6 +51,7 @@ class CloudinaryAsset(BaseModel):
     width: int = 0
     height: int = 0
     resource_type: str = "image"
+    secure_url: str = ""
 
 
 class DerivedAssets(BaseModel):

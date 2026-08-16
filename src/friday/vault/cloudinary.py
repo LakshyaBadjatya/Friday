@@ -1,12 +1,15 @@
-"""Cloudinary boundary: sign an upload, verify it landed, mint delivery URLs.
+"""Cloudinary boundary: sign an upload, verify it landed.
 
 The phone never holds the API secret. It asks the backend for a signature scoped
 to exactly one upload, uploads the bytes directly, and reports back; the backend
 then independently confirms with Cloudinary's Admin API that the asset exists
 before it will trust a single field of the report.
 
-Everything uploads as ``type=authenticated``, so no vault asset is reachable by
-guessing a URL — delivery URLs are signed per request and expire.
+Everything uploads as ``type=authenticated``. Cloudinary itself signs the
+delivery URL it hands back in the upload and Admin API responses (stored as
+``CloudinaryAsset.secure_url``); an unsigned/guessed path for the same asset
+is refused with 401. This was verified against the live API — we do not mint
+our own delivery URLs, we serve the one Cloudinary already gave us.
 
 ``httpx`` is imported lazily inside the networked methods, so importing this
 module costs nothing and the offline test path never touches the network.
@@ -60,27 +63,34 @@ class CloudinaryProvider(Protocol):
 
     async def delete(self, public_id: str) -> bool: ...
 
-    def delivery_url(self, public_id: str, *, ttl_s: int = 300) -> str: ...
-
 
 class FakeCloudinary:
-    """A deterministic provider for tests — an in-memory asset table."""
+    """A deterministic provider for tests — an in-memory asset table.
 
-    def __init__(self, cloud_name: str = "fake") -> None:
+    Computes a real signature via :func:`sign_params` (instead of a hard-coded
+    stand-in) so its payload stays structurally identical to
+    :class:`CloudinarySigner`'s — the doubled-``folder`` bug hid exactly
+    because the fake and the real adapter had silently drifted apart.
+    """
+
+    def __init__(self, cloud_name: str = "fake", api_secret: str = "fake-secret") -> None:
         self.cloud_name = cloud_name
+        self.api_secret = api_secret
         self.assets: dict[str, dict[str, Any]] = {}
 
     def upload_params(self, *, owner_uid: str, item_id: str) -> UploadPayload:
         public_id = f"vault/{owner_uid}/{item_id}"
+        signable: dict[str, Any] = {
+            "timestamp": 0,
+            "public_id": public_id,
+            "type": "authenticated",
+        }
+        params = dict(signable)
+        params["api_key"] = "fake"
+        params["signature"] = sign_params(signable, self.api_secret)
         return UploadPayload(
             url=f"https://api.cloudinary.com/v1_1/{self.cloud_name}/image/upload",
-            params={
-                "api_key": "fake",
-                "timestamp": 0,
-                "public_id": public_id,
-                "type": "authenticated",
-                "signature": "fake-signature",
-            },
+            params=params,
         )
 
     def verify(self, public_id: str) -> dict[str, Any] | None:
@@ -88,9 +98,6 @@ class FakeCloudinary:
 
     async def delete(self, public_id: str) -> bool:
         return self.assets.pop(public_id, None) is not None
-
-    def delivery_url(self, public_id: str, *, ttl_s: int = 300) -> str:
-        return f"https://fake.invalid/{public_id}?ttl={ttl_s}"
 
 
 class CloudinarySigner:
@@ -141,6 +148,11 @@ class CloudinarySigner:
         try:
             resp = httpx.get(url, auth=(self._key, self._secret), timeout=10.0)
         except httpx.HTTPError:
+            # A network failure is deliberately treated the same as "asset not
+            # found": the caller (item commit) will reject the upload with a
+            # 409 rather than trust the phone's claim. This trades a false
+            # negative (a real upload occasionally re-checked/retried) for
+            # never accepting an asset we could not independently confirm.
             return None
         if resp.status_code != 200:
             return None
@@ -164,14 +176,9 @@ class CloudinarySigner:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(f"{self._api_base}/image/destroy", data=data)
         except httpx.HTTPError:
+            # Same deliberate conservative default as verify(): a network
+            # failure here is treated as "not deleted" rather than assumed
+            # to have succeeded, so callers never believe a delete happened
+            # when Cloudinary never actually confirmed it.
             return False
         return resp.status_code == 200 and resp.json().get("result") == "ok"
-
-    def delivery_url(self, public_id: str, *, ttl_s: int = 300) -> str:
-        """A time-limited signed URL for an authenticated asset."""
-        expires = self._clock() + ttl_s
-        signature = sign_params({"public_id": public_id, "expires": expires}, self._secret)
-        return (
-            f"https://res.cloudinary.com/{self.cloud_name}/image/authenticated/"
-            f"s--{signature[:8]}--/{public_id}?_a={expires}&ttl_s={ttl_s}"
-        )

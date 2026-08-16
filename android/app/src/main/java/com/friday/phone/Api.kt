@@ -78,6 +78,18 @@ class Api(private val ctx: Context) {
     fun commit(itemId: String): JSONObject? =
         post("/vault/items/$itemId/commit", JSONObject())
 
+    /**
+     * One spoken turn: base64 WAV in, transcript + reply + reply audio out.
+     *
+     * The socket at /ws/voice cannot do this — it carries control frames only —
+     * so the phone's voice goes over plain HTTP like the Siri shortcut's does.
+     */
+    fun voice(audioB64: String, sessionId: String = "phone"): JSONObject? =
+        post(
+            "/voice",
+            JSONObject().put("audio_b64", audioB64).put("session_id", sessionId),
+        )
+
     /** Ask her for notes over a selection of captures. */
     fun makeNotes(itemIds: List<String>, prompt: String = ""): JSONObject? =
         post(

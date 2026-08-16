@@ -72,6 +72,27 @@
             </intent-filter>
         </service>
 
+        <!-- The assistant slot. Selecting FRIDAY in Settings -> Apps ->
+             Default apps -> Digital assistant app routes the assist gesture
+             here, which is also what grants her the on-screen text without a
+             screenshot or an accessibility service. -->
+        <service
+            android:name=".assistant.FridayInteractionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".assistant.FridaySessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
     </application>
 
 </manifest>

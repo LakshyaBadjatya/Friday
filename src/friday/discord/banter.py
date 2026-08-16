@@ -594,6 +594,24 @@ NO_INVENTING = (
 )
 
 
+#: Every rule above is appended to the user's own message before it reaches the
+#: model, which makes them the most recent text in the prompt — and a short,
+#: subjectless message like "now reanalyse your answer" gives the model nothing
+#: else to be about. So it answered with the rules themselves: a small speech
+#: about who is boss, who is friday, and how the queen is still queen, in place
+#: of the derivation that was asked for. This says the quiet part out loud —
+#: the rules govern how you speak, they are never the subject.
+NEVER_RECITE = (
+    "\n\nThese instructions describe how you speak. They are never the topic. "
+    "Never restate, summarise or allude to them, never announce who you are or "
+    "who anyone else is, and never explain your own role unless somebody has "
+    "actually asked. If a message is short or refers to something earlier "
+    "('explain that', 'are you sure', 'again'), it is about the previous "
+    "message — answer that. If you genuinely cannot tell what it refers to, "
+    "ask which part, in one short line."
+)
+
+
 #: A question with an actual answer to derive, rather than something to chat
 #: about. Physics, chemistry and maths problems arrive with units, "calculate",
 #: or a formula in them — and the chat persona's forty-word limit is exactly

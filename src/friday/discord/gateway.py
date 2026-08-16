@@ -34,7 +34,7 @@ from typing import Any, cast
 
 import anyio
 
-from friday.discord import admin, banter, lang, lookup, vision
+from friday.discord import admin, banter, lang, lookup, operators, vision
 from friday.discord.voice import VoiceConnection
 from friday.logging import get_logger
 
@@ -742,22 +742,34 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         banter.note_message(app.state, channel)
         return
 
+    # "EDITH what's the weather" is addressed to EDITH. Saying an operator's
+    # name used to get silence, or FRIDAY answering on its behalf.
+    operator = operators.addressed(content)
+
     try:
         reply = await _compose(
             app, content, channel,
-            forced=bool(mentioned or replying_to_her)
+            forced=bool(operator) or bool(mentioned or replying_to_her)
             or bool(seen and not banter.addressed(content)),
             asker=str((message.get("author") or {}).get("id") or ""),
+            operator=operator,
         )
     except Exception:  # noqa: BLE001 - one bad message must not kill the socket
         logger.exception("discord message handling failed")
         return
     if reply:
+        # An operator speaks under its own name and face, through the channel
+        # webhook. An empty id means the bot lacks Manage Webhooks there, so it
+        # falls through and answers as FRIDAY rather than saying nothing.
+        sent = ""
+        if operator is not None:
+            sent = await operators.speak(token, channel, operator, reply)
         # Threaded as a reply to the message she is answering, so a busy channel
         # stays readable and it is obvious which line she picked up.
-        sent = await _send(
-            token, channel, reply, reply_to=str(message.get("id") or "")
-        )
+        if not sent:
+            sent = await _send(
+                token, channel, reply, reply_to=str(message.get("id") or "")
+            )
         if sent:
             _hers(app).append(sent)
         return
@@ -775,9 +787,8 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
 
 async def _compose(
     app: Any, content: str, channel: str, *, forced: bool = False,
-    asker: str = "", spoken: bool = False,
+    asker: str = "", spoken: bool = False, operator: Any = None,
 ) -> str | None:
-    """The reply, or ``None`` to stay quiet."""
     """The reply, or ``None`` to stay quiet.
 
     ``forced`` covers an image posted with no words: there is no name to match
@@ -863,11 +874,22 @@ async def _compose(
         if found:
             content = f"{content}\n\n{found}"
 
-    if banter.is_study_question(content):
-        from friday.discord import tutor  # noqa: PLC0415
+    from friday.discord import tutor  # noqa: PLC0415
 
-        worked = await tutor.solve(getattr(app.state, "settings", None), content)
+    settings = getattr(app.state, "settings", None)
+    # "reanalyse your answer" carries no subject — the subject is the previous
+    # message. Without that referent the model had nothing to work from and
+    # recited the persona rules instead, which is how a request to re-derive a
+    # circuit got answered with a short speech about who is boss.
+    if tutor.is_follow_up(channel, content):
+        again = await tutor.revisit(settings, channel, content)
+        if again:
+            return again
+
+    if banter.is_study_question(content):
+        worked = await tutor.solve(settings, content)
         if worked:
+            tutor.remember(channel, content, worked)
             return worked
         content = f"{content}\n\n[{banter.STUDY_MODE}]"
     if banter.is_settle(content):
@@ -893,7 +915,10 @@ async def _compose(
         + banter.GENDER_RULE
         + banter.NOT_DEFENSIVE
         + banter.NO_INVENTING
+        + banter.NEVER_RECITE
     )
+    if operator is not None:
+        content += operators.persona_rule(operator)
     from friday.api.routes_siri import _MAX_QUERY, _produce  # noqa: PLC0415
 
     # cast: _produce only ever touches ``.app.state``, so the stand-in satisfies

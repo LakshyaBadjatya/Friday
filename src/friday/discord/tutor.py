@@ -23,6 +23,7 @@ transcription and vision.
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from typing import Any
 
@@ -71,6 +72,69 @@ async def solve(settings: Any, question: str) -> str | None:
     if not key or not question.strip():
         return None
     return await anyio.to_thread.run_sync(_ask, key, question.strip())
+
+
+#: ``{channel: (problem, answer)}``. Asked to "reanalyse your answer" she had no
+#: idea which answer, and with nothing to work from the model filled the gap by
+#: reciting the persona rules appended to the prompt — a short speech about who
+#: is boss and who is queen, in place of the derivation that was asked for.
+_LAST: dict[str, tuple[str, str]] = {}
+
+
+def remember(channel: str, question: str, answer: str) -> None:
+    """Hold the last problem and its answer so a follow-up has a referent."""
+    if channel and question.strip() and answer.strip():
+        _LAST[channel] = (question.strip(), answer.strip())
+
+
+#: "reanalyse your answer", "are you sure", "explain that", "why", "check again".
+#: What these have in common is that they carry no subject at all — the subject
+#: is the previous message, which is exactly what she was missing.
+_FOLLOW_UP = re.compile(
+    r"\b(?:re-?(?:analyse|analyze|check|do|calculate|solve)"
+    r"|are\s+you\s+sure|you\s+sure|check\s+(?:it\s+)?again|try\s+again"
+    r"|explain\s+(?:it|that|this|your\s+answer|the\s+answer|again|properly)?"
+    r"|elaborate|in\s+detail|step\s+by\s+step|show\s+(?:the\s+)?(?:working|steps)"
+    r"|why\s+(?:is\s+)?(?:that|it|this)|how\s+did\s+you\s+get\s+that"
+    r"|that(?:'s|\s+is)\s+(?:wrong|not\s+right|incorrect))\b",
+    re.IGNORECASE,
+)
+
+
+def is_follow_up(channel: str, text: str) -> bool:
+    """Whether this asks about the previous answer rather than a new problem."""
+    return bool(_LAST.get(channel)) and bool(_FOLLOW_UP.search(text or ""))
+
+
+async def revisit(settings: Any, channel: str, text: str) -> str | None:
+    """Re-work the previous problem in light of what was just said.
+
+    Deliberately re-derives from the original problem rather than editing the
+    previous answer. Asked to check its work, a model handed its own answer will
+    usually defend it; handed the problem again with the answer as a claim to
+    test, it will actually redo the algebra.
+    """
+    remembered = _LAST.get(channel)
+    secret = getattr(settings, "gemini_api_key", None)
+    key = secret.get_secret_value() if secret is not None else ""
+    if remembered is None or not key:
+        return None
+    problem, previous = remembered
+    prompt = (
+        f"Original problem:\n{problem}\n\n"
+        f"The answer given previously was:\n{previous}\n\n"
+        f'The student has now said: "{text.strip()}"\n\n'
+        "Work the original problem again from scratch. Do not assume the "
+        "previous answer is correct and do not defend it — derive it "
+        "independently, then compare. If the previous answer was wrong, say "
+        "plainly which step was wrong and what the right one is. If it was "
+        "right, say so and show the working that proves it, addressing "
+        "whatever the student actually asked about."
+    )
+    answer = await anyio.to_thread.run_sync(_ask, key, prompt)
+    if answer:
+        _LAST[channel] = (problem, answer)
+    return answer
 
 
 def _ask(key: str, question: str) -> str | None:

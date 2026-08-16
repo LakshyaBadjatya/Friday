@@ -207,7 +207,7 @@ class SQLiteVaultIndex:
         if not include_locked:
             sql += " AND privacy != ?"
             args.append(str(Privacy.LOCKED))
-        sql += " ORDER BY created_at DESC LIMIT ?"
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         args.append(limit)
         conn = self._conn()
         try:
@@ -292,7 +292,7 @@ class SQLiteVaultIndex:
         try:
             rows = conn.execute(
                 "SELECT id, doc FROM notes WHERE owner_uid = ? "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (owner_uid, limit),
             ).fetchall()
         finally:

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from friday.vault.firestore_index import FirestoreVaultIndex
+from friday.vault.firestore_index import FirestoreIndexError, FirestoreVaultIndex
 from friday.vault.models import (
     CaptureSource,
     Classification,
@@ -187,9 +187,29 @@ def test_list_items_orders_newest_first_and_respects_limit() -> None:
     assert [i.id for i in index.list_items("u1", limit=2)] == ["late", "mid"]
 
 
+def test_list_items_breaks_created_at_ties_by_id_descending() -> None:
+    """Items sharing a timestamp must sort deterministically, matching SQLite.
+
+    A collection listing comes back in unspecified order, so without a
+    secondary key on id, the sort would be an unstable reflection of
+    whatever order the (stubbed, here-fixed) response happened to list
+    documents in — a real Firestore response has no such guarantee at all.
+    """
+    transport = _StubTransport()
+    same_ts = "2026-08-16T10:00:00+00:00"
+    transport.responses["vaults/u1/items"] = _listing(
+        _item("a", created_at=same_ts),
+        _item("c", created_at=same_ts),
+        _item("b", created_at=same_ts),
+    )
+    index = FirestoreVaultIndex(transport)
+    assert [i.id for i in index.list_items("u1")] == ["c", "b", "a"]
+
+
 def test_list_items_requests_only_the_owners_collection() -> None:
     """Owner scoping happens by requesting the owner's own subcollection path."""
     transport = _StubTransport()
+    transport.responses["vaults/u1/items"] = {}
     FirestoreVaultIndex(transport).list_items("u1")
     method, path, _ = transport.calls[0]
     assert method == "GET"
@@ -324,11 +344,11 @@ def test_list_items_skips_a_malformed_document_and_keeps_the_rest() -> None:
     assert [i.id for i in index.list_items("u1")] == ["good"]
 
 
-def test_list_items_handles_a_none_response() -> None:
-    assert FirestoreVaultIndex(_StubTransport()).list_items("u1") == []
-
-
 def test_list_items_handles_a_response_with_no_documents_key() -> None:
+    """A dict with no `documents` key is a genuinely empty page — not an error.
+
+    This is what a real empty Firestore collection actually returns.
+    """
     transport = _StubTransport()
     transport.responses["vaults/u1/items"] = {}
     assert FirestoreVaultIndex(transport).list_items("u1") == []
@@ -342,3 +362,176 @@ def test_malformed_row_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger="friday.vault.index"):
         assert FirestoreVaultIndex(transport).get_item("u1", "bad") is None
     assert any("bad" in record.message for record in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# Pagination: a vault past Firestore's ~300-document page cap must not lose
+# its tail.
+# --------------------------------------------------------------------------
+
+
+def test_list_items_follows_pagination_to_get_every_item() -> None:
+    transport = _StubTransport()
+    transport.responses["vaults/u1/items"] = {
+        "documents": [_doc(_item("a"))],
+        "nextPageToken": "page2",
+    }
+    transport.responses["vaults/u1/items?pageToken=page2"] = {
+        "documents": [_doc(_item("b"))],
+    }
+    index = FirestoreVaultIndex(transport)
+    assert {i.id for i in index.list_items("u1")} == {"a", "b"}
+
+    paths = [path for _, path, _ in transport.calls]
+    assert "vaults/u1/items" in paths
+    assert "vaults/u1/items?pageToken=page2" in paths
+
+
+def test_list_items_follows_a_chain_of_more_than_two_pages() -> None:
+    transport = _StubTransport()
+    transport.responses["vaults/u1/items"] = {
+        "documents": [_doc(_item("a"))],
+        "nextPageToken": "p2",
+    }
+    transport.responses["vaults/u1/items?pageToken=p2"] = {
+        "documents": [_doc(_item("b"))],
+        "nextPageToken": "p3",
+    }
+    transport.responses["vaults/u1/items?pageToken=p3"] = {
+        "documents": [_doc(_item("c"))],
+    }
+    index = FirestoreVaultIndex(transport)
+    assert {i.id for i in index.list_items("u1")} == {"a", "b", "c"}
+
+
+def test_list_notes_follows_pagination_to_get_every_note() -> None:
+    transport = _StubTransport()
+    transport.responses["vaults/u1/notes"] = {
+        "documents": [_doc(_note("a"))],
+        "nextPageToken": "page2",
+    }
+    transport.responses["vaults/u1/notes?pageToken=page2"] = {
+        "documents": [_doc(_note("b"))],
+    }
+    index = FirestoreVaultIndex(transport)
+    assert {n.id for n in index.list_notes("u1")} == {"a", "b"}
+
+
+def test_total_bytes_sums_across_every_page_with_no_limit() -> None:
+    """Critical: total_bytes must never undercount by capping the read.
+
+    It feeds the quota check on every upload signature request — an
+    undercount (whether from a page cutoff or a hardcoded limit) lets an
+    upload through that should have been refused.
+    """
+    transport = _StubTransport()
+    asset = CloudinaryAsset(
+        public_id="p", version=1, format="jpg", bytes=500, resource_type="image"
+    )
+    transport.responses["vaults/u1/items"] = {
+        "documents": [_doc(_item("a", cloudinary=asset))],
+        "nextPageToken": "page2",
+    }
+    transport.responses["vaults/u1/items?pageToken=page2"] = {
+        "documents": [_doc(_item("b", cloudinary=asset))],
+    }
+    index = FirestoreVaultIndex(transport)
+    assert index.total_bytes("u1") == 1000
+
+
+# --------------------------------------------------------------------------
+# Outages must not look like an empty (or under-counted) vault.
+# --------------------------------------------------------------------------
+
+
+def test_list_items_raises_when_the_transport_returns_nothing_usable() -> None:
+    """A `None` response cannot mean "empty" for a collection listing.
+
+    A genuinely empty Firestore collection is still a dict (`{}`); `None`
+    means the underlying transport didn't get a real answer. Reporting that
+    as "no items" would let an outage silently mimic an empty vault, which
+    combined with total_bytes would fail the upload quota check open.
+    """
+    with pytest.raises(FirestoreIndexError):
+        FirestoreVaultIndex(_StubTransport()).list_items("u1")
+
+
+def test_list_items_raises_on_an_error_shaped_response() -> None:
+    transport = _StubTransport()
+    transport.responses["vaults/u1/items"] = {"error": {"code": 500, "message": "internal"}}
+    with pytest.raises(FirestoreIndexError):
+        FirestoreVaultIndex(transport).list_items("u1")
+
+
+def test_total_bytes_raises_rather_than_undercounting_on_an_error_response() -> None:
+    """The dangerous combination: quota accounting must not fail open.
+
+    If total_bytes swallowed this and returned 0 instead, the quota check
+    downstream would pass during a genuine Firestore outage.
+    """
+    transport = _StubTransport()
+    transport.responses["vaults/u1/items"] = {"error": {"code": 500, "message": "internal"}}
+    with pytest.raises(FirestoreIndexError):
+        FirestoreVaultIndex(transport).total_bytes("u1")
+
+
+def test_list_items_raises_on_the_second_page_being_error_shaped() -> None:
+    """The pagination loop must keep checking every page it fetches, not just the first."""
+    transport = _StubTransport()
+    transport.responses["vaults/u1/items"] = {
+        "documents": [_doc(_item("a"))],
+        "nextPageToken": "page2",
+    }
+    transport.responses["vaults/u1/items?pageToken=page2"] = {
+        "error": {"code": 500, "message": "internal"}
+    }
+    with pytest.raises(FirestoreIndexError):
+        FirestoreVaultIndex(transport).list_items("u1")
+
+
+def test_get_item_raises_on_an_error_shaped_response() -> None:
+    """A get must not report "not found" when Firestore actually errored."""
+    transport = _StubTransport()
+    transport.responses["vaults/u1/items/i1"] = {"error": {"code": 500, "message": "internal"}}
+    with pytest.raises(FirestoreIndexError):
+        FirestoreVaultIndex(transport).get_item("u1", "i1")
+
+
+def test_get_solve_raises_on_an_error_shaped_response() -> None:
+    transport = _StubTransport()
+    transport.responses["solves/s1"] = {"error": {"code": 503, "message": "unavailable"}}
+    with pytest.raises(FirestoreIndexError):
+        FirestoreVaultIndex(transport).get_solve("s1")
+
+
+def test_get_note_raises_on_an_error_shaped_response() -> None:
+    transport = _StubTransport()
+    transport.responses["vaults/u1/notes/n1"] = {"error": {"code": 500, "message": "internal"}}
+    with pytest.raises(FirestoreIndexError):
+        FirestoreVaultIndex(transport).get_note("u1", "n1")
+
+
+def test_transport_exceptions_propagate_rather_than_being_swallowed() -> None:
+    """Genuine transport failures (network errors, timeouts) must not be hidden.
+
+    SQLite never raises on a query, so the two backends do diverge on this —
+    but silently swallowing a Firestore outage into "empty vault" is worse:
+    combined with total_bytes feeding the upload quota check, that would fail
+    the quota guard open. The route layer is expected to catch this (and
+    FirestoreIndexError) and return a 5xx.
+    """
+
+    class _RaisingTransport:
+        def request(
+            self, method: str, path: str, body: dict[str, Any] | None = None
+        ) -> Any:
+            raise ConnectionError("boom")
+
+    with pytest.raises(ConnectionError):
+        FirestoreVaultIndex(_RaisingTransport()).list_items("u1")
+
+    with pytest.raises(ConnectionError):
+        FirestoreVaultIndex(_RaisingTransport()).total_bytes("u1")
+
+    with pytest.raises(ConnectionError):
+        FirestoreVaultIndex(_RaisingTransport()).get_item("u1", "i1")

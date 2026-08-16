@@ -16,22 +16,68 @@ docstring there. It is the single place that decides how a corrupt stored
 document is handled, and both backends must treat model-evolution drift the
 same way; two copies of that judgement call would drift out of sync exactly
 the way the models it protects against already have, twice.
+
+Two failure modes get careful handling, both stemming from the same rule:
+it is fine to report an empty vault only when the vault is genuinely empty,
+never when we could not find out.
+
+* Firestore's REST list endpoint pages at ~300 documents (see
+  ``friday.circle.firestore_rest``'s hardcoded ``pageSize=300``) and returns
+  ``nextPageToken`` past that. ``_list_all_documents`` loops until there is no
+  token left, so a vault past one page doesn't silently lose its tail.
+* An error-shaped response (``{"error": {...}}``) or an unusable response
+  shape from a collection listing is raised as :class:`FirestoreIndexError`
+  rather than treated as "no documents" — see that class's docstring for why.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from friday.vault.index import _parse_row
 from friday.vault.models import Item, Note, Privacy, Solve
 
 
 class FirestoreTransport(Protocol):
-    """One method: issue a REST call against a document path."""
+    """One method: issue a REST call against a document or collection path.
+
+    ``path`` may carry a query string — most notably ``?pageToken=...`` when
+    :meth:`FirestoreVaultIndex._list_all_documents` pages through a collection
+    larger than one page. Implementations MUST pass ``path`` through to the
+    underlying HTTP call exactly as given: do not strip, re-parse, or
+    re-encode a query string that's already present. This binds the
+    production adapter over :mod:`friday.circle.firestore_rest` (written in a
+    later task) as much as it binds the test stubs here.
+    """
 
     def request(
         self, method: str, path: str, body: dict[str, Any] | None = None
     ) -> Any: ...
+
+
+class FirestoreIndexError(RuntimeError):
+    """Firestore returned something other than data or a legitimate "not found".
+
+    Raised for an explicit error-shaped payload (``{"error": {...}}``, which
+    Firestore's REST API can return with a JSON body even on a non-2xx
+    response) or, for a collection listing, any response that isn't a valid
+    page — a genuinely empty Firestore collection is still a dict (``{}``),
+    so anything else (``None``, a string, a list...) means the transport
+    could not get a real answer, not that the vault is empty.
+
+    This distinction matters most for :meth:`FirestoreVaultIndex.total_bytes`,
+    which runs on every upload signature request to enforce the storage
+    quota: silently treating "Firestore is down" as "zero items" would let
+    the quota check pass when it should refuse. The route layer calling into
+    this index is responsible for catching this and returning a 5xx, not for
+    treating it as any kind of empty or missing result.
+
+    Genuine transport-level exceptions (network errors, timeouts, etc. raised
+    by the injected :class:`FirestoreTransport`) are deliberately never
+    caught anywhere in this module and propagate as-is — this exception is
+    only for responses that came back but cannot be trusted.
+    """
 
 
 def _wrap(doc_json: str) -> dict[str, Any]:
@@ -43,6 +89,11 @@ def _unwrap(raw: Any) -> str | None:
         return None
     value = raw.get("fields", {}).get("doc", {}).get("stringValue")
     return value if isinstance(value, str) else None
+
+
+def _raise_if_error_payload(raw: Any, path: str) -> None:
+    if isinstance(raw, dict) and "error" in raw:
+        raise FirestoreIndexError(f"Firestore returned an error for {path}: {raw['error']!r}")
 
 
 def _doc_id(document: Any, fallback: str) -> str:
@@ -65,6 +116,30 @@ class FirestoreVaultIndex:
     def __init__(self, transport: FirestoreTransport) -> None:
         self._t = transport
 
+    def _list_all_documents(self, base_path: str) -> list[Any]:
+        """Page through a whole collection, following ``nextPageToken`` to the end.
+
+        Stopping after one page would silently drop everything past
+        Firestore's ~300-document page cap — see the module docstring. Raises
+        :class:`FirestoreIndexError` rather than returning a partial result
+        for any response that isn't a genuine (possibly empty) page, per the
+        "never mistake an outage for an empty vault" rule.
+        """
+        documents: list[Any] = []
+        path = base_path
+        while True:
+            raw = self._t.request("GET", path)
+            _raise_if_error_payload(raw, path)
+            if not isinstance(raw, dict):
+                raise FirestoreIndexError(
+                    f"Firestore returned an unusable response listing {path}: {raw!r}"
+                )
+            documents.extend(raw.get("documents", []))
+            token = raw.get("nextPageToken")
+            if not token:
+                return documents
+            path = f"{base_path}?pageToken={quote(str(token), safe='')}"
+
     # ---------------------------------------------------------------- items
     def put_item(self, item: Item) -> None:
         self._t.request(
@@ -74,12 +149,15 @@ class FirestoreVaultIndex:
         )
 
     def get_item(self, owner_uid: str, item_id: str) -> Item | None:
-        doc = _unwrap(self._t.request("GET", f"vaults/{owner_uid}/items/{item_id}"))
+        path = f"vaults/{owner_uid}/items/{item_id}"
+        raw = self._t.request("GET", path)
+        _raise_if_error_payload(raw, path)
+        doc = _unwrap(raw)
         if not doc:
             return None
         return _parse_row(Item, item_id, doc, "item")
 
-    def list_items(
+    def _fetch_items(
         self,
         owner_uid: str,
         *,
@@ -87,16 +165,20 @@ class FirestoreVaultIndex:
         kind: str = "",
         space: str = "",
         include_locked: bool = False,
-        limit: int = 100,
     ) -> list[Item]:
-        raw = self._t.request("GET", f"vaults/{owner_uid}/items")
-        documents = raw.get("documents", []) if isinstance(raw, dict) else []
+        """Every matching item for ``owner_uid``, newest first, unpaginated and unlimited.
+
+        Shared by :meth:`list_items` (which then slices to ``limit``) and
+        :meth:`total_bytes` (which must not slice at all — see its
+        docstring).
+        """
+        documents = self._list_all_documents(f"vaults/{owner_uid}/items")
         items: list[Item] = []
-        for index, document in enumerate(documents):
+        for position, document in enumerate(documents):
             doc = _unwrap(document)
             if not doc:
                 continue
-            item = _parse_row(Item, _doc_id(document, str(index)), doc, "item")
+            item = _parse_row(Item, _doc_id(document, str(position)), doc, "item")
             if item is None:
                 continue
             if subject and item.classification.subject != subject:
@@ -108,8 +190,25 @@ class FirestoreVaultIndex:
             if not include_locked and item.privacy is Privacy.LOCKED:
                 continue
             items.append(item)
-        items.sort(key=lambda i: i.created_at, reverse=True)
-        return items[:limit]
+        # Secondary key on id keeps ordering deterministic when two items
+        # share a created_at, matching SQLite's `ORDER BY created_at DESC, id
+        # DESC` — a collection listing has no inherent order to fall back on.
+        items.sort(key=lambda i: (i.created_at, i.id), reverse=True)
+        return items
+
+    def list_items(
+        self,
+        owner_uid: str,
+        *,
+        subject: str = "",
+        kind: str = "",
+        space: str = "",
+        include_locked: bool = False,
+        limit: int = 100,
+    ) -> list[Item]:
+        return self._fetch_items(
+            owner_uid, subject=subject, kind=kind, space=space, include_locked=include_locked
+        )[:limit]
 
     def delete_item(self, owner_uid: str, item_id: str) -> bool:
         self._t.request("DELETE", f"vaults/{owner_uid}/items/{item_id}")
@@ -120,7 +219,10 @@ class FirestoreVaultIndex:
         self._t.request("PATCH", f"solves/{solve.id}", _wrap(solve.model_dump_json()))
 
     def get_solve(self, solve_id: str) -> Solve | None:
-        doc = _unwrap(self._t.request("GET", f"solves/{solve_id}"))
+        path = f"solves/{solve_id}"
+        raw = self._t.request("GET", path)
+        _raise_if_error_payload(raw, path)
+        doc = _unwrap(raw)
         if not doc:
             return None
         return _parse_row(Solve, solve_id, doc, "solve")
@@ -133,36 +235,49 @@ class FirestoreVaultIndex:
         )
 
     def get_note(self, owner_uid: str, note_id: str) -> Note | None:
-        doc = _unwrap(self._t.request("GET", f"vaults/{owner_uid}/notes/{note_id}"))
+        path = f"vaults/{owner_uid}/notes/{note_id}"
+        raw = self._t.request("GET", path)
+        _raise_if_error_payload(raw, path)
+        doc = _unwrap(raw)
         if not doc:
             return None
         return _parse_row(Note, note_id, doc, "note")
 
     def list_notes(self, owner_uid: str, *, limit: int = 100) -> list[Note]:
-        raw = self._t.request("GET", f"vaults/{owner_uid}/notes")
-        documents = raw.get("documents", []) if isinstance(raw, dict) else []
+        documents = self._list_all_documents(f"vaults/{owner_uid}/notes")
         notes: list[Note] = []
-        for index, document in enumerate(documents):
+        for position, document in enumerate(documents):
             doc = _unwrap(document)
             if not doc:
                 continue
-            note = _parse_row(Note, _doc_id(document, str(index)), doc, "note")
+            note = _parse_row(Note, _doc_id(document, str(position)), doc, "note")
             if note is not None:
                 notes.append(note)
-        notes.sort(key=lambda n: n.created_at, reverse=True)
+        notes.sort(key=lambda n: (n.created_at, n.id), reverse=True)
         return notes[:limit]
 
     def total_bytes(self, owner_uid: str) -> int:
-        """Sum committed Cloudinary asset bytes, including locked items.
+        """Sum every committed Cloudinary asset's bytes for ``owner_uid``, locked included.
 
-        Unlike SQLite there is no promoted ``bytes`` column to sum in a single
-        query; this re-lists and re-parses every item. That is deliberate per
-        the module docstring's filtering trade-off — acceptable at personal
-        vault scale, and it must include locked items, which still consume
-        storage, matching :meth:`SQLiteVaultIndex.total_bytes`.
+        Reads and parses *every* document in the owner's item collection —
+        all pages, no limit — because this feeds the storage quota check on
+        every upload signature request, and undercounting here (e.g. by
+        capping the read) would let an upload through that should have been
+        refused. Locked items still occupy storage, so they count too,
+        matching :meth:`SQLiteVaultIndex.total_bytes`, which sums
+        unconditionally.
+
+        Known scaling limit, flagged rather than fixed here: unlike SQLite's
+        promoted ``bytes`` column, there is no server-side sum available, so
+        this is one Firestore document read per item in the vault, on every
+        photo upload. At a few thousand items that starts to burn the
+        free-tier read quota. The correct fix is a per-owner aggregate
+        counter document maintained on write, not a full scan on every read —
+        deliberately not built in this task; it belongs to the quota-guard
+        work that follows.
         """
         return sum(
             item.cloudinary.bytes
-            for item in self.list_items(owner_uid, include_locked=True, limit=10_000)
+            for item in self._fetch_items(owner_uid, include_locked=True)
             if item.cloudinary is not None
         )

@@ -212,6 +212,23 @@ def test_list_items_orders_newest_first_and_respects_limit() -> None:
     assert [i.id for i in index.list_items("u1", limit=2)] == ["late", "mid"]
 
 
+def test_list_items_breaks_created_at_ties_by_id_descending() -> None:
+    """Items sharing a timestamp must still sort deterministically.
+
+    Without a secondary key, rows with equal `created_at` have no guaranteed
+    order in SQL, and the Firestore backend (which sorts client-side over a
+    collection returned in unspecified order) could legitimately disagree
+    with SQLite on the tie order — a divergence a real caller would notice as
+    a vault list that reshuffles between backends.
+    """
+    index = SQLiteVaultIndex(":memory:")
+    same_ts = "2026-08-16T10:00:00+00:00"
+    index.put_item(_item("a", created_at=same_ts))
+    index.put_item(_item("c", created_at=same_ts))
+    index.put_item(_item("b", created_at=same_ts))
+    assert [i.id for i in index.list_items("u1")] == ["c", "b", "a"]
+
+
 def test_file_backed_index_persists_across_instances(tmp_path: Path) -> None:
     """The production configuration: two separate instances, same file path."""
     db_path = str(tmp_path / "vault.db")

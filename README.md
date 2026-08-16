@@ -209,6 +209,16 @@ views — are always on.
 |---|---|---|
 | Perception | YOLO detection, OCR, clipboard, screen capture → `describe_screen()` *(privacy-heavy)* | `FRIDAY_ENABLE_PERCEPTION` |
 
+### 🗄️ Vault
+
+| Capability | What it does | Flag |
+|---|---|---|
+| Vault | Photograph anything; she files, reads, solves and revises from it | `FRIDAY_ENABLE_VAULT` |
+| Solver | Three vision drafts reconciled, then checked against SymPy | `FRIDAY_ENABLE_VAULT` |
+| Notes | Notes written over chosen captures, fanned out to memory + flashcards | `FRIDAY_ENABLE_VAULT` |
+| Exam mode | Sit a photographed paper against the clock, marked honestly | `FRIDAY_ENABLE_VAULT` |
+| Android | Camera, share sheet, tile, scanner, bubble, widget, "Hey FRIDAY" | `android/` |
+
 ### 📡 Proactive
 
 | Capability | What it does | Flag |
@@ -326,6 +336,8 @@ FRIDAY exposes many faces over one core. The flag-gated ones return `404` until 
 | 🧩 Browser ext | `browser_ext/` | A Manifest V3 quick-ask popup for the local FRIDAY |
 | 📊 Dashboard | Streamlit | A separate operator console reading the admin surface |
 | 🎙️ Voice | `POST /voice`, `WS /ws/voice`, `WS /ws/wake` | One spoken turn / streaming + barge-in / wake + summon |
+| 🗄️ Vault | `/vault/*` | Signed uploads, items, solve, notes, search, analytics, exam |
+| 📱 Android | `android/` | Her own phone app: capture, talk, and an on-device wake word |
 | 🍏 Siri | `POST /siri/ask` | Hands-free turns via the iOS Shortcut (circle, maps, Instagram DMs) |
 | 📺 Android TV | `/tv/ask`, `/tv/command`, `WS /tv/stream` | Android TV front door — spoken control + a companion app (`android-tv/`) |
 
@@ -474,6 +486,13 @@ GEMINI_MODEL=gemini-2.0-flash
 # Voice
 FRIDAY_ENABLE_VOICE=false
 FRIDAY_TTS_PROVIDER=piper          # piper | elevenlabs | fake
+
+# Vault (Cloudinary-backed captures; off by default)
+FRIDAY_ENABLE_VAULT=false
+FRIDAY_CLOUDINARY_CLOUD_NAME=
+FRIDAY_CLOUDINARY_API_KEY=
+FRIDAY_CLOUDINARY_API_SECRET=
+FRIDAY_VAULT_INDEX_BACKEND=sqlite   # or firestore
 
 # Gateway
 FRIDAY_BIND_HOST=127.0.0.1

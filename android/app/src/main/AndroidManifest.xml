@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- A phone without a camera can still hold the vault and read notes, so
@@ -74,6 +75,13 @@
 
         <!-- The bubble draws over other apps; MIUI wants the overlay grant,
              which SetupActivity walks the user to. -->
+        <!-- Holds the microphone to score "Hey FRIDAY" locally; nothing is
+             sent anywhere unless it fires. -->
+        <service
+            android:name=".wake.WakeService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
         <service
             android:name=".bubble.BubbleService"
             android:exported="false"

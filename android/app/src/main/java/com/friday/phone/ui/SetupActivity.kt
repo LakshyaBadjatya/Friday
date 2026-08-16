@@ -33,7 +33,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import com.friday.phone.bubble.BubbleService
+import com.friday.phone.wake.WakeService
 
 /**
  * The permissions HyperOS will not grant on its own.
@@ -66,6 +70,7 @@ class SetupActivity : ComponentActivity() {
         // Bumped on resume so every row re-checks itself after a trip to Settings.
         var round by remember { mutableIntStateOf(0) }
         var bubbleOn by remember { mutableStateOf(false) }
+        var wakeOn by remember { mutableStateOf(false) }
 
         Column(
             modifier = Modifier
@@ -162,6 +167,43 @@ class SetupActivity : ComponentActivity() {
                 }
             }
 
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Hey FRIDAY", color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "Listens for her name on the device. Audio is scored here and " +
+                            "discarded; only a detection does anything, and what it does " +
+                            "is open the talk screen.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(
+                            enabled = micGranted(ctx) && !wakeOn,
+                            onClick = { WakeService.start(ctx); wakeOn = true },
+                        ) { Text("Listen") }
+                        OutlinedButton(
+                            enabled = wakeOn,
+                            onClick = { WakeService.stop(ctx); wakeOn = false },
+                        ) { Text("Stop") }
+                    }
+                    if (!micGranted(ctx)) {
+                        Text(
+                            "Grant the microphone on the Talk screen first.",
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
+                }
+            }
+
             OutlinedButton(
                 onClick = { round += 1 },
                 modifier = Modifier.fillMaxWidth(),
@@ -210,6 +252,10 @@ class SetupActivity : ComponentActivity() {
     }
 
     private fun canOverlay(ctx: Context): Boolean = Settings.canDrawOverlays(ctx)
+
+    private fun micGranted(ctx: Context): Boolean =
+        ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
 
     private fun batteryUnrestricted(ctx: Context): Boolean =
         ctx.getSystemService(PowerManager::class.java)

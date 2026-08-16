@@ -23,6 +23,12 @@ dependencies = [
   # every hosted TTS. It emits MP3, which ffmpeg converts to the Opus frames the
   # voice socket requires.
   "edge-tts>=7.0",
+  # Draws the roster's arc-reactor emblems. A Discord webhook takes an avatar
+  # only as a public URL, so the images have to be served from here; without
+  # this the route 500s in production and every operator quietly falls back to
+  # a blank face. It was already present locally as a transitive extra, which
+  # is exactly why the gap only showed up when the container was built.
+  "pillow>=11.0",
 ]
 
 [project.scripts]

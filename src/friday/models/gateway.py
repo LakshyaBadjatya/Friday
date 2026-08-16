@@ -33,6 +33,17 @@ from friday.errors import ProviderError
 from friday.models.catalog import ModelCatalog, ModelInfo
 from friday.providers.llm import LLMProvider, LLMResponse, Message, ToolSpec
 
+#: How long a rate-limited model is left alone. Long enough that a depleted
+#: free-tier quota stops costing a round trip on every single message, short
+#: enough that an hourly window reopening is noticed within a few minutes.
+_COOLDOWN = 300.0
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    """Whether a provider error means "out of quota" rather than "broke"."""
+    detail = str(exc).lower()
+    return "429" in detail or "rate limit" in detail or "quota" in detail
+
 logger = logging.getLogger("friday.models.gateway")
 
 
@@ -79,6 +90,8 @@ class ModelGateway(LLMProvider):
         self._active_model_id = default_model_id
         self._fallback_model_id = fallback_model_id
         self._clock = clock
+        #: ``{model_id: monotonic deadline}`` for models resting off a 429.
+        self._rate_limited_until: dict[str, float] = {}
 
     @property
     def active_model_id(self) -> str:
@@ -121,21 +134,57 @@ class ModelGateway(LLMProvider):
         fallback's provider; otherwise the original error propagates.
         """
         target_id = model if model is not None else self._active_model_id
+        fallback_id = self._fallback_model_id
+
+        # A model that just told us it is out of quota is not going to have any
+        # a second later. The primary here is a free tier that returns 429 for
+        # hours once the daily allowance is gone, and every message was paying
+        # for that refusal before falling back — which is why replies got
+        # steadily slower as the day went on rather than all at once.
+        if (
+            model is None
+            and fallback_id is not None
+            and fallback_id != target_id
+            and self._resting(target_id)
+        ):
+            fb_info, fb_provider = self._resolve(fallback_id)
+            return await fb_provider.complete(messages, tools, model=fb_info.model)
+
         info, provider = self._resolve(target_id)
         try:
             return await provider.complete(messages, tools, model=info.model)
         except ProviderError as exc:
-            fallback_id = self._fallback_model_id
             if fallback_id is None or fallback_id == target_id:
                 raise
-            logger.warning(
-                "gateway model %s failed, falling back to %s: %s",
-                target_id,
-                fallback_id,
-                exc,
-            )
+            if _is_rate_limited(exc):
+                # Logged once per cooldown rather than once per message, so a
+                # exhausted quota reads as one event instead of a wall.
+                self._rest(target_id)
+                logger.warning(
+                    "gateway model %s is rate-limited; using %s for %ds",
+                    target_id, fallback_id, _COOLDOWN,
+                )
+            else:
+                logger.warning(
+                    "gateway model %s failed, falling back to %s: %s",
+                    target_id,
+                    fallback_id,
+                    exc,
+                )
             fb_info, fb_provider = self._resolve(fallback_id)
             return await fb_provider.complete(messages, tools, model=fb_info.model)
+
+    def _resting(self, model_id: str) -> bool:
+        """Whether this model is still inside its rate-limit cooldown."""
+        until = self._rate_limited_until.get(model_id, 0.0)
+        if until <= self._clock():
+            self._rate_limited_until.pop(model_id, None)
+            return False
+        return True
+
+    def _rest(self, model_id: str) -> None:
+        """Stop calling this model for a while."""
+        self._rate_limited_until[model_id] = self._clock() + _COOLDOWN
 
     async def _compare_one(
         self,

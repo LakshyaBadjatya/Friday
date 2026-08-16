@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from friday.errors import ProviderError
-from friday.models.catalog import ModelCatalog
+from friday.models.catalog import ModelCatalog, ModelInfo
 from friday.models.gateway import CompareResult, ModelGateway
 from friday.providers.llm import (
     FakeLLM,
@@ -332,3 +332,55 @@ async def test_judge_unknown_model_is_none() -> None:
     ]
     best = await gw.judge("q", results, judge_model_id="nope:missing")
     assert best is None
+
+
+@pytest.mark.anyio
+async def test_a_rate_limited_model_is_left_alone_for_a_while() -> None:
+    """A model that just said "out of quota" is not asked again immediately.
+
+    The free primary answers 429 for hours once its daily allowance is gone, and
+    every message was paying for that refusal before falling back — which is why
+    replies got steadily slower through the day rather than all at once.
+    """
+    calls: list[str] = []
+
+    class Primary:
+        async def complete(self, messages, tools=None, *, model=None):
+            calls.append("primary")
+            raise ProviderError("OpenRouter request failed: Error code: 429")
+
+    class Fallback:
+        async def complete(self, messages, tools=None, *, model=None):
+            calls.append("fallback")
+            return LLMResponse(text="ok", tool_calls=[], raw={})
+
+    now = [1000.0]
+    catalog = ModelCatalog(
+        available_providers={"pp", "ff"},
+        catalog=(
+            ModelInfo(id="pp:p-1", provider="pp", model="p-1", label="p", free=True),
+            ModelInfo(id="ff:f-1", provider="ff", model="f-1", label="f", free=True),
+        ),
+    )
+    gateway = ModelGateway(
+        {"pp": Primary(), "ff": Fallback()},
+        catalog,
+        default_model_id="pp:p-1",
+        fallback_model_id="ff:f-1",
+        clock=lambda: now[0],
+    )
+
+    msgs = [Message(role="user", content="hi")]
+    assert (await gateway.complete(msgs)).text == "ok"
+    assert calls == ["primary", "fallback"]
+
+    # Inside the cooldown the primary is skipped entirely.
+    calls.clear()
+    assert (await gateway.complete(msgs)).text == "ok"
+    assert calls == ["fallback"]
+
+    # Once it lapses it gets another chance — a quota window does reopen.
+    calls.clear()
+    now[0] += 10_000.0
+    assert (await gateway.complete(msgs)).text == "ok"
+    assert calls == ["primary", "fallback"]

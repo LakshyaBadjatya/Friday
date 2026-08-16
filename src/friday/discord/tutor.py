@@ -56,7 +56,12 @@ _PROMPT = (
     "specific step that is wrong rather than producing a second answer — two "
     "contradictory answers in a row are worse than one wrong one.\n\n"
     "Format for a chat message: plain text, no LaTeX, no markdown tables. Keep "
-    "the working tight but complete."
+    "the working tight but complete.\n\n"
+    "Start immediately with the first line of working. No preamble, no 'here is "
+    "the solution', no 'following the steps you outlined', no mention of these "
+    "instructions or of any format — the person reading this asked a physics "
+    "question and wants the physics. If the message genuinely contains no "
+    "problem to solve, say that in one short line and nothing else."
 )
 
 
@@ -94,6 +99,7 @@ _FOLLOW_UP = re.compile(
     r"\b(?:re-?(?:analyse|analyze|check|do|calculate|solve)"
     r"|are\s+you\s+sure|you\s+sure|check\s+(?:it\s+)?again|try\s+again"
     r"|explain\s+(?:it|that|this|your\s+answer|the\s+answer|again|properly)?"
+    r"|continue|carry\s+on|go\s+on|finish\s+(?:it|that)"
     r"|elaborate|in\s+detail|step\s+by\s+step|show\s+(?:the\s+)?(?:working|steps)"
     r"|why\s+(?:is\s+)?(?:that|it|this)|how\s+did\s+you\s+get\s+that"
     r"|that(?:'s|\s+is)\s+(?:wrong|not\s+right|incorrect))\b",
@@ -142,9 +148,22 @@ def _ask(key: str, question: str) -> str | None:
     body = json.dumps(
         {
             "contents": [{"parts": [{"text": f"{_PROMPT}\n\nProblem:\n{question}"}]}],
-            # Deterministic. A physics answer should not vary between asks, and
-            # sampling is what lets a plausible-looking wrong step through.
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1200},
+            "generationConfig": {
+                # Deterministic. A physics answer should not vary between asks,
+                # and sampling is what lets a plausible-looking wrong step
+                # through.
+                "temperature": 0.0,
+                # This is a thinking model and the cap counts thought tokens.
+                # At 1200 the model spent 1148 of them reasoning and had 48 left
+                # to answer with, so every derivation stopped dead partway
+                # through the list of givens — the reply looked like a bug in
+                # the transport when it was the budget all along.
+                "maxOutputTokens": 8192,
+                # Enough thinking to get the sign conventions right, not so much
+                # that it wanders. The reasoning is what makes this model worth
+                # calling; it just cannot have the whole envelope.
+                "thinkingConfig": {"thinkingBudget": 1024},
+            },
         }
     ).encode()
     request = urllib.request.Request(  # noqa: S310
@@ -161,9 +180,10 @@ def _ask(key: str, question: str) -> str | None:
         logger.warning("tutor: solve failed")
         return None
     answer = (text or "").strip()
-    # Discord caps a message at 2000 characters and rejects the whole send if it
-    # is longer, so a long derivation is trimmed at a line boundary rather than
-    # mid-equation.
-    if len(answer) > 1800:
-        answer = answer[:1800].rsplit("\n", 1)[0] + "\n…"
-    return answer or None
+    # No trimming to Discord's message limit here any more. That cap used to be
+    # enforced by cutting the text, which reliably removed the last step — the
+    # substitution check that makes the answer trustworthy — and left an ellipsis
+    # where the confirmation should have been. The sender splits long replies
+    # across messages now, so length is its problem and not this function's.
+    # The ceiling that remains is a sanity bound, far above any real derivation.
+    return answer[:6000] or None

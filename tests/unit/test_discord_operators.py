@@ -110,3 +110,48 @@ def test_the_persona_rule_does_not_trip_the_identity_guard() -> None:
         rule = operators.persona_rule(operators.addressed(f"{name.lower()} hi"))
         assert guard._IDENTITY.search(rule) is None, name
         assert guard.blocked(rule) is None, name
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("solve this friday", True),
+        ("solve this", True),
+        ("friday solve this", True),
+        ("can you answer that", True),
+        ("explain this properly", True),
+        ("what is the capital of france", False),   # carries its own subject
+        ("solve x^2 + 2x = 0", False),
+        ("hello", False),
+    ],
+)
+def test_an_instruction_with_a_pronoun_means_the_quoted_message(
+    text: str, expected: bool
+) -> None:
+    """Replying "solve this friday" to a problem must solve the problem.
+
+    Those three words were being sent on alone, and she answered — correctly and
+    uselessly — that the problem statement appeared to be missing.
+    """
+    from friday.discord.gateway import _points_at_quote  # noqa: PLC0415
+
+    assert _points_at_quote(text) is expected
+
+
+def test_a_long_answer_is_split_rather_than_truncated() -> None:
+    """Nothing may be lost to Discord's 2000-character limit.
+
+    Trimming to fit removed the substitution check at the end of every worked
+    solution — the step that makes the answer worth trusting — and left an
+    ellipsis in its place.
+    """
+    from friday.discord.gateway import split_for_discord  # noqa: PLC0415
+
+    body = "\n".join(f"step {n}: " + "x" * 60 for n in range(60))
+    parts = split_for_discord(body)
+    assert len(parts) > 1
+    assert all(len(part) <= 1900 for part in parts)
+    assert "\n".join(parts) == body          # lossless, seams on line breaks
+
+    assert split_for_discord("short") == ["short"]
+    assert split_for_discord("   ") == []

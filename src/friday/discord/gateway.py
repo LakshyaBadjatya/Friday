@@ -701,7 +701,10 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     # this, replying to your own unanswered question with "friday" made her
     # answer the word "friday" instead of the question above it.
     quoted = (message.get("referenced_message") or {}).get("content") or ""
-    if quoted and _is_nudge(content):
+    if quoted and (_is_nudge(content) or _points_at_quote(content)):
+        # "solve this friday" replying to a problem carries no problem of its
+        # own. She was handed those three words alone and answered, correctly
+        # and uselessly, that the problem statement seemed to be missing.
         content = quoted.strip()
 
     # She looks at what gets posted here. The description is folded into the
@@ -956,6 +959,26 @@ def _is_nudge(content: str) -> bool:
     return bool(_NUDGE.match((content or "").strip()))
 
 
+#: "solve this", "solve this friday", "do that", "answer this one". An
+#: instruction whose object is a pronoun pointing at the quoted message — the
+#: work is up there, not in these three words.
+_POINTS_AT_QUOTE = re.compile(
+    r"^\s*(?:hey\s+|ok\s+)?(?:friday[,\s]+)?"
+    r"(?:can\s+you\s+|could\s+you\s+|please\s+|pls\s+)?"
+    r"(?:solve|do|answer|explain|calculate|work\s+out|check|read|help\s+with|"
+    r"look\s+at|reanalyse|reanalyze)\s+"
+    r"(?:this|that|it|these|the\s+above|the\s+question|the\s+problem)"
+    r"(?:\s+(?:one|out|for\s+me|again|properly|friday))*"
+    r"[,\s]*(?:friday)?\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _points_at_quote(content: str) -> bool:
+    """Whether this message's subject is the message it replies to."""
+    return bool(_POINTS_AT_QUOTE.match((content or "").strip()))
+
+
 def _owner_ids(app: Any) -> list[str]:
     """Every owner id, from a comma-separated setting.
 
@@ -1078,11 +1101,65 @@ async def _react(token: str, channel: str, message_id: str, emoji: str) -> None:
     await anyio.to_thread.run_sync(_put)
 
 
+#: Discord rejects a message over 2000 characters outright. Trimming to fit was
+#: silently eating the end of every worked solution — the answer arrived cut off
+#: mid-sentence and looked like the model had given up.
+_LIMIT = 1900
+
+
+def split_for_discord(text: str, limit: int = _LIMIT) -> list[str]:
+    """Break a long reply into sendable pieces, on the nicest seam available.
+
+    Paragraphs first, then lines, then a hard cut for the pathological case of
+    a single enormous line. A derivation split mid-equation is barely more
+    readable than a truncated one, so the seam matters.
+    """
+    body = (text or "").strip()
+    if len(body) <= limit:
+        return [body] if body else []
+
+    pieces: list[str] = []
+    current = ""
+    for block in body.split("\n"):
+        candidate = f"{current}\n{block}" if current else block
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            pieces.append(current)
+        while len(block) > limit:
+            pieces.append(block[:limit])
+            block = block[limit:]
+        current = block
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 async def _send(
     token: str, channel: str, content: str, reply_to: str = ""
 ) -> str:
-    """Post a message, optionally threaded as a reply; return its id."""
-    payload: dict[str, Any] = {"content": content[:1900]}
+    """Post a message, splitting it if it will not fit; return the last id."""
+    parts = split_for_discord(content)
+    if not parts:
+        return ""
+    if len(parts) > 1:
+        sent = ""
+        for index, part in enumerate(parts):
+            # Only the first piece is threaded as a reply; the rest follow it so
+            # the chain reads top to bottom instead of fanning off the original.
+            sent = await _send_one(token, channel, part, reply_to if not index else "")
+            if not sent:
+                return ""
+        return sent
+    return await _send_one(token, channel, parts[0], reply_to)
+
+
+async def _send_one(
+    token: str, channel: str, content: str, reply_to: str = ""
+) -> str:
+    """Post a single message, optionally threaded as a reply; return its id."""
+    payload: dict[str, Any] = {"content": content[:2000]}
     if reply_to:
         payload["message_reference"] = {"message_id": reply_to}
         # Without this the reply pings on every message, which turns a

@@ -181,6 +181,19 @@ async def speak(
     if hook is None:
         return ""
     hook_id, hook_token = hook
+    # Operators get the same treatment as FRIDAY: a long answer is split across
+    # messages rather than losing its ending to the 2000-character limit.
+    from friday.discord.gateway import split_for_discord  # noqa: PLC0415
+
+    pieces = split_for_discord(text)
+    if len(pieces) > 1:
+        sent = ""
+        for piece in pieces:
+            sent = await speak(token, channel, operator, piece, avatar)
+            if not sent:
+                return ""
+        return sent
+    text = pieces[0] if pieces else text
     # Discord fetches the avatar itself, so this has to be a public URL. With
     # no public base it stays empty and the operator posts under its name with
     # the default face — plainer, not broken.

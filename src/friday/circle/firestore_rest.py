@@ -179,3 +179,52 @@ class FirestoreRest:
             body=body.encode(),
         )
         return isinstance(data, dict)
+
+
+class _RestTransport:
+    """A :class:`~friday.vault.firestore_index.FirestoreTransport` over ``_http``.
+
+    ``request`` is a thin pass-through to the module-level :func:`_http` against
+    ``{_DOCS}/{path}`` — the same low-level call :class:`FirestoreRest` already
+    makes, just returning the RAW decoded JSON (document-with-``fields`` shape, or
+    a collection's ``{documents, nextPageToken}`` shape) instead of the
+    already-unwrapped field dict :meth:`FirestoreRest.get` returns, because that is
+    exactly what :class:`~friday.vault.firestore_index.FirestoreVaultIndex` parses
+    itself (``_unwrap`` / ``_list_all_documents``).
+
+    ``path`` is passed through to the URL completely unmodified — including any
+    query string a caller already appended (most notably
+    ``FirestoreVaultIndex._list_all_documents``'s ``?pageToken=...`` continuation)
+    — so pagination past Firestore's ~300-document page cap keeps working; see
+    ``FirestoreTransport``'s docstring for why silently dropping that would be a
+    real bug, not a cosmetic one.
+
+    Unlike :class:`FirestoreRest` (which acts AS one caller's Firebase identity via
+    their bearer token, exchanged per request), the vault has no per-request caller
+    — one backend process serves one local owner — so there is no natural token to
+    exchange here. No ``Authorization`` header is sent; the ``vaults/`` collection's
+    access is therefore entirely a property of the project's Firestore security
+    rules, not of this code. That is a known gap, flagged for later hardening (a
+    project-scoped credential for the backend's own read/write on ``vaults/**``),
+    deliberately not built here.
+    """
+
+    def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        raw_body = json.dumps(body).encode("utf-8") if body is not None else None
+        return _http(
+            f"{_DOCS}/{path}",
+            method=method,
+            headers={"Content-Type": "application/json"},
+            body=raw_body,
+        )
+
+
+def make_transport() -> _RestTransport:
+    """Build the production Firestore transport for the vault index.
+
+    Returns an object satisfying
+    :class:`~friday.vault.firestore_index.FirestoreTransport` (one ``request(method,
+    path, body=None)`` method), reusing this module's own ``_http`` + ``_DOCS``
+    rather than standing up a second HTTP client — see :class:`_RestTransport`.
+    """
+    return _RestTransport()

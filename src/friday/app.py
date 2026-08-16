@@ -81,10 +81,12 @@ from friday.api.routes_studio import router as studio_router
 from friday.api.routes_study import router as study_router
 from friday.api.routes_system import router as system_router
 from friday.api.routes_tv import router as tv_router
+from friday.api.routes_vault import router as vault_router
 from friday.api.routes_voice import router as voice_router
 from friday.api.ws import router as ws_router
 from friday.briefing.service import BriefingService
 from friday.broker import Broker, HashChainedAudit
+from friday.circle.firestore_rest import make_transport
 from friday.config import Settings, get_settings
 from friday.core.confidence import ConfidenceScorer
 from friday.core.critic import DEFAULT_PERSONA_MARKERS, SelfCritic
@@ -215,6 +217,10 @@ from friday.tools.reminders import (
 from friday.tools.system_exec import FindFilesTool, OpenAppTool, RunCommandTool
 from friday.tools.weather import WeatherTool
 from friday.tools.web_search import WebSearchTool
+from friday.vault.cloudinary import CloudinaryProvider, CloudinarySigner, FakeCloudinary
+from friday.vault.firestore_index import FirestoreVaultIndex
+from friday.vault.index import SQLiteVaultIndex, VaultIndex
+from friday.vault.quota import QuotaGuard
 from friday.voice.capture import MicCapture
 from friday.voice.emotion_stream import EmotionStreamAnalyzer, feed_analyzer
 from friday.voice.voiceprint import FakeVoiceprint, OwnerIdentity
@@ -2548,6 +2554,54 @@ def _wire_perception(app: FastAPI, settings: Settings) -> None:
     app.state.perception = _build_perception_service()
 
 
+def _wire_vault(app: FastAPI, settings: Settings) -> None:
+    """Build and stash the vault's index + Cloudinary provider + quota guard.
+
+    The ``/vault`` routes read ``app.state.vault_index``, ``app.state.vault_cloudinary``
+    and ``app.state.vault_quota``. Building it only when ``enable_vault`` is set keeps
+    the offline default untouched (the routes self-guard on the flag and 404 when
+    off) and constructs no seam otherwise. Unlike the other Tier-2 ``_wire_*``
+    functions this does not read from the shared :class:`AppRuntime` — the vault is
+    a self-contained module with its own index/provider/quota, and the solver
+    (which *would* need the shared LLM) is wired in a later task.
+
+    Index backend: ``settings.vault_index_backend == "sqlite"`` selects the
+    local-first :class:`~friday.vault.index.SQLiteVaultIndex` (test/offline
+    default, ``vault_sqlite_path``); anything else (production default:
+    ``"firestore"``) selects the :class:`~friday.vault.firestore_index.FirestoreVaultIndex`
+    over :func:`friday.circle.firestore_rest.make_transport`.
+
+    Cloudinary provider: the real :class:`~friday.vault.cloudinary.CloudinarySigner`
+    only when BOTH ``cloudinary_api_key`` and ``cloudinary_api_secret`` are
+    configured; otherwise the deterministic in-memory
+    :class:`~friday.vault.cloudinary.FakeCloudinary` — this fallback is what keeps
+    the vault's integration tests fully offline (no network, no credentials).
+    """
+    if not settings.enable_vault:
+        return
+    index: VaultIndex
+    if settings.vault_index_backend == "sqlite":
+        index = SQLiteVaultIndex(settings.vault_sqlite_path)
+    else:
+        index = FirestoreVaultIndex(make_transport())
+    cloudinary: CloudinaryProvider
+    if settings.cloudinary_api_key is not None and settings.cloudinary_api_secret is not None:
+        cloudinary = CloudinarySigner(
+            cloud_name=settings.cloudinary_cloud_name,
+            api_key=settings.cloudinary_api_key.get_secret_value(),
+            api_secret=settings.cloudinary_api_secret.get_secret_value(),
+        )
+    else:
+        cloudinary = FakeCloudinary()
+    app.state.vault_index = index
+    app.state.vault_cloudinary = cloudinary
+    app.state.vault_quota = QuotaGuard(
+        index,
+        quota_gb=settings.vault_quota_gb,
+        daily_solve_cap=settings.vault_daily_solve_cap,
+    )
+
+
 def _wire_plugins(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Load owner-supplied plugins into the shared registry when enabled.
 
@@ -2652,6 +2706,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_system(app, settings, runtime)
     _wire_n8n(app, settings, runtime)
     _wire_perception(app, settings)
+    _wire_vault(app, settings)
     # Plugins load LAST so every built-in tool is already registered (built-ins
     # win name collisions); the loaded PluginInfo list lands on app.state.plugins.
     _wire_plugins(app, settings, runtime)
@@ -2901,6 +2956,11 @@ def create_app() -> FastAPI:
     # wired onto app.state only when enabled; perception can read the screen and
     # clipboard, so it never constructs that seam unless the flag is on.
     app.include_router(perception_router)
+    # Vault (Tier 2) — always registered but self-guards on FRIDAY_ENABLE_VAULT
+    # (404 when off), so the offline default exposes no vault surface. The shared
+    # index (SQLite or Firestore) + Cloudinary provider (real or fake) + quota
+    # guard are wired onto app.state only when enabled.
+    app.include_router(vault_router)
     # n8n integration (Tier 2) — always registered but self-guards on
     # FRIDAY_ENABLE_N8N (404 when off), so the offline default exposes no n8n
     # surface. The shared N8nService (REST client + LLM drafter + docker

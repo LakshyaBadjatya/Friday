@@ -236,6 +236,44 @@ def persona_rule(operator: Any) -> str:
     )
 
 
+#: EDITH asked about security does the scan rather than describing one. Wired
+#: only for her: the roster's other patches have no machine-side job behind them
+#: yet, and an operator that says it checked when it did not is worse than one
+#: that says it cannot.
+async def machine_report(app: Any, text: str) -> str | None:
+    """A real scan of a real machine, or ``None`` to answer the ordinary way."""
+    from friday.link.protocol import JobKind  # noqa: PLC0415
+    from friday.link.registry import registry_of  # noqa: PLC0415
+
+    registry = registry_of(app)
+    result = await registry.run(JobKind.SECURITY_SCAN, timeout=45.0)
+    if not result.ok:
+        # The honest failure: say which machine, and what would fix it.
+        return f"[The scan could not run. Tell the owner exactly this: {result.error}]"
+
+    scan = result.data or {}
+    findings = scan.get("findings") or []
+    ran = ", ".join(scan.get("checks_run") or []) or "nothing"
+    if not findings:
+        return (
+            f"[A real scan of {scan.get('host', 'the machine')} just ran and found "
+            f"nothing. Checks run: {ran}. Say so plainly — this is a genuine "
+            f"result, not a guess.]"
+        )
+    lines = [
+        f"- [{f.get('severity', '?')}] {f.get('title', '')} — {f.get('detail', '')} "
+        f"(evidence: {f.get('evidence', '')[:120]})"
+        for f in findings[:12]
+    ]
+    body = "\n".join(lines)
+    return (
+        f"[A real security scan of {scan.get('host', 'the machine')} just ran. "
+        f"Checks: {ran}. These are its actual findings — report them as fact, "
+        f"worst first, in your own voice, and say what to do about the serious "
+        f"ones. Do not invent findings and do not soften these.\n{body}]"
+    )
+
+
 async def speak(
     token: str, channel: str, operator: Any, text: str, avatar: str = ""
 ) -> str:

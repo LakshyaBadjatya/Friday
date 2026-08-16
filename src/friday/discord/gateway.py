@@ -902,6 +902,13 @@ async def _compose(
     from friday.discord import tutor  # noqa: PLC0415
 
     settings = getattr(app.state, "settings", None)
+
+    # A security question reaches the machine, when there is one. This is the
+    # difference between "I'm not a hacker, Boss" and a list of open ports.
+    if operator is not None and str(getattr(operator, "name", "")) == "EDITH":
+        scanned = await operators.machine_report(app, content)
+        if scanned:
+            content = f"{content}\n\n{scanned}"
     # "reanalyse your answer" carries no subject — the subject is the previous
     # message. Without that referent the model had nothing to work from and
     # recited the persona rules instead, which is how a request to re-derive a

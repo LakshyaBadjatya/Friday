@@ -662,6 +662,11 @@ class Settings(BaseSettings):
     # Needed only to push reminders *into* Discord unprompted; slash commands
     # work without it, because the follow-up uses the interaction's own token.
     discord_bot_token: SecretStr | None = None
+    # Shared secret a machine presents to open ``WS /link/connect``. This is the
+    # one credential in the system that leads somewhere real — a relay holding
+    # it can run the scans on a personal laptop — so an unset value refuses
+    # every relay rather than leaving the door open.
+    link_token: SecretStr | None = None
     # Discord keeps its own conversation, separate from the shared owner thread.
     # It *reads* the shared history for context but never writes into it: the
     # private room can see the rest of the house, the house cannot see in.

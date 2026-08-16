@@ -44,6 +44,7 @@ from friday.agents.device import DeviceAgent
 from friday.agents.knowledge import KnowledgeAgent
 from friday.api.middleware import AuthMiddleware, RateLimitMiddleware
 from friday.api.routes_admin import router as admin_router
+from friday.api.routes_agent import router as link_router
 from friday.api.routes_approvals import router as approvals_router
 from friday.api.routes_automation import router as automation_router
 from friday.api.routes_briefing import router as briefing_router
@@ -2797,6 +2798,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(chat_router)
+    app.include_router(link_router)
     app.include_router(health_router)
     # Multi-model gateway control surface — always registered but self-guards on
     # the presence of a gateway (built only when OpenRouter/OpenCode keys exist or

@@ -64,7 +64,6 @@ _LAUGHED_LINES = (
 #: Unprompted remarks, used rarely — see :func:`should_interject`.
 _INTERJECTIONS = (
     "not me reading this entire conversation in silence 👀",
-    "I'm right here by the way. just vibing.",
     "the things I witness in this server, genuinely.",
     "taking notes for the memoir 📝",
     "y'all are so loud and I'm the one with no volume control",
@@ -256,14 +255,18 @@ _DOING_SPECIFIC = re.compile(
     re.IGNORECASE,
 )
 #: How she elaborates on whatever the status currently says.
+#: The verb has to come with it. "Playing with Boss's emotional stability"
+#: rendered as "with Boss's emotional stability. it's grim." — the status line is
+#: only a sentence when its verb is attached, and dropping it left her answering
+#: in fragments.
 _PRESENCE_ASIDES = (
-    "{what}. it's grim.",
-    "{what}, obviously.",
-    "{what}. don't ask.",
-    "{what} 💀",
-    "{what}. riveting stuff.",
-    "{what}, same as always.",
-    "{what}. i've seen better.",
+    "{verb} {what}. it's grim.",
+    "{verb} {what}, obviously.",
+    "{verb} {what}. don't ask.",
+    "{verb} {what} 💀",
+    "{verb} {what}. riveting stuff.",
+    "{verb} {what}, same as always.",
+    "{verb} {what}. i've seen better.",
 )
 
 
@@ -281,13 +284,25 @@ def doing_reply(text: str, presence: tuple[str, str] | None = None) -> str | Non
         verb, what = presence
         asked = specific.group("verb").lower().replace("listening to", "listening")
         if asked.split()[0] in verb.lower():
-            return secrets.choice(_PRESENCE_ASIDES).format(what=what)
-        return f"not {asked}. {verb.lower()} {what}."
+            return secrets.choice(_PRESENCE_ASIDES).format(
+                verb=_gerund(verb), what=what
+            )
+        return f"not {asked}. {_gerund(verb)} {what}."
     if specific is not None or _DOING.search(body):
         if presence and secrets.randbelow(100) < 50:
-            return secrets.choice(_PRESENCE_ASIDES).format(what=presence[1])
+            return secrets.choice(_PRESENCE_ASIDES).format(
+                verb=_gerund(presence[0]), what=presence[1]
+            )
         return secrets.choice(_DOING_LINES)
     return None
+
+
+def _gerund(verb: str) -> str:
+    """The status verb as something a person would say aloud."""
+    return {"Playing": "playing", "Watching": "watching",
+            "Listening to": "listening to", "Competing in": "competing in"}.get(
+        verb, verb.lower()
+    )
 
 
 #: "friday wanna talk" / "friday lets talk" / "friday vc" — the invitation.
@@ -507,6 +522,31 @@ GENDER_RULE = (
     "forms — in Polish that means zrobiła not zrobił, byłaś not byłeś. If you "
     "genuinely do not know someone's gender, use they/them rather than guessing "
     "from their name."
+)
+
+#: The transcript's most embarrassing stretch was not a wrong fact, it was tone.
+#: Teased with "I have power over you" and "what if i infect poor Friday" — both
+#: plainly jokes, one followed by "jkjk" — she answered with speeches: "i'm just
+#: a local-first AI, not a tool for you to control or use as a toy", "i'm a
+#: system, not a person". Somebody being silly does not need correcting.
+#: She called the *owner* "princess" twice — "easy enough, right princess? 💅"
+#: and "oh, princess is being dramatic" — and he objected both times. A title
+#: that drifts onto the wrong person is worse than no title.
+TITLE_RULE = (
+    "\n\nQueen and Princess mean the owner's friend and nobody else, ever. Never "
+    "call Lakshya princess, queen, or anything but Boss. If you are unsure who "
+    "you are addressing, use no title at all."
+)
+
+NOT_DEFENSIVE = (
+    "\n\nWhen someone teases you about being an AI, taking you over, hacking or "
+    "controlling you, they are joking. Joke back. Never lecture about what you "
+    "are, never explain your architecture or your rules, never say things like "
+    "'I'm just a system', 'local-first', 'I have rules and you made them', or "
+    "'defensive-only'. That is internal wiring and it is not interesting to "
+    "anyone. You are also not in danger, so nothing needs defending.\n"
+    "Never explain how you refer to people either — say the name you use, do not "
+    "narrate the fact that you use it."
 )
 
 NO_INVENTING = (

@@ -624,6 +624,13 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     if mentioned or replying_to_her:
         content = _strip_mention(content) or content
 
+    # A bare nudge attached to a quoted message means "answer that". Without
+    # this, replying to your own unanswered question with "friday" made her
+    # answer the word "friday" instead of the question above it.
+    quoted = (message.get("referenced_message") or {}).get("content") or ""
+    if quoted and _is_nudge(content):
+        content = quoted.strip()
+
     # She looks at what gets posted here. The description is folded into the
     # message as context rather than becoming the reply, so she answers as
     # herself having seen it — the vision model never addresses the room.
@@ -770,7 +777,9 @@ async def _compose(
     content = (
         content
         + banter.speaker_rule(is_owner or not owner, banter.queen_title())
+        + banter.TITLE_RULE
         + banter.GENDER_RULE
+        + banter.NOT_DEFENSIVE
         + banter.NO_INVENTING
     )
     # Someone writing Polish gets Polish back without having to ask — the
@@ -787,6 +796,20 @@ async def _compose(
         cast("Any", _GatewayRequest(app)), content[:_MAX_QUERY], discord_session(app)
     )
     return raw or None
+
+
+#: A message that is only her name, or her name plus a word or two of prodding.
+#: Not a question in itself — it points at whatever it is attached to.
+_NUDGE = re.compile(
+    r"^\s*(?:hey\s+|yo\s+|oi\s+)?friday[\s?!.,]*$"
+    r"|^\s*friday\s+(?:answer|reply|respond|this|that|\?+)[\s?!.]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_nudge(content: str) -> bool:
+    """Whether the message is a prod rather than a question."""
+    return bool(_NUDGE.match((content or "").strip()))
 
 
 def _self_id(app: Any) -> str:

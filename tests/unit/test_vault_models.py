@@ -10,6 +10,7 @@ from friday.vault.models import (
     Classification,
     CloudinaryAsset,
     ExamSession,
+    ExamSessionStatus,
     Item,
     ItemStatus,
     Note,
@@ -173,7 +174,9 @@ def test_exam_session_round_trips_grading() -> None:
         owner_uid="u1",
         paper_item_ids=["i1", "i2"],
         answer_item_ids=["i3"],
+        started_at="2026-08-16T10:00:00+00:00",
         duration_s=3600,
+        status=ExamSessionStatus.GRADED,
         grading=[
             {"q": "1a", "marks_awarded": 4.0, "marks_total": 5.0, "feedback": "close"},
         ],
@@ -181,6 +184,41 @@ def test_exam_session_round_trips_grading() -> None:
     )
     restored = ExamSession.model_validate(exam.model_dump())
     assert restored.paper_item_ids == ["i1", "i2"]
+    assert restored.status is ExamSessionStatus.GRADED
     assert restored.grading[0].q == "1a"
     assert restored.grading[0].marks_awarded == 4.0
     assert restored.total == 4.0
+
+
+def test_exam_session_defaults_to_open() -> None:
+    exam = ExamSession(
+        id="e2",
+        owner_uid="u1",
+        started_at="2026-08-16T10:00:00+00:00",
+    )
+    assert exam.status is ExamSessionStatus.OPEN
+
+
+def test_exam_session_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        ExamSession(
+            id="e3",
+            owner_uid="u1",
+            started_at="2026-08-16T10:00:00+00:00",
+            status="archived",  # type: ignore[arg-type]
+        )
+
+
+def test_solve_requires_created_at() -> None:
+    with pytest.raises(ValidationError):
+        Solve(id="s2", item_ids=["i1"])  # type: ignore[call-arg]
+
+
+def test_note_requires_created_at() -> None:
+    with pytest.raises(ValidationError):
+        Note(id="n2", owner_uid="u1")  # type: ignore[call-arg]
+
+
+def test_exam_session_requires_started_at() -> None:
+    with pytest.raises(ValidationError):
+        ExamSession(id="e4", owner_uid="u1")  # type: ignore[call-arg]

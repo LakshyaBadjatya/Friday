@@ -53,8 +53,8 @@ class CloudinaryAsset(BaseModel):
     resource_type: str = "image"
 
 
-class Derived(BaseModel):
-    """Downscaled working copy and thumbnail public ids."""
+class DerivedAssets(BaseModel):
+    """The downscaled working copy and thumbnail derived from the original upload."""
 
     work_public_id: str = ""
     thumb_public_id: str = ""
@@ -86,7 +86,7 @@ class Item(BaseModel):
     source: CaptureSource
     status: ItemStatus = ItemStatus.PENDING
     cloudinary: CloudinaryAsset | None = None
-    derived: Derived = Field(default_factory=Derived)
+    derived: DerivedAssets = Field(default_factory=DerivedAssets)
     ocr_text: str = ""
     ocr_engine: str = ""
     caption: str = ""
@@ -127,7 +127,12 @@ class Verification(BaseModel):
 
 
 class Consensus(BaseModel):
-    """What the panel settled on, and how contested it was."""
+    """What the panel settled on, and how contested it was.
+
+    ``agreement`` is always ``"<votes>/<drafts>"`` — the count of drafts that
+    agreed with ``final_answer`` over the total number of drafts — since later
+    code parses and displays it in that fixed format.
+    """
 
     final_answer: str = ""
     agreement: str = "0/0"
@@ -146,7 +151,7 @@ class Solve(BaseModel):
     verification: Verification = Field(default_factory=Verification)
     consensus: Consensus = Field(default_factory=Consensus)
     dissent: list[str] = Field(default_factory=list)
-    created_at: str = ""
+    created_at: str
 
 
 class Note(BaseModel):
@@ -163,7 +168,7 @@ class Note(BaseModel):
     flashcard_ids: list[int] = Field(default_factory=list)
     rag_source_id: str = ""
     exported_pdf_public_id: str | None = None
-    created_at: str = ""
+    created_at: str
 
 
 class GradedQuestion(BaseModel):
@@ -175,6 +180,13 @@ class GradedQuestion(BaseModel):
     feedback: str = ""
 
 
+class ExamSessionStatus(StrEnum):
+    """Lifecycle of a timed exam session."""
+
+    OPEN = "open"
+    GRADED = "graded"
+
+
 class ExamSession(BaseModel):
     """A timed paper: the question images, your answers, and the marking."""
 
@@ -182,8 +194,8 @@ class ExamSession(BaseModel):
     owner_uid: str
     paper_item_ids: list[str] = Field(default_factory=list)
     answer_item_ids: list[str] = Field(default_factory=list)
-    started_at: str = ""
+    started_at: str
     duration_s: int = 0
-    status: str = "open"
+    status: ExamSessionStatus = ExamSessionStatus.OPEN
     grading: list[GradedQuestion] = Field(default_factory=list)
     total: float = 0.0

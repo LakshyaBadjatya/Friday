@@ -35,9 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.friday.phone.sync.PendingCapture
-import com.friday.phone.sync.QueueDb
-import com.friday.phone.sync.UploadWorker
+import com.friday.phone.sync.Filing
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -180,17 +178,8 @@ class CameraActivity : ComponentActivity() {
                     lifecycleScope.launch {
                         val text = readText(Uri.fromFile(file))
                         withContext(Dispatchers.IO) {
-                            QueueDb.get(applicationContext).pending().add(
-                                PendingCapture(
-                                    path = file.absolutePath,
-                                    source = "camera",
-                                    privacy = "private",
-                                    offlineOcr = text,
-                                    createdAt = System.currentTimeMillis(),
-                                ),
-                            )
+                            Filing.file(applicationContext, file.absolutePath, "camera", text)
                         }
-                        UploadWorker.enqueue(applicationContext)
                         onFiled(text)
                     }
                 }

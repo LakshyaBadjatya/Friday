@@ -25,6 +25,13 @@ service cloud.firestore {
       return signedIn()
         && exists(/databases/$(database)/documents/groups/$(gid)/members/$(uid()));
     }
+    // Membership of a shared vault space. Deliberately NOT isMember(): that one
+    // reads groups/{gid}/members, which is the Circle's collection. Reusing it
+    // would have made every Circle member a reader of the shared shelf.
+    function isSpaceMember(spaceId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/spaces/$(spaceId)/members/$(uid()));
+    }
     function groupAdmin(gid) {
       return get(/databases/$(database)/documents/groups/$(gid)).data.adminUid;
     }
@@ -140,6 +147,23 @@ service cloud.firestore {
                     && request.resource.data.acceptedBy == uid();
       allow delete: if signedIn()
                     && groupAdmin(resource.data.groupId) == uid();
+    }
+
+    // --- Vault: an owner's own captures, and the shelf two owners share ---
+    // NOBODY writes from a client. Every write goes through FRIDAY's backend,
+    // which is what lets these rules stay this small: there are no field-level
+    // checks here because there is no client-authored field to check. The phone
+    // gets a Cloudinary signature scoped to one upload and a commit endpoint,
+    // never a Firestore write, so a stolen phone cannot rewrite the index it
+    // is allowed to read.
+    match /vaults/{ownerUid}/{document=**} {
+      allow read: if signedIn() && uid() == ownerUid;
+      allow write: if false;
+    }
+
+    match /spaces/{spaceId}/{document=**} {
+      allow read: if isSpaceMember(spaceId);
+      allow write: if false;
     }
 
     // --- Default deny ---

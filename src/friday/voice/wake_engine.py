@@ -57,12 +57,24 @@ class FakeWakeWordEngine:
 
 
 def _load_wakeword_model(model_path: str) -> Any:
-    """Lazy-load an openWakeWord model; raise a clear error if the extra is absent."""
+    """Lazy-load an openWakeWord model; raise a clear error if the extra is absent.
+
+    The keyword changed names upstream: 0.6.x takes ``wakeword_models``, 0.4.x
+    takes ``wakeword_model_paths``. The requirement is unpinned, and which one
+    gets installed is decided by tflite-runtime's wheels rather than by us —
+    0.6.x pins it, and on a Python it publishes no wheel for, the resolver
+    quietly settles on 0.4.x. Passing only the new name turns that into a
+    TypeError about AudioFeatures, several frames away from anything that names
+    the real cause.
+    """
     try:
         from openwakeword.model import Model  # type: ignore[import-not-found]  # noqa: PLC0415
     except ImportError as exc:
         raise ProviderError(_INSTALL_HINT) from exc
-    return Model(wakeword_models=[model_path])
+    try:
+        return Model(wakeword_models=[model_path])
+    except TypeError:
+        return Model(wakeword_model_paths=[model_path])
 
 
 class OpenWakeWordEngine:

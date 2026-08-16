@@ -2,7 +2,13 @@
 
 The document body is stored as one JSON blob so the model can grow without a
 migration, while the columns that get filtered on (owner, space, subject, kind,
-privacy, created_at) are promoted to real columns with indexes.
+privacy, created_at, bytes) are promoted to real columns with indexes.
+
+A row whose ``doc`` blob no longer matches the current model (e.g. a field was
+made required after the row was written) is logged and skipped rather than
+raised: a list call omits it and keeps returning the rest of the vault, and a
+get call returns ``None`` as if the row were absent. One unreadable row must
+never make the whole vault unlistable.
 
 Design rules mirror :mod:`friday.study.store`: parametrized SQL only, idempotent
 schema, connection-per-call for file paths and one shared connection for
@@ -11,13 +17,34 @@ schema, connection-per-call for file paths and one shared connection for
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from typing import Protocol, runtime_checkable
 
+from pydantic import BaseModel, ValidationError
+
+from friday.logging import get_logger
 from friday.vault.models import Item, Note, Privacy, Solve
 
+logger = get_logger("friday.vault.index")
+
 _MEMORY_PATH = ":memory:"
+
+
+def _parse_row[T: BaseModel](model: type[T], row_id: str, doc: str, label: str) -> T | None:
+    """Deserialize one stored ``doc`` blob, or log and return ``None``.
+
+    A row can fail to deserialize when the model has evolved since the row was
+    written (e.g. a field became required). That is a data problem for one
+    row, not a reason to fail the caller's read — a list call should still
+    return every other row, and a get call should behave as if the row were
+    absent, exactly like a missing id.
+    """
+    try:
+        return model.model_validate_json(doc)
+    except (ValidationError, ValueError) as exc:
+        logger.warning("skipping malformed vault %s row id=%s: %s", label, row_id, exc)
+        return None
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -28,6 +55,7 @@ CREATE TABLE IF NOT EXISTS items (
     kind TEXT NOT NULL DEFAULT '',
     subject TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
+    bytes INTEGER NOT NULL DEFAULT 0,
     doc TEXT NOT NULL,
     PRIMARY KEY (owner_uid, id)
 );
@@ -79,7 +107,16 @@ class VaultIndex(Protocol):
 
     def list_notes(self, owner_uid: str, *, limit: int = 100) -> list[Note]: ...
 
-    def total_bytes(self, owner_uid: str) -> int: ...
+    def total_bytes(self, owner_uid: str) -> int:
+        """Sum the committed Cloudinary asset bytes owned by ``owner_uid``.
+
+        This counts only the bytes of the uploaded asset (``item.cloudinary.bytes``);
+        it has nothing to do with the size of the stored document itself, and an
+        item with no committed asset contributes zero. It is called on every
+        upload signature request — before every photo — so it must stay cheap
+        at vault scale, not just correct.
+        """
+        ...
 
 
 class SQLiteVaultIndex:
@@ -108,14 +145,15 @@ class SQLiteVaultIndex:
 
     # ---------------------------------------------------------------- items
     def put_item(self, item: Item) -> None:
+        item_bytes = item.cloudinary.bytes if item.cloudinary is not None else 0
         conn = self._conn()
         try:
             conn.execute(
                 "INSERT INTO items (id, owner_uid, space, privacy, kind, subject, "
-                "created_at, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "created_at, bytes, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(owner_uid, id) DO UPDATE SET space=excluded.space, "
                 "privacy=excluded.privacy, kind=excluded.kind, subject=excluded.subject, "
-                "created_at=excluded.created_at, doc=excluded.doc",
+                "created_at=excluded.created_at, bytes=excluded.bytes, doc=excluded.doc",
                 (
                     item.id,
                     item.owner_uid,
@@ -124,6 +162,7 @@ class SQLiteVaultIndex:
                     item.classification.kind,
                     item.classification.subject,
                     item.created_at,
+                    item_bytes,
                     item.model_dump_json(),
                 ),
             )
@@ -140,7 +179,9 @@ class SQLiteVaultIndex:
             ).fetchone()
         finally:
             self._close(conn)
-        return Item.model_validate_json(row[0]) if row else None
+        if row is None:
+            return None
+        return _parse_row(Item, item_id, row[0], "item")
 
     def list_items(
         self,
@@ -152,7 +193,7 @@ class SQLiteVaultIndex:
         include_locked: bool = False,
         limit: int = 100,
     ) -> list[Item]:
-        sql = "SELECT doc FROM items WHERE owner_uid = ?"
+        sql = "SELECT id, doc FROM items WHERE owner_uid = ?"
         args: list[object] = [owner_uid]
         if subject:
             sql += " AND subject = ?"
@@ -173,7 +214,8 @@ class SQLiteVaultIndex:
             rows = conn.execute(sql, args).fetchall()
         finally:
             self._close(conn)
-        return [Item.model_validate_json(r[0]) for r in rows]
+        items = (_parse_row(Item, row_id, doc, "item") for row_id, doc in rows)
+        return [item for item in items if item is not None]
 
     def delete_item(self, owner_uid: str, item_id: str) -> bool:
         conn = self._conn()
@@ -207,7 +249,9 @@ class SQLiteVaultIndex:
             ).fetchone()
         finally:
             self._close(conn)
-        return Solve.model_validate_json(row[0]) if row else None
+        if row is None:
+            return None
+        return _parse_row(Solve, solve_id, row[0], "solve")
 
     # ---------------------------------------------------------------- notes
     def put_note(self, note: Note) -> None:
@@ -239,32 +283,32 @@ class SQLiteVaultIndex:
             ).fetchone()
         finally:
             self._close(conn)
-        return Note.model_validate_json(row[0]) if row else None
+        if row is None:
+            return None
+        return _parse_row(Note, note_id, row[0], "note")
 
     def list_notes(self, owner_uid: str, *, limit: int = 100) -> list[Note]:
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT doc FROM notes WHERE owner_uid = ? "
+                "SELECT id, doc FROM notes WHERE owner_uid = ? "
                 "ORDER BY created_at DESC LIMIT ?",
                 (owner_uid, limit),
             ).fetchall()
         finally:
             self._close(conn)
-        return [Note.model_validate_json(r[0]) for r in rows]
+        notes = (_parse_row(Note, row_id, doc, "note") for row_id, doc in rows)
+        return [note for note in notes if note is not None]
 
     # ---------------------------------------------------------------- quota
     def total_bytes(self, owner_uid: str) -> int:
+        """Sum the ``bytes`` column for ``owner_uid`` — see the Protocol docstring."""
         conn = self._conn()
         try:
-            rows = conn.execute(
-                "SELECT doc FROM items WHERE owner_uid = ?", (owner_uid,)
-            ).fetchall()
+            row = conn.execute(
+                "SELECT COALESCE(SUM(bytes), 0) FROM items WHERE owner_uid = ?",
+                (owner_uid,),
+            ).fetchone()
         finally:
             self._close(conn)
-        total = 0
-        for (doc,) in rows:
-            asset = json.loads(doc).get("cloudinary")
-            if asset:
-                total += int(asset.get("bytes", 0))
-        return total
+        return int(row[0]) if row is not None else 0

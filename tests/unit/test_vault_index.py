@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from friday.vault.index import SQLiteVaultIndex
 from friday.vault.models import (
@@ -227,6 +230,40 @@ def test_file_backed_index_persists_across_instances(tmp_path: Path) -> None:
     assert got2.status is ItemStatus.READY
 
 
+def test_file_backed_connections_are_actually_closed(tmp_path: Path) -> None:
+    """A file-backed index must close its per-call connections.
+
+    Proves the real invariant, not just that data round-trips: a held-open
+    connection would still pass the persistence test above. ``sqlite3.Connection``
+    is a C type and does not allow patching its ``close`` method (attribute is
+    read-only), so this asserts the observable effect instead — a connection
+    handed back by ``_close`` is genuinely unusable afterwards for a file path,
+    while the shared ``:memory:`` connection stays open and usable across many
+    calls to ``_close``.
+    """
+    db_path = str(tmp_path / "vault.db")
+    file_index = SQLiteVaultIndex(db_path)
+
+    conn = file_index._conn()  # noqa: SLF001 - exercising the connection lifecycle directly
+    file_index._close(conn)  # noqa: SLF001
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+    # The public API must still work after that connection was closed — each
+    # call opens (and closes) its own.
+    file_index.put_item(_item())
+    assert file_index.get_item("u1", "i1") is not None
+
+    memory_index = SQLiteVaultIndex(":memory:")
+    shared_conn = memory_index._conn()  # noqa: SLF001
+    for _ in range(3):
+        memory_index._close(shared_conn)  # noqa: SLF001
+    # Never actually closed: still usable after repeated _close() calls.
+    shared_conn.execute("SELECT 1")
+    memory_index.put_item(_item())
+    assert memory_index.get_item("u1", "i1") is not None
+
+
 def test_note_round_trips_and_is_owner_scoped() -> None:
     index = SQLiteVaultIndex(":memory:")
     index.put_note(_note("n1", owner_uid="u1", markdown="hi"))
@@ -263,3 +300,138 @@ def test_solve_put_is_an_upsert() -> None:
     got = index.get_solve("s1")
     assert got is not None
     assert got.subject == "chemistry"
+
+
+# --------------------------------------------------------------------------
+# Malformed rows: model evolution must not take the whole vault down.
+# --------------------------------------------------------------------------
+
+
+def _corrupt_item_doc(index: SQLiteVaultIndex, owner_uid: str, item_id: str) -> None:
+    """Overwrite a stored item's ``doc`` with JSON that fails ``Item`` validation."""
+    conn = index._conn()  # noqa: SLF001 - reaching in deliberately to simulate drift
+    conn.execute(
+        "UPDATE items SET doc = ? WHERE owner_uid = ? AND id = ?",
+        ('{"not": "a valid item"}', owner_uid, item_id),
+    )
+    conn.commit()
+
+
+def _corrupt_note_doc(index: SQLiteVaultIndex, owner_uid: str, note_id: str) -> None:
+    conn = index._conn()  # noqa: SLF001
+    conn.execute(
+        "UPDATE notes SET doc = ? WHERE owner_uid = ? AND id = ?",
+        ("not even json", owner_uid, note_id),
+    )
+    conn.commit()
+
+
+def _corrupt_solve_doc(index: SQLiteVaultIndex, solve_id: str) -> None:
+    conn = index._conn()  # noqa: SLF001
+    conn.execute(
+        "UPDATE solves SET doc = ? WHERE id = ?",
+        ('{"not": "a valid solve"}', solve_id),
+    )
+    conn.commit()
+
+
+def test_list_items_skips_a_malformed_row_and_keeps_the_rest() -> None:
+    index = SQLiteVaultIndex(":memory:")
+    index.put_item(_item("good"))
+    index.put_item(_item("bad"))
+    _corrupt_item_doc(index, "u1", "bad")
+
+    assert [i.id for i in index.list_items("u1")] == ["good"]
+
+
+def test_get_item_returns_none_for_a_malformed_row() -> None:
+    index = SQLiteVaultIndex(":memory:")
+    index.put_item(_item("bad"))
+    _corrupt_item_doc(index, "u1", "bad")
+
+    assert index.get_item("u1", "bad") is None
+
+
+def test_list_notes_skips_a_malformed_row_and_keeps_the_rest() -> None:
+    index = SQLiteVaultIndex(":memory:")
+    index.put_note(_note("good"))
+    index.put_note(_note("bad"))
+    _corrupt_note_doc(index, "u1", "bad")
+
+    assert [n.id for n in index.list_notes("u1")] == ["good"]
+
+
+def test_get_note_returns_none_for_a_malformed_row() -> None:
+    index = SQLiteVaultIndex(":memory:")
+    index.put_note(_note("bad"))
+    _corrupt_note_doc(index, "u1", "bad")
+
+    assert index.get_note("u1", "bad") is None
+
+
+def test_get_solve_returns_none_for_a_malformed_row() -> None:
+    index = SQLiteVaultIndex(":memory:")
+    index.put_solve(_solve("bad"))
+    _corrupt_solve_doc(index, "bad")
+
+    assert index.get_solve("bad") is None
+
+
+def test_malformed_row_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    index = SQLiteVaultIndex(":memory:")
+    index.put_item(_item("bad"))
+    _corrupt_item_doc(index, "u1", "bad")
+
+    with caplog.at_level(logging.WARNING, logger="friday.vault.index"):
+        assert index.get_item("u1", "bad") is None
+
+    assert any("bad" in record.message for record in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# The promoted `bytes` column: quota accounting must not re-parse every row.
+# --------------------------------------------------------------------------
+
+
+def test_total_bytes_uses_the_promoted_column_not_json_parsing() -> None:
+    """Corrupting the JSON blob must not break `total_bytes`.
+
+    If `total_bytes` still parsed every row's JSON to sum `cloudinary.bytes`,
+    a single malformed doc would make quota accounting blow up. With bytes
+    promoted to a real column, the sum is computed in SQL and never touches
+    `doc` at all.
+    """
+    index = SQLiteVaultIndex(":memory:")
+    asset = CloudinaryAsset(
+        public_id="p", version=1, format="jpg", bytes=1000, resource_type="image"
+    )
+    index.put_item(_item("a", cloudinary=asset))
+    index.put_item(_item("bad", cloudinary=asset))
+    _corrupt_item_doc(index, "u1", "bad")
+
+    assert index.total_bytes("u1") == 2000
+
+
+def test_total_bytes_upsert_updates_the_promoted_column() -> None:
+    """Re-putting an item with a different asset must move the stored `bytes`.
+
+    A stale `bytes` value would silently corrupt quota accounting the same
+    way a stale `subject` column would corrupt subject filtering.
+    """
+    index = SQLiteVaultIndex(":memory:")
+    small = CloudinaryAsset(
+        public_id="p", version=1, format="jpg", bytes=100, resource_type="image"
+    )
+    big = CloudinaryAsset(
+        public_id="p", version=2, format="jpg", bytes=9000, resource_type="image"
+    )
+    index.put_item(_item("a", cloudinary=small))
+    assert index.total_bytes("u1") == 100
+
+    index.put_item(_item("a", cloudinary=big))
+    assert index.total_bytes("u1") == 9000
+
+    index.put_item(_item("a", cloudinary=None))
+    assert index.total_bytes("u1") == 0

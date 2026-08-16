@@ -512,6 +512,11 @@ def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> Non
             call.credentials(session_id=session)
         return
 
+    # Read where they *were* before recording where they are now — the previous
+    # seat is the whole point of the comparison below, and overwriting it first
+    # makes every move look like staying put.
+    was = _where(app).get(user)
+    already = was[1] if was else None
     # Remember where people are. Being told "join the vc" when the speaker is
     # already sitting in one is the common case, and without this she has no way
     # to know which channel that is — the invitation carries no id.
@@ -520,16 +525,30 @@ def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> Non
     if _owner_ids(app) and _who_is(app, user) == "guest":
         return  # only an owner pulls her into a call
 
-    if channel:
+    # Only a genuine move matters. Mute, deafen and camera toggles all arrive as
+    # voice state updates too, and reacting to those meant rejoining a channel
+    # she was already sitting in.
+    if channel and str(channel) != already:
         tg.start_soon(_follow_into_voice, app, socket, guild, str(channel))
-    else:
+    elif not channel:
         call = _voice(app).pop(guild, None)
         if call is not None:
             call.close()
+        _joining(app).pop(guild, None)
 
 
 async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) -> None:
-    """Join the channel and start the listen/speak loop."""
+    """Join the channel and start the listen/speak loop.
+
+    Guarded against running twice for one connection. Discord emits
+    VOICE_STATE_UPDATE for mute, deafen, camera and every arrival — including
+    the bot's own — so this was being started repeatedly, and each extra run
+    identified with a session id an earlier run had already consumed. The second
+    handshake got 4006 and tore down the first.
+    """
+    if _joining(app).get(guild):
+        return
+    _joining(app)[guild] = True
     call = await join_voice(app, socket, guild, channel)
 
     async def _heard(said: str, user: str, code: str = "en") -> None:
@@ -547,9 +566,10 @@ async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) ->
 
     try:
         await call.run(_heard)
-    except Exception:  # noqa: BLE001 - a dropped call must not kill the gateway
-        logger.warning("voice: call ended (%s)", "stale session"
-                       if call.stale() else "error", exc_info=not call.stale())
+    except Exception as exc:  # noqa: BLE001 - a dropped call must not kill the gateway
+        logger.warning(
+            "voice: call ended — %s", _close_reason(exc), exc_info=not call.stale()
+        )
         if call.stale():
             # Discord rejected the credentials. Asking again produces a fresh
             # pair; retrying with the dead ones would fail identically forever.
@@ -566,6 +586,7 @@ async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) ->
     finally:
         call.close()
         _voice(app).pop(guild, None)
+        _joining(app).pop(guild, None)
 
 
 async def _follow_into_voice_bg(app: Any, socket: Any, guild: str, channel: str) -> None:
@@ -575,6 +596,23 @@ async def _follow_into_voice_bg(app: Any, socket: Any, guild: str, channel: str)
     task = asyncio.create_task(_follow_into_voice(app, socket, guild, channel))
     _joins(app).add(task)
     task.add_done_callback(_joins(app).discard)
+
+
+def _close_reason(exc: BaseException) -> str:
+    """The websocket close code, dug out of whatever wrapper it arrived in."""
+    text = str(exc)
+    for child in getattr(exc, "exceptions", ()) or ():
+        text += " | " + str(child)
+    return text[:200] or "no detail"
+
+
+def _joining(app: Any) -> dict[str, bool]:
+    """Guilds with a handshake already in flight."""
+    existing = getattr(app.state, "_voice_joining", None)
+    if not isinstance(existing, dict):
+        existing = {}
+        app.state._voice_joining = existing  # noqa: SLF001 - app state is a namespace
+    return existing
 
 
 def _joins(app: Any) -> set[Any]:

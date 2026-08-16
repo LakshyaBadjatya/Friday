@@ -62,6 +62,10 @@ SILENCE_SECONDS = 1.0
 #: How often the buffers are checked for a finished turn.
 _TICK_SECONDS = 0.25
 
+#: How often to poke the UDP socket. Comfortably inside the shortest NAT
+#: timeouts seen in practice.
+_KEEPALIVE_SECONDS = 5.0
+
 #: Loudness a frame must reach to count as someone talking rather than room
 #: noise. Compared on mean absolute amplitude of 16-bit samples: breathing and
 #: fan noise sit far below this, speech sits well above it.
@@ -113,6 +117,9 @@ class VoiceConnection:
         self._sequence = 0
         self._timestamp = 0
         self._nonce = 0
+        #: Last sequence number Discord sent, echoed back on each heartbeat as
+        #: voice gateway v8 expects.
+        self._seq_ack = -1
         self._speaking = False
         #: Per-speaker buffers and decoders — Opus is stateful per stream, so
         #: mixing two people through one decoder produces artefacts.
@@ -209,6 +216,8 @@ class VoiceConnection:
                 async for raw in ws:
                     event = json.loads(raw)
                     op, data = event.get("op"), event.get("d") or {}
+                    if isinstance(event.get("seq"), int):
+                        self._seq_ack = event["seq"]
 
                     if op == _HELLO:
                         tg.start_soon(
@@ -223,6 +232,7 @@ class VoiceConnection:
                         self.ready.set()
                         tg.start_soon(self._listen)
                         tg.start_soon(self._reap_turns, on_speech)
+                        tg.start_soon(self._udp_keepalive)
                         logger.info("voice: connected to channel %s", self.channel_id)
                     elif op == _SPEAKING:
                         ssrc = int(data.get("ssrc") or 0)
@@ -235,7 +245,10 @@ class VoiceConnection:
                 await ws.send(
                     json.dumps({
                         "op": _HEARTBEAT,
-                        "d": {"t": int(time.time() * 1000), "seq_ack": 0},
+                        "d": {
+                            "t": int(time.time() * 1000),
+                            "seq_ack": self._seq_ack,
+                        },
                     })
                 )
             await anyio.sleep(interval)
@@ -279,6 +292,24 @@ class VoiceConnection:
         )
 
     # -- hearing ------------------------------------------------------------ #
+    async def _udp_keepalive(self) -> None:
+        """Keep the NAT mapping open.
+
+        A container sits behind NAT, and a UDP mapping with no traffic through
+        it is reclaimed in well under a minute. When that happens audio stops in
+        both directions with nothing logged anywhere — the socket is still open,
+        it just no longer goes where Discord thinks it does.
+        """
+        loop = asyncio.get_running_loop()
+        counter = 0
+        while not self._closed and self._udp is not None and self._remote:
+            counter = (counter + 1) & 0xFFFFFFFF
+            with contextlib.suppress(Exception):
+                await loop.sock_sendto(
+                    self._udp, struct.pack("<I", counter), self._remote
+                )
+            await anyio.sleep(_KEEPALIVE_SECONDS)
+
     async def _listen(self) -> None:
         """Decrypt and decode incoming audio, buffered per speaker."""
         loop = asyncio.get_running_loop()

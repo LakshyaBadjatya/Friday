@@ -594,6 +594,52 @@ NO_INVENTING = (
 )
 
 
+#: A question with an actual answer to derive, rather than something to chat
+#: about. Physics, chemistry and maths problems arrive with units, "calculate",
+#: or a formula in them — and the chat persona's forty-word limit is exactly
+#: wrong for those.
+_STUDY = re.compile(
+    r"\b(?:calculate|derive|solve|prove|find\s+the|determine|evaluate|"
+    r"how\s+much|what\s+is\s+the\s+(?:value|magnitude|current|voltage|force|"
+    r"energy|power|resistance|velocity|acceleration|mass|charge))\b"
+    r"|\d+\s*(?:Ω|ohm|volt|V\b|A\b|W\b|N\b|J\b|kg|m/s|mol|Hz|°C)"
+    r"|\b(?:emf|e\.m\.f|internal\s+resistance|terminal\s+voltage|"
+    r"kirchhoff|ohm'?s\s+law|momentum|kinetic\s+energy)\b",
+    re.IGNORECASE,
+)
+
+
+def is_study_question(text: str) -> bool:
+    """Whether this needs working out rather than a witty line."""
+    return bool(_STUDY.search(text or ""))
+
+
+#: Replaces the chat brevity rules when a real problem shows up. He is a Class 12
+#: PCM student sitting exams — a wrong answer delivered in a confident forty
+#: words is worse than useless to him, and the transcript has her doing exactly
+#: that: three sign and formula errors in two attempts at one circuit, because
+#: she was compressing a multi-step derivation into a quip.
+STUDY_MODE = (
+    "\n\nThis is a problem to solve, not banter. The word limit does not apply. "
+    "Ignore the instruction to be brief and work it properly:\n"
+    "1. State what is given and what is asked, with units.\n"
+    "2. Name the principle before using it — and check its FORM against the "
+    "situation. A cell being charged is V = E + I·r; a cell discharging is "
+    "V = E − I·r. Getting that sign backwards is the single most common way to "
+    "fail one of these.\n"
+    "3. When one source drives current against another emf, the net driving "
+    "voltage is the difference, not the full source voltage.\n"
+    "4. Show each step with its arithmetic, then sanity-check the result: is the "
+    "sign sensible, is the magnitude plausible, does it satisfy the original "
+    "equation when substituted back?\n"
+    "5. If the user says your answer disagrees with theirs, do not simply "
+    "produce a different one. Find which step is wrong, say which, and correct "
+    "that. Two contradictory answers in a row is worse than one wrong answer.\n"
+    "Accuracy beats personality here. If you are not certain, say which step you "
+    "are unsure of rather than presenting a guess as a result."
+)
+
+
 def _ledger(state: Any) -> dict[str, dict[str, Any]]:
     existing = getattr(state, "_discord_chatter", None)
     if not isinstance(existing, dict):

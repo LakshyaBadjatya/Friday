@@ -333,7 +333,12 @@ class VoiceConnection:
             # on mic noise and would cut her off mid-word for a cough.
             if self._speaking and _loud_enough(pcm):
                 self._interrupted.set()
-            self._heard.setdefault(ssrc, bytearray()).extend(pcm)
+            buffered = self._heard.setdefault(ssrc, bytearray())
+            # Hard cap per speaker. Thirty seconds of 48kHz stereo is ~5.5MB and
+            # the container has 512MB total; an open mic with nobody reaping it
+            # would otherwise grow until the process died.
+            if len(buffered) < audio.MAX_SPEECH_BYTES:
+                buffered.extend(pcm)
             self._last_heard[ssrc] = time.monotonic()
 
     def _decrypt(self, packet: bytes) -> bytes | None:

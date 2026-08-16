@@ -23,6 +23,7 @@ knows here what she was told by voice. Reads flow one way; writes never do.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import re
@@ -529,7 +530,10 @@ def _on_voice_state(app: Any, socket: Any, tg: Any, data: dict[str, Any]) -> Non
     # voice state updates too, and reacting to those meant rejoining a channel
     # she was already sitting in.
     if channel and str(channel) != already:
-        tg.start_soon(_follow_into_voice, app, socket, guild, str(channel))
+        # Detached from the gateway's task group on purpose. A raise inside that
+        # group cancels every sibling, so one bad call was killing the gateway
+        # and the reconnect churn is what Render saw as a failing service.
+        _spawn_voice(app, socket, guild, str(channel))
     elif not channel:
         call = _voice(app).pop(guild, None)
         if call is not None:
@@ -589,13 +593,33 @@ async def _follow_into_voice(app: Any, socket: Any, guild: str, channel: str) ->
         _joining(app).pop(guild, None)
 
 
-async def _follow_into_voice_bg(app: Any, socket: Any, guild: str, channel: str) -> None:
-    """Start joining without making the text reply wait for the handshake."""
-    import asyncio  # noqa: PLC0415
-
-    task = asyncio.create_task(_follow_into_voice(app, socket, guild, channel))
+def _spawn_voice(app: Any, socket: Any, guild: str, channel: str) -> None:
+    """Run a voice call fully detached, so it can only ever fail alone."""
+    task = asyncio.create_task(_guarded_voice(app, socket, guild, channel))
     _joins(app).add(task)
     task.add_done_callback(_joins(app).discard)
+
+
+async def _guarded_voice(app: Any, socket: Any, guild: str, channel: str) -> None:
+    """A voice call that cannot escalate.
+
+    Everything short of cancellation is swallowed here — including the
+    BaseExceptionGroup a task group raises, which is not an Exception and would
+    otherwise sail straight past the handler inside.
+    """
+    try:
+        await _follow_into_voice(app, socket, guild, channel)
+    except asyncio.CancelledError:
+        raise
+    except BaseException:  # noqa: BLE001 - voice never takes the service with it
+        logger.exception("voice: call failed in isolation")
+    finally:
+        _joining(app).pop(guild, None)
+
+
+async def _follow_into_voice_bg(app: Any, socket: Any, guild: str, channel: str) -> None:
+    """Start joining without making the text reply wait for the handshake."""
+    _spawn_voice(app, socket, guild, channel)
 
 
 def _close_reason(exc: BaseException) -> str:
@@ -827,6 +851,17 @@ async def _compose(
     # rather than separate pipelines that would drift from her normal voice.
     if spoken:
         content = f"{content}\n\n[{banter.VOICE_REPLY_RULES}]"
+    # A real problem goes to a reasoning-grade model rather than the small chat
+    # one. Prompting the chat model to "be careful" was not enough — it produced
+    # three sign and formula errors on one circuit and stated all of them
+    # confidently.
+    if banter.is_study_question(content):
+        from friday.discord import tutor  # noqa: PLC0415
+
+        worked = await tutor.solve(getattr(app.state, "settings", None), content)
+        if worked:
+            return worked
+        content = f"{content}\n\n[{banter.STUDY_MODE}]"
     if banter.is_settle(content):
         content = f"{content}\n\n[{banter.SETTLE_PROMPT}]"
     elif banter.is_callback(content):

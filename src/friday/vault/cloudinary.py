@@ -78,7 +78,6 @@ class FakeCloudinary:
                 "api_key": "fake",
                 "timestamp": 0,
                 "public_id": public_id,
-                "folder": f"vault/{owner_uid}",
                 "type": "authenticated",
                 "signature": "fake-signature",
             },
@@ -117,11 +116,16 @@ class CloudinarySigner:
         return f"https://api.cloudinary.com/v1_1/{self.cloud_name}"
 
     def upload_params(self, *, owner_uid: str, item_id: str) -> UploadPayload:
-        """Signature and params for one authenticated upload."""
+        """Signature and params for one authenticated upload.
+
+        No ``folder`` param is sent: Cloudinary treats ``folder`` as a prefix
+        it prepends to ``public_id``, so sending both would double the
+        ``vault/{owner_uid}`` segment. The fully-qualified ``public_id`` alone
+        already provides the folder scoping.
+        """
         signable: dict[str, Any] = {
             "timestamp": self._clock(),
             "public_id": f"vault/{owner_uid}/{item_id}",
-            "folder": f"vault/{owner_uid}",
             "type": "authenticated",
         }
         params = dict(signable)

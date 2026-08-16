@@ -61,15 +61,28 @@ def test_signer_builds_a_complete_upload_payload() -> None:
     assert payload.params["timestamp"] == 1700000000
     assert payload.params["public_id"] == "vault/u1/i1"
     assert payload.params["type"] == "authenticated"
+    # No `folder` param: Cloudinary prepends folder as a prefix to public_id,
+    # so sending both would double the vault/{owner} segment in storage.
+    assert "folder" not in payload.params
     assert payload.params["signature"] == sign_params(
         {
             "timestamp": 1700000000,
             "public_id": "vault/u1/i1",
-            "folder": "vault/u1",
             "type": "authenticated",
         },
         "secret",
     )
+
+
+def test_signer_upload_public_id_has_no_doubled_folder_prefix() -> None:
+    # Regression: a live Cloudinary probe found that sending both `folder` and
+    # a fully-qualified `public_id` makes Cloudinary glue the folder prefix on
+    # a second time, storing the asset at vault/u1/vault/u1/i1 instead of
+    # vault/u1/i1 — which then makes every later verify() miss it.
+    signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
+    payload = signer.upload_params(owner_uid="u1", item_id="i1")
+    assert payload.params["public_id"] == "vault/u1/i1"
+    assert payload.params["public_id"].count("vault/u1") == 1
 
 
 def test_signer_scopes_the_public_id_to_owner_and_item() -> None:
@@ -79,7 +92,6 @@ def test_signer_scopes_the_public_id_to_owner_and_item() -> None:
     signer = CloudinarySigner(cloud_name="c", api_key="k", api_secret="s", clock=lambda: 1)
     payload = signer.upload_params(owner_uid="alice", item_id="i1")
     assert payload.params["public_id"] == "vault/alice/i1"
-    assert payload.params["folder"] == "vault/alice"
     other = signer.upload_params(owner_uid="mallory", item_id="i1")
     assert other.params["public_id"] != payload.params["public_id"]
     assert other.params["signature"] != payload.params["signature"]

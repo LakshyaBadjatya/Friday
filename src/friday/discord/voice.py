@@ -46,6 +46,11 @@ logger = get_logger("friday.discord.voice")
 _IDENTIFY, _SELECT_PROTOCOL, _READY, _HEARTBEAT = 0, 1, 2, 3
 _SESSION_DESCRIPTION, _SPEAKING, _HELLO = 4, 5, 8
 
+#: Declared in IDENTIFY. Zero opts out of DAVE (Discord's end-to-end voice
+#: encryption), which is permitted for bots — omitting the field entirely is
+#: not, and closes the connection with 4017.
+_DAVE_UNSUPPORTED = 0
+
 #: Encryption modes, best first. Discord retired the xsalsa20 family in 2024, so
 #: these AEAD modes are the live ones; both are available in pynacl.
 _PREFERRED_MODES = ("aead_xchacha20_poly1305_rtpsize", "aead_aes256_gcm_rtpsize")
@@ -168,6 +173,11 @@ class VoiceConnection:
             # supposed to recover a rejected session never fired.
             if _mentions_4006(exc):
                 self._stale = True
+            if _mentions(exc, "4017"):
+                logger.error(
+                    "voice: Discord demanded DAVE — the identify is missing "
+                    "max_dave_protocol_version"
+                )
             raise
 
     async def _identify_and_run(self, host: str, on_speech: Any) -> None:
@@ -184,6 +194,14 @@ class VoiceConnection:
                         "user_id": _self_id(self.app),
                         "session_id": self.session_id,
                         "token": self.token,
+                        # DAVE is Discord's end-to-end voice encryption. Every
+                        # client must now declare a position on it, and saying
+                        # nothing gets the socket closed with 4017 — which is
+                        # what happened here, after a perfectly good handshake.
+                        # Zero means "I do not speak DAVE", which bots are
+                        # allowed to say; the audio is still encrypted in
+                        # transport by the AEAD mode negotiated below.
+                        "max_dave_protocol_version": _DAVE_UNSUPPORTED,
                     },
                 })
             )
@@ -458,17 +476,26 @@ class VoiceConnection:
             self._udp = None
 
 
-def _mentions_4006(exc: BaseException, depth: int = 0) -> bool:
-    """Whether a 4006 hides anywhere in an exception and its children."""
+def _mentions(exc: BaseException, needle: str, depth: int = 0) -> bool:
+    """Whether ``needle`` hides anywhere in an exception and its children.
+
+    Close codes arrive inside an ExceptionGroup, where ``str()`` on the outer
+    exception says only how many sub-exceptions there were.
+    """
     if depth > 4:
         return False
-    if "4006" in str(exc):
+    if needle in str(exc):
         return True
     for child in getattr(exc, "exceptions", ()) or ():
-        if _mentions_4006(child, depth + 1):
+        if _mentions(child, needle, depth + 1):
             return True
     cause = exc.__cause__ or exc.__context__
-    return bool(cause and _mentions_4006(cause, depth + 1))
+    return bool(cause and _mentions(cause, needle, depth + 1))
+
+
+def _mentions_4006(exc: BaseException, depth: int = 0) -> bool:
+    """Whether the handshake was rejected for a dead session."""
+    return _mentions(exc, "4006", depth)
 
 
 def _self_id(app: Any) -> str:

@@ -28,6 +28,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import urllib.error
+import urllib.request
+from datetime import datetime
 from typing import Any
 
 import anyio
@@ -53,6 +56,10 @@ _EPHEMERAL = 64
 
 #: Discord's API base, for editing a deferred reply.
 _API = "https://discord.com/api/v10"
+
+#: Discord requires a User-Agent on every API request and rejects those without
+#: one. Its documented form is the product, a URL and a version.
+_UA = "FRIDAY (https://friday.sukhma.in, 1.0)"
 
 #: Strong references to in-flight follow-ups. asyncio holds only a weak one, so
 #: without this a slow turn can be collected mid-await and the reply never lands.
@@ -138,6 +145,17 @@ async def discord_interactions(request: Request) -> Any:
             },
         )
 
+    data = payload.get("data") or {}
+    if str(data.get("name") or "") == "transcript":
+        await _spawn(
+            _transcript_job(
+                request, payload,
+                str(getattr(settings, "discord_application_id", "") or ""),
+                str(payload.get("token") or ""),
+            )
+        )
+        return JSONResponse(status_code=200, content={"type": _DEFERRED})
+
     text = _spoken(payload)
     if not text:
         return JSONResponse(
@@ -152,6 +170,85 @@ async def discord_interactions(request: Request) -> Any:
         str(payload.get("token") or ""),
     )
     return JSONResponse(status_code=200, content={"type": _DEFERRED})
+
+
+async def _transcript_job(
+    request: Request, payload: dict[str, Any], app_id: str, token: str
+) -> None:
+    """Export the channel to a text file and attach it to the deferred reply."""
+    from friday.discord import transcript  # noqa: PLC0415
+
+    settings = getattr(request.app.state, "settings", None)
+    secret = getattr(settings, "discord_bot_token", None)
+    bot = secret.get_secret_value() if secret is not None else ""
+    channel = str(payload.get("channel_id") or "")
+    limit = transcript.DEFAULT_LIMIT
+    for option in (payload.get("data") or {}).get("options") or []:
+        if option.get("name") == "messages":
+            limit = int(option.get("value") or limit)
+
+    if not bot or not channel:
+        await _edit(app_id, token, "can't reach the channel history, Boss.")
+        return
+    try:
+        messages = await transcript.fetch(bot, channel, limit)
+        body = transcript.render(messages, channel)
+    except Exception:  # noqa: BLE001 - report the failure rather than hang
+        logger.exception("transcript failed")
+        await _edit(app_id, token, "transcript broke on my end, Boss.")
+        return
+    if not messages:
+        await _edit(app_id, token, "nothing in this channel to export 🧍")
+        return
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    ok = await _upload(
+        app_id, token, f"friday-transcript-{stamp}.txt", body,
+        f"{len(messages)} messages, everything included 📄",
+    )
+    if not ok:
+        await _edit(app_id, token, "built the transcript but couldn't upload it.")
+
+
+async def _upload(
+    app_id: str, token: str, filename: str, body: str, message: str
+) -> bool:
+    """Attach a file to the deferred reply.
+
+    A PATCH to @original replaces the placeholder, which is what keeps the file
+    in the same message rather than posting a second one underneath.
+    """
+    from friday.discord import transcript  # noqa: PLC0415
+
+    blob, content_type = transcript.multipart(filename, body, message)
+    url = f"{_API}/webhooks/{app_id}/{token}/messages/@original"
+    req = urllib.request.Request(  # noqa: S310
+        url,
+        data=blob,
+        method="PATCH",
+        headers={"Content-Type": content_type, "User-Agent": _UA},
+    )
+
+    def _send() -> bool:
+        try:
+            with urllib.request.urlopen(req, timeout=60):  # noqa: S310
+                return True
+        except urllib.error.HTTPError as exc:
+            detail = (exc.read() or b"")[:300].decode("utf-8", "replace")
+            logger.warning("transcript upload failed: HTTP %s %s", exc.code, detail)
+            return False
+        except Exception:  # noqa: BLE001
+            logger.warning("transcript upload failed (no response)")
+            return False
+
+    return bool(await anyio.to_thread.run_sync(_send))
+
+
+async def _spawn(coro: Any) -> None:
+    """Run a follow-up detached, holding a strong reference."""
+    task = asyncio.create_task(coro)
+    _IN_FLIGHT.add(task)
+    task.add_done_callback(_IN_FLIGHT.discard)
 
 
 async def _followup(request: Request, text: str, app_id: str, token: str) -> None:
@@ -189,15 +286,32 @@ async def _edit(app_id: str, token: str, content: str) -> None:
     # is longer, which would leave the placeholder sitting there forever.
     data = json.dumps({"content": content[:1900]}).encode()
     req = urllib.request.Request(  # noqa: S310
-        url, data=data, method="PATCH", headers={"Content-Type": "application/json"}
+        url,
+        data=data,
+        method="PATCH",
+        headers={
+            "Content-Type": "application/json",
+            # Discord requires a User-Agent on every API request and rejects
+            # the ones without it. The gateway's sender had one; this did not,
+            # so every deferred reply failed silently and the placeholder sat
+            # on "thinking..." forever.
+            "User-Agent": _UA,
+        },
     )
 
     def _send() -> None:
         try:
-            with urllib.request.urlopen(req, timeout=10):  # noqa: S310
+            with urllib.request.urlopen(req, timeout=15):  # noqa: S310
                 return
+        except urllib.error.HTTPError as exc:
+            # The body carries Discord's actual complaint. Logging only "it
+            # failed" is what made this take three rounds to find.
+            detail = (exc.read() or b"")[:300].decode("utf-8", "replace")
+            logger.warning(
+                "discord follow-up edit failed: HTTP %s %s", exc.code, detail
+            )
         except Exception:  # noqa: BLE001 - never raise out of the follow-up
-            logger.warning("discord follow-up edit failed")
+            logger.warning("discord follow-up edit failed (no response)")
 
     await anyio.to_thread.run_sync(_send)
 

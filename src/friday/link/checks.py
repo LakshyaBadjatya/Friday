@@ -245,6 +245,123 @@ def failed_logins() -> list[dict[str, str]]:
     )]
 
 
+def on_android() -> bool:
+    """Whether this relay is running on a phone rather than a computer.
+
+    Termux is the realistic way to run Python on Android, and it reports itself
+    through the environment rather than through ``platform``, which still says
+    "Linux" because it is.
+    """
+    return bool(os.environ.get("PREFIX", "").startswith("/data/data/com.termux")) or (
+        Path("/system/build.prop").exists() and Path("/system/bin/getprop").exists()
+    )
+
+
+def _getprop(name: str) -> str:
+    return _run(["getprop", name]).strip()
+
+
+def android_posture() -> list[dict[str, str]]:
+    """The handful of phone settings that actually decide whether it is safe.
+
+    Deliberately shallow. Without root a relay cannot see very much, and the
+    things it *can* see are the ones that matter most anyway: whether the OS is
+    still getting patches, whether sideloading and debugging are open, and
+    whether the screen locks. Pretending to a deeper audit than the permissions
+    allow would be the same failure as the librarian joke, dressed up.
+    """
+    findings = []
+
+    patch = _getprop("ro.build.version.security_patch")
+    if patch:
+        try:
+            year, month, _ = (int(part) for part in patch.split("-"))
+        except ValueError:
+            year = month = 0
+        if year:
+            from datetime import UTC, datetime  # noqa: PLC0415
+
+            now = datetime.now(UTC)
+            months_behind = (now.year - year) * 12 + (now.month - month)
+            if months_behind >= 6:
+                findings.append(_finding(
+                    "high" if months_behind >= 12 else "medium",
+                    f"security patches are {months_behind} months behind",
+                    "Every fixed hole since then is public and unpatched here. "
+                    "Check for a system update; if the phone is out of support, "
+                    "that is worth knowing on its own.",
+                    f"ro.build.version.security_patch = {patch}",
+                ))
+
+    adb = _getprop("service.adb.tcp.port")
+    if adb and adb not in {"-1", "0"}:
+        findings.append(_finding(
+            "high", "ADB over the network is enabled",
+            f"Anything on this wifi can try to debug the phone on port {adb}. "
+            f"Turn off wireless debugging in Developer options.",
+            f"service.adb.tcp.port = {adb}",
+        ))
+
+    for setting, title, detail, severity in (
+        ("global development_settings_enabled", "developer options are on",
+         "Fine if you are using them; worth turning off otherwise, since it is "
+         "what unlocks USB debugging.", "low"),
+        ("global adb_enabled", "USB debugging is on",
+         "A plugged-in cable can read the device. Turn it off when not "
+         "developing.", "medium"),
+        ("secure install_non_market_apps", "sideloading is allowed globally",
+         "Grant it per-app instead of globally.", "medium"),
+    ):
+        namespace, _, key = setting.partition(" ")
+        value = _run(["settings", "get", namespace, key]).strip()
+        if value == "1":
+            findings.append(_finding(severity, title, detail, f"{setting} = 1"))
+
+    lock = _run(["settings", "get", "secure", "lockscreen.password_type"]).strip()
+    if lock in {"0", "null", ""} and lock != "":
+        findings.append(_finding(
+            "high", "the screen may not be locked",
+            "A phone without a lock screen hands everything to whoever picks it "
+            "up. Set a PIN or biometric.",
+            f"lockscreen.password_type = {lock}",
+        ))
+
+    battery = _run(["termux-battery-status"])
+    if not battery and os.environ.get("PREFIX", "").startswith("/data/data/com.termux"):
+        findings.append(_finding(
+            "low", "termux-api is not installed",
+            "Install the Termux:API app and `pkg install termux-api` for battery, "
+            "wifi and notification checks. Without it this scan is limited to "
+            "system properties.",
+            "termux-battery-status not available",
+        ))
+    return findings
+
+
+def android_scan() -> dict[str, Any]:
+    """The phone equivalent of :func:`security_scan`."""
+    findings: list[dict[str, str]] = []
+    ran: list[str] = []
+    for name, check in (
+        ("android posture", android_posture),
+        ("listening ports", listening_ports),
+    ):
+        try:
+            findings.extend(check())
+        except Exception:  # noqa: BLE001 - a partial scan beats an error
+            continue
+        ran.append(name)
+    order = {"high": 0, "medium": 1, "low": 2}
+    findings.sort(key=lambda f: order.get(f["severity"], 3))
+    return {
+        "host": _getprop("ro.product.model") or os.uname().nodename,
+        "android": _getprop("ro.build.version.release") or "unknown",
+        "checks_run": ran,
+        "findings": findings,
+        "clean": not findings,
+    }
+
+
 def security_scan() -> dict[str, Any]:
     """Every check, gathered into one report.
 
@@ -253,6 +370,9 @@ def security_scan() -> dict[str, Any]:
     beats an error, and the report says which checks actually ran so a quiet
     result cannot be mistaken for a clean one.
     """
+    if on_android():
+        return android_scan()
+
     ran: list[str] = []
     findings: list[dict[str, str]] = []
     for name, check in (

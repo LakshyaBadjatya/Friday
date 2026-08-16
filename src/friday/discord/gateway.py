@@ -905,10 +905,22 @@ async def _compose(
 
     # A security question reaches the machine, when there is one. This is the
     # difference between "I'm not a hacker, Boss" and a list of open ports.
-    if operator is not None and str(getattr(operator, "name", "")) == "EDITH":
-        scanned = await operators.machine_report(app, content)
-        if scanned:
-            content = f"{content}\n\n{scanned}"
+    if operator is not None:
+        name = str(getattr(operator, "name", ""))
+        gathered: str | None = None
+        if name == "EDITH":
+            # A repository named in the question is a code question; anything
+            # else about security means the machine.
+            if operators.mentions_repo(content):
+                gathered = await operators.github_report(settings, content)
+            else:
+                gathered = await operators.machine_report(app, content)
+        elif name == "FORGE":
+            gathered = await operators.github_report(settings, content)
+        elif name == "ORACLE" and operators.wants_calendar(content):
+            gathered = await operators.calendar_report(app, content)
+        if gathered:
+            content = f"{content}\n\n{gathered}"
     # "reanalyse your answer" carries no subject — the subject is the previous
     # message. Without that referent the model had nothing to work from and
     # recited the persona rules instead, which is how a request to re-derive a

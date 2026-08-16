@@ -274,6 +274,133 @@ async def machine_report(app: Any, text: str) -> str | None:
     )
 
 
+async def github_report(settings: Any, text: str) -> str | None:
+    """Build status or dependency alerts, from the real repository."""
+    from friday.link import github  # noqa: PLC0415
+
+    repo = _named_repo(text) or str(getattr(settings, "github_default_repo", "") or "")
+    if not repo:
+        return None
+
+    if re.search(r"\b(?:vulnerab|secur|safe|alert|dependenc|cve)\w*", text, re.I):
+        found = await github.security_alerts(settings, repo)
+        if not found.get("ok"):
+            return f"[GitHub check failed. Say exactly this: {found.get('error')}]"
+        if not found.get("scanning_enabled"):
+            return (
+                f"[Dependency scanning is OFF for {repo}, so nothing has ever been "
+                f"checked. Say that plainly — an empty alert list here means nobody "
+                f"is looking, not that the code is clean. {found.get('note', '')}]"
+            )
+        alerts = found.get("alerts") or []
+        if not alerts:
+            return f"[{repo} has scanning on and no open dependency alerts. Real result.]"
+        lines = "\n".join(
+            f"- [{a['severity']}] {a['package']}: {a['summary']}" for a in alerts[:10]
+        )
+        return (
+            f"[Real open dependency alerts for {repo}. Report them worst first and "
+            f"say what to update. Do not invent any.\n{lines}]"
+        )
+
+    status = await github.build_status(settings, repo)
+    if not status.get("ok"):
+        return f"[GitHub check failed. Say exactly this: {status.get('error')}]"
+    runs = status.get("runs") or []
+    if not runs:
+        return f"[{repo} has no workflow runs yet. Real result.]"
+    lines = "\n".join(
+        f"- {r['name']} on {r['branch']}: {r['conclusion']} ({r['when']}) — "
+        f"{r['message']}" for r in runs[:5]
+    )
+    return (
+        f"[Real recent CI runs for {repo}. Report the outcome plainly; if something "
+        f"failed, say which and on what branch.\n{lines}]"
+    )
+
+
+#: "check owner/repo", "is friday-backend safe". A full owner/name wins; a bare
+#: name is left alone, because guessing which of forty repositories was meant is
+#: worse than using the configured default.
+_REPO = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b")
+
+
+def _named_repo(text: str) -> str:
+    match = _REPO.search(text or "")
+    return match.group(1) if match else ""
+
+
+#: A question about the diary rather than about reminders. ORACLE owns both and
+#: they are answered from different places — one from Google, one from the
+#: reminder store — so the split has to happen before either is consulted.
+_CALENDAR = re.compile(
+    r"\b(?:calendar|schedule[ds]?|diary|agenda|meeting|appointment"
+    r"|what(?:'s|\s+is)\s+on\b|what\s+(?:do|have)\s+i\s+have\b"
+    r"|free\s+(?:time|slot)|busy)\b",
+    re.IGNORECASE,
+)
+
+
+def wants_calendar(text: str) -> bool:
+    """Whether this asks what is scheduled, rather than to be reminded."""
+    return bool(_CALENDAR.search(text or ""))
+
+
+def mentions_repo(text: str) -> bool:
+    """Whether a question names a repository, making it about code not a machine."""
+    return bool(_REPO.search(text or "")) or bool(
+        re.search(r"\b(?:repo|repository|my\s+app|android\s+app|codebase|"
+                  r"dependenc|package|build|ci\b)", text or "", re.IGNORECASE)
+    )
+
+
+async def calendar_report(app: Any, text: str) -> str | None:
+    """What is actually on the calendar, for ORACLE."""
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from friday.integrations.calendar import (  # noqa: PLC0415
+        CalendarError,
+        GoogleCalendarClient,
+        whats_my_day,
+    )
+
+    settings = getattr(app.state, "settings", None)
+    secret = getattr(settings, "google_oauth_token", None)
+    token = secret.get_secret_value() if secret is not None else ""
+    if not token:
+        return (
+            "[No Google account is connected, so there is no calendar to read. Say "
+            "exactly that and offer to walk through connecting one — do not guess "
+            "at what might be scheduled.]"
+        )
+
+    day = datetime.now(UTC).date()
+    if re.search(r"\btomorrow\b", text, re.I):
+        day = day + timedelta(days=1)
+
+    import httpx  # noqa: PLC0415
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            client = GoogleCalendarClient(token, http=http)
+            events = await whats_my_day(client, day=day.isoformat())
+    except (CalendarError, Exception) as exc:  # noqa: BLE001 - report, never crash
+        return f"[The calendar could not be read. Say exactly this: {exc}]"
+
+    if not events:
+        return f"[Nothing is scheduled for {day.isoformat()}. Real result, say so.]"
+    lines = []
+    for event in events[:10]:
+        start = (event.get("start") or {})
+        when = start.get("dateTime") or start.get("date") or "?"
+        lines.append(f"- {when}: {event.get('summary', '(no title)')}")
+    body = "\n".join(lines)
+    return (
+        f"[The real calendar for {day.isoformat()}. Report it in your own voice, "
+        f"in time order. Do not invent anything that is not listed.\n{body}]"
+    )
+
+
 async def speak(
     token: str, channel: str, operator: Any, text: str, avatar: str = ""
 ) -> str:

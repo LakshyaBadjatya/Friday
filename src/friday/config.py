@@ -667,6 +667,13 @@ class Settings(BaseSettings):
     # it can run the scans on a personal laptop — so an unset value refuses
     # every relay rather than leaving the door open.
     link_token: SecretStr | None = None
+    # Read-only GitHub personal access token. FORGE answers "did my build pass"
+    # with it and EDITH reads dependency alerts; nothing here writes, so a
+    # fine-grained read-scoped token is the right shape.
+    github_token: SecretStr | None = None
+    # "owner/repo" FRIDAY assumes when a question names no repository — the one
+    # the owner is actually working on.
+    github_default_repo: str = ""
     # Discord keeps its own conversation, separate from the shared owner thread.
     # It *reads* the shared history for context but never writes into it: the
     # private room can see the rest of the house, the house cannot see in.

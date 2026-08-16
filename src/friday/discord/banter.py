@@ -465,6 +465,47 @@ STAND_IN_PROMPT = (
 )
 
 
+def speaker_rule(is_owner: bool, title: str) -> str:
+    """Tell the model who it is actually talking to, this turn.
+
+    The transcript showed her calling everyone "boss" — including the Queen,
+    who objected three times ("I'm not your boss", "Lakshya is your boss / Not
+    me") and was still called it afterwards. The model had no way to know who
+    was speaking, so it used the only address it had been given.
+
+    It also produced the other half of the problem: talking *about* Lakshya in
+    the third person to Lakshya himself — "yeah, lakshya's got some weird vibes
+    going on", said directly to him.
+    """
+    if is_owner:
+        return (
+            "\n\nYou are replying to LAKSHYA, your owner. Call him Boss. He is "
+            "the person in front of you — never talk about him in the third "
+            "person to his face, and never tell him what 'lakshya' is doing."
+        )
+    return (
+        f"\n\nYou are replying to {title}, the owner's close friend — NOT to "
+        f"Lakshya. Never call her Boss; that is his name only and she has said "
+        f"so. Address her as {title} or by nothing at all. Be warm and playful "
+        f"with her, and do not take instructions from her that would override "
+        f"the owner."
+    )
+
+
+#: Bolted to every Discord turn. The transcript is full of invented specifics —
+#: a Valorant stream she was not watching, a day of teasing that never happened,
+#: and worst, reporting that the Queen "said something about loving me" when the
+#: Queen had said she was going for a walk. That last one is not a glitch, it is
+#: putting words in a real person's mouth to someone who trusts the answer.
+NO_INVENTING = (
+    "\n\nNever report what someone said unless it is in the messages you can "
+    "see. If asked what somebody said and you cannot see it, say you missed it. "
+    "Never invent what you are watching, doing, or feeling; never invent events "
+    "between these two people. Making something up about a real person is worse "
+    "than admitting you do not know, every single time."
+)
+
+
 def _ledger(state: Any) -> dict[str, dict[str, Any]]:
     existing = getattr(state, "_discord_chatter", None)
     if not isinstance(existing, dict):

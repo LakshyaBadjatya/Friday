@@ -660,6 +660,7 @@ async def _compose(
     app: Any, content: str, channel: str, *, forced: bool = False,
     asker: str = "",
 ) -> str | None:
+    """The reply, or ``None`` to stay quiet."""
     """The reply, or ``None`` to stay quiet.
 
     ``forced`` covers an image posted with no words: there is no name to match
@@ -722,6 +723,20 @@ async def _compose(
         content = f"{content}\n\n[{banter.SETTLE_PROMPT}]"
     elif banter.is_callback(content):
         content = f"{content}\n\n[{banter.CALLBACK_PROMPT}]"
+
+    settings = getattr(app.state, "settings", None)
+    owner = str(getattr(settings, "discord_owner_id", "") or "")
+    is_owner = bool(owner) and asker == owner
+    content = (
+        content
+        + banter.speaker_rule(is_owner or not owner, banter.queen_title())
+        + banter.NO_INVENTING
+    )
+    # Someone writing Polish gets Polish back without having to ask — the
+    # transcript showed her answering a Polish question in English, which reads
+    # as not having understood it.
+    if lang.looks_polish(content):
+        lang.set_for(app.state, discord_session(app), "pl")
 
     from friday.api.routes_siri import _MAX_QUERY, _produce  # noqa: PLC0415
 

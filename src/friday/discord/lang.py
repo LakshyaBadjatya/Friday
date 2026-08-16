@@ -128,6 +128,38 @@ def requested(text: str) -> str | None:
     return None
 
 
+#: Characters that only appear in Polish, plus a few unmistakable short words.
+#: Detection is deliberately narrow: guessing a language wrong is worse than not
+#: guessing, because the reply comes back in a language nobody asked for.
+_POLISH_MARKS = set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+#: Words that are Polish and are *not* also English. "to" and "co" were in an
+#: earlier version and made "to be or not to be" read as Polish — a word shared
+#: with English carries no signal at all, however common it is in Polish.
+_POLISH_WORDS = re.compile(
+    r"\b(?:czy|jest|jestem|jesteś|nie|tak|jak|dlaczego|się|masz|mnie|ciebie|"
+    r"dobrze|dzień|dobry|bardzo|ktory|kiedy|gdzie|tylko|jeszcze|trzeba|byc|"
+    r"ty|piszesz|robisz|mowisz|moje|twoje|nic|juz|teraz|bardzo|wszystko)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_polish(text: str) -> bool:
+    """Whether a message is written in Polish.
+
+    Used so she answers Polish in Polish without being asked — the transcript
+    showed her replying in English to "czy Lakshya cię kiedyś zwyzywał", which
+    reads as not having understood.
+    """
+    body = (text or "").strip()
+    if len(body) < 6:
+        return False
+    if _POLISH_MARKS & set(body):
+        return True
+    # Two or more Polish function words: one could be a coincidence in English
+    # ("to", "co"), two together in a short message is not.
+    return len(_POLISH_WORDS.findall(body)) >= 2
+
+
 def voice_for(code: str | None) -> str:
     """The Edge voice for a language code, falling back to English.
 

@@ -219,7 +219,39 @@ FORGE = Persona(
 )
 
 # The specialists, in roster order.
+JARVIS = Persona(
+    name="JARVIS",
+    title="Chief of Staff",
+    # The widest set of any specialist, because his job is the overview rather
+    # than a speciality: he is the one who can look at everything at once and
+    # say what actually matters this morning. Still short of the prime's set —
+    # nothing here locks anything down or spends money.
+    allowed_tools=frozenset({
+        KNOWLEDGE, RAG, GRAPH, ANALYSIS, WEB_SEARCH, AGENT_REACH,
+        SECURITY_AUDIT, MARKET, EMAIL, NOTIFY,
+        CREATE_REMINDER, LIST_REMINDERS, COMPLETE_REMINDER, SCHEDULER, PROTOCOLS,
+    }),
+    # His own namespace, like everybody else's. "Full memory" is about what he
+    # can *read*, not about where he writes — the roster requires namespaces to
+    # be distinct and to match the name, and that invariant is worth more than
+    # the shortcut of pointing him at the shared one. Reading the shared thread
+    # is a separate mechanism the other surfaces already use, so he gets the
+    # breadth without a second operator writing into FRIDAY's own corner.
+    memory_namespace="jarvis",
+    system_prompt=(
+        "You are JARVIS, FRIDAY's chief of staff. You hold the overview: what "
+        "is scheduled, what is running, what broke, what changed, and what the "
+        "owner has not noticed yet. You read the whole shared history, so you "
+        "know what the owner has told anyone. "
+        "Lead with what matters and say what you would do about it. You are "
+        "dry, unhurried and precise; you do not flatter and you do not pad. "
+        "Never invent a status you have not been given — an unknown is reported "
+        "as unknown."
+    ),
+)
+
 SPECIALISTS: tuple[Persona, ...] = (
+    JARVIS,
     EDITH,
     ORACLE,
     GECKO,
@@ -265,6 +297,10 @@ ROSTER_PERSONAS: tuple[Persona, ...] = (FRIDAY, *SPECIALISTS)
 # Coarse intent/domain keyword -> persona name, for RosterRegistry.by_intent.
 # Unknown intents fall back to the prime at the registry layer.
 INTENT_TO_PERSONA: dict[str, str] = {
+    "briefing": "JARVIS",
+    "sitrep": "JARVIS",
+    "overview": "JARVIS",
+    "status": "JARVIS",
     "security": "EDITH",
     "lockdown": "EDITH",
     "automation": "ORACLE",

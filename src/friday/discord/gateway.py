@@ -908,7 +908,9 @@ async def _compose(
     if operator is not None:
         name = str(getattr(operator, "name", ""))
         gathered: str | None = None
-        if name == "EDITH":
+        if name == "JARVIS" and operators.wants_sitrep(content):
+            gathered = await operators.sitrep(app, content)
+        elif name == "EDITH":
             # A repository named in the question is a code question; anything
             # else about security means the machine.
             if operators.mentions_repo(content):

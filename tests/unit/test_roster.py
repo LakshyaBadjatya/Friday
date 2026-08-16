@@ -20,9 +20,10 @@ import pytest
 
 from friday.roster import ROSTER, Persona, RosterRegistry
 
-# The eight specialist code-names plus the prime.
+# The nine specialist code-names plus the prime.
 SPECIALISTS = frozenset(
-    {"EDITH", "ORACLE", "GECKO", "KAREN", "VERONICA", "JOCASTA", "VISION", "FORGE"}
+    {"JARVIS", "EDITH", "ORACLE", "GECKO", "KAREN", "VERONICA", "JOCASTA",
+     "VISION", "FORGE"}
 )
 PRIME = "FRIDAY"
 ALL_NAMES = SPECIALISTS | {PRIME}
@@ -64,7 +65,7 @@ def test_persona_is_immutable_pydantic_model() -> None:
 def test_all_nine_personas_present() -> None:
     names = set(ROSTER.names())
     assert names == ALL_NAMES, f"roster names mismatch: {names ^ ALL_NAMES}"
-    assert len(ROSTER.names()) == 9
+    assert len(ROSTER.names()) == len(ALL_NAMES)
 
 
 def test_prime_is_a_persona_with_broad_scope() -> None:
@@ -165,7 +166,7 @@ def test_contains_is_case_insensitive() -> None:
 
 def test_personas_property_returns_all() -> None:
     personas = ROSTER.personas()
-    assert len(personas) == 9
+    assert len(personas) == len(ALL_NAMES)
     assert all(isinstance(p, Persona) for p in personas)
     assert {p.name for p in personas} == ALL_NAMES
 

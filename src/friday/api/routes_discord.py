@@ -125,7 +125,16 @@ async def discord_interactions(request: Request) -> Any:
     if kind != _APPLICATION_COMMAND:
         return JSONResponse(status_code=200, content={"type": _PONG})
 
-    owner = str(getattr(settings, "discord_owner_id", "") or "")
+    # A comma-separated list, because there are two owners. This compared the
+    # caller against the whole raw string, so with both ids configured it never
+    # matched anybody — every slash command answered "I only answer to Lakshya",
+    # including when Lakshya ran it. The gateway has always split this properly;
+    # only the interactions endpoint did not.
+    owners = {
+        part.strip()
+        for part in str(getattr(settings, "discord_owner_id", "") or "").split(",")
+        if part.strip()
+    }
     caller = str(
         (
             (payload.get("member") or {}).get("user")
@@ -133,13 +142,13 @@ async def discord_interactions(request: Request) -> Any:
             or {}
         ).get("id", "")
     )
-    if owner and caller != owner:
+    if owners and caller not in owners:
         return JSONResponse(
             status_code=200,
             content={
                 "type": _MESSAGE,
                 "data": {
-                    "content": "I only answer to Lakshya, sorry.",
+                    "content": "these are owner-only, sorry.",
                     "flags": _EPHEMERAL,
                 },
             },

@@ -29,6 +29,7 @@ from typing import Any
 #: they stay distinguishable when the colour is too small to read.
 _MARKS: dict[str, tuple[tuple[int, int, int], tuple[int, int, int], int, float]] = {
     "FRIDAY":   ((255, 138, 40),  (255, 214, 160), 12, 0.0),
+    "JARVIS":   ((90, 190, 255),  (220, 245, 255), 18, 10.0),
     "EDITH":    ((235, 64, 68),   (255, 176, 176), 10, 18.0),
     "ORACLE":   ((150, 110, 255), (214, 196, 255), 14, 12.0),
     "GECKO":    ((60, 210, 130),  (176, 255, 214), 8, 24.0),

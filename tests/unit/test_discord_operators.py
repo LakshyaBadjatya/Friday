@@ -205,3 +205,83 @@ def test_a_question_answered_by_arithmetic_is_not_a_search() -> None:
     tutor._LAST.pop("empty", None)
     assert tutor.is_computation("empty", "how many people are coming") is False
     assert tutor.is_computation("chan", "lol that is wild") is False
+
+
+def test_jarvis_is_a_real_roster_member_not_a_special_case() -> None:
+    """He keeps the roster's invariants: own namespace, matching his name.
+
+    "Full memory" is about what he can read, not where he writes. Pointing him
+    at FRIDAY's namespace was the shortcut, and it broke the rule that
+    namespaces are distinct — a rule worth more than the shortcut, since two
+    operators writing into one corner is how memory gets confusing.
+    """
+    from friday.roster import ROSTER  # noqa: PLC0415
+
+    jarvis = next(p for p in ROSTER.personas() if p.name == "JARVIS")
+    assert jarvis.memory_namespace == "jarvis"
+    edith = next(p for p in ROSTER.personas() if p.name == "EDITH")
+    assert edith.memory_namespace == "edith"
+    # Wide, but not the prime's set — nothing here locks anything down.
+    assert len(jarvis.allowed_tools) > len(edith.allowed_tools)
+    assert "security_lockdown" not in jarvis.allowed_tools
+
+
+def test_jarvis_has_a_face_and_answers_to_his_name() -> None:
+    from friday.discord import emblem  # noqa: PLC0415
+
+    assert emblem.known("jarvis")
+    assert (emblem.render("JARVIS") or b"").startswith(b"\x89PNG")
+    assert getattr(operators.addressed("jarvis, status?"), "name", None) == "JARVIS"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("jarvis sitrep", True),
+        ("catch me up", True),
+        ("anything i should know", True),
+        ("give me a rundown", True),
+        ("jarvis how are you", False),          # ordinary conversation
+        ("is my server secure", False),         # EDITH's, not his
+    ],
+)
+def test_the_overview_is_his_and_specialities_are_not(
+    text: str, expected: bool
+) -> None:
+    assert operators.wants_sitrep(text) is expected
+
+
+def test_a_security_question_still_goes_to_edith_not_jarvis() -> None:
+    """JARVIS is matched first, so he must not swallow the specialists."""
+    assert getattr(
+        operators.for_domain("friday check security of my devices"), "name", None
+    ) == "EDITH"
+    assert getattr(
+        operators.for_domain("remind me at 6pm to call mum"), "name", None
+    ) == "ORACLE"
+
+
+@pytest.mark.anyio
+async def test_a_sitrep_survives_every_source_being_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One dead token must not take the whole briefing with it."""
+
+    async def _boom(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("source unavailable")
+
+    monkeypatch.setattr(operators, "machine_report", _boom)
+    monkeypatch.setattr(operators, "github_report", _boom)
+    monkeypatch.setattr(operators, "calendar_report", _boom)
+
+    class App:
+        state = type("S", (), {"settings": type("T", (), {
+            "github_default_repo": ""})()})()
+
+    from friday.discord import lookup  # noqa: PLC0415
+
+    async def _quiet(question: str, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(lookup, "brief", _quiet)
+    assert await operators.sitrep(App(), "sitrep") is None

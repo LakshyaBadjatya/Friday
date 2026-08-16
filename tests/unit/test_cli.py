@@ -95,13 +95,19 @@ def test_version_prints_package_version(capsys: pytest.CaptureFixture[str]) -> N
     assert pkg_version("friday") in captured.out
 
 
-def test_roster_prints_all_nine_persona_names(capsys: pytest.CaptureFixture[str]) -> None:
-    """``roster`` prints every canonical persona name (the prime + 8)."""
+def test_roster_prints_every_persona_name(capsys: pytest.CaptureFixture[str]) -> None:
+    """``roster`` prints every canonical persona name, however many there are.
+
+    Counted against the registry rather than a literal, so adding an operator is
+    a one-line change to the roster instead of a scavenger hunt through tests
+    that each hardcoded the old number.
+    """
     code = main(["roster"])
     captured = capsys.readouterr()
     assert code == 0
     names = ROSTER.names()
-    assert len(names) == 9
+    assert len(names) >= 9
+    assert "JARVIS" in names
     for name in names:
         assert name in captured.out
 

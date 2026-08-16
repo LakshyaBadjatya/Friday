@@ -58,6 +58,12 @@ _HOOK_NAME = "FRIDAY Roster"
 #: of temperament, and the speciality becomes the angle it takes rather than
 #: the only thing it will discuss.
 _FLAVOUR = {
+    "JARVIS": (
+        "the overview — what is scheduled, what broke, what changed, what the "
+        "owner has not noticed yet. Dry, unhurried, faintly amused. You lead "
+        "with what matters and say what you would do about it. You never pad "
+        "and you never flatter."
+    ),
     "EDITH": (
         "security and lockdown. Watchful and dry. You notice what could go "
         "wrong before anyone asks, and you say it once without lecturing."
@@ -151,6 +157,15 @@ def addressed(text: str) -> Any | None:
 #: and that landed on FRIDAY, who has no security tools and made a joke instead
 #: of handing it to the operator who does.
 _DOMAINS: dict[str, tuple[str, ...]] = {
+    # JARVIS is checked first and matches only the overview questions, so he
+    # takes "how are things" without stealing "is my server secure" from EDITH.
+    "JARVIS": (
+        r"sitrep", r"brief(?:ing)?\s+me", r"give\s+me\s+(?:a|the)\s+(?:rundown|brief)",
+        r"status\s+report", r"how(?:'s|\s+is|\s+are)\s+(?:everything|things|it\s+all)",
+        r"what(?:'s|\s+is)\s+(?:my\s+)?(?:day|situation)\s+look",
+        r"catch\s+me\s+up", r"anything\s+i\s+(?:should|need\s+to)\s+know",
+        r"where\s+are\s+we\s+at",
+    ),
     "EDITH": (
         r"secur(?:e|ity|ing)", r"audit", r"hacked", r"breach", r"vulnerab",
         r"password", r"2fa", r"two.factor", r"lock\s*down", r"lockdown",
@@ -341,6 +356,12 @@ _CALENDAR = re.compile(
 )
 
 
+def wants_sitrep(text: str) -> bool:
+    """Whether this asks for the overview rather than for one thing."""
+    pattern = _DOMAIN_RE.get("JARVIS")
+    return bool(pattern and pattern.search(text or ""))
+
+
 def wants_calendar(text: str) -> bool:
     """Whether this asks what is scheduled, rather than to be reminded."""
     return bool(_CALENDAR.search(text or ""))
@@ -398,6 +419,80 @@ async def calendar_report(app: Any, text: str) -> str | None:
     return (
         f"[The real calendar for {day.isoformat()}. Report it in your own voice, "
         f"in time order. Do not invent anything that is not listed.\n{body}]"
+    )
+
+
+async def sitrep(app: Any, text: str) -> str | None:
+    """Everything at once: the machine, the builds, the diary, the world.
+
+    This is the one thing JARVIS does that no other operator can, and it is only
+    possible because each of those sources was wired separately first. Asked
+    "anything I should know", he goes and finds out rather than asking what the
+    owner means.
+
+    The four run concurrently. Serially this would be a security scan plus a
+    GitHub round trip plus Google plus a news feed — comfortably half a minute
+    of somebody watching a typing indicator — and none of them needs any of the
+    others.
+
+    A source that is unavailable says so and the brief carries on. A morning
+    rundown missing the calendar is still worth reading; one that fails entirely
+    because a token expired is not.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from friday.discord import lookup  # noqa: PLC0415
+
+    settings = getattr(app.state, "settings", None)
+
+    async def _machine() -> str:
+        try:
+            return await machine_report(app, "security") or ""
+        except Exception:  # noqa: BLE001 - a quiet source, not a failed brief
+            return ""
+
+    async def _builds() -> str:
+        repo = str(getattr(settings, "github_default_repo", "") or "")
+        if not repo:
+            return ""
+        try:
+            return await github_report(settings, f"build status for {repo}") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _diary() -> str:
+        try:
+            return await calendar_report(app, text) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _world() -> str:
+        try:
+            return await lookup.brief("top news headlines today") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    machine, builds, diary, world = await asyncio.gather(
+        _machine(), _builds(), _diary(), _world()
+    )
+    parts = [
+        part for part in (
+            f"MACHINE:\n{machine}" if machine else "",
+            f"BUILDS:\n{builds}" if builds else "",
+            f"DIARY:\n{diary}" if diary else "",
+            f"WORLD:\n{world}" if world else "",
+        ) if part
+    ]
+    if not parts:
+        return None
+    body = "\n\n".join(parts)
+    return (
+        "\n\n[This is a real situation report, gathered just now from four "
+        "sources. Deliver it as a briefing: lead with anything that actually "
+        "needs attention, then the rest, short lines, no headings copied from "
+        "below and no source labels. If a section is missing say which one is "
+        "not connected rather than skipping it silently. Never invent an item.\n"
+        f"{body}]"
     )
 
 

@@ -51,8 +51,13 @@ FROM python:3.12-slim AS runtime
 # libopus for the codec itself. This is the whole reason the service runs as a
 # container rather than on a managed Python runtime — there is no way to install
 # a system package on the latter.
+# tesseract-ocr is here for the vault: a photographed page that is filed but
+# never read is the feature not working, and the alternative (the full
+# perception extras — opencv, ultralytics) is hundreds of megabytes for
+# capabilities this service does not use. English data only, for the same reason.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libopus0 \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg libopus0 tesseract-ocr tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # Put the venv on PATH so `uvicorn`/`python` resolve to the synced environment.

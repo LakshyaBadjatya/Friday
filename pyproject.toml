@@ -23,6 +23,11 @@ dependencies = [
   # every hosted TTS. It emits MP3, which ffmpeg converts to the Opus frames the
   # voice socket requires.
   "edge-tts>=7.0",
+  # Reading a photographed page. A thin wrapper over the tesseract binary the
+  # image installs; the rest of the perception extras (opencv, ultralytics)
+  # stay out of the lock. A vault that files captures it never reads is the
+  # feature not working, and this costs kilobytes.
+  "pytesseract>=0.3.10",
   # Draws the roster's arc-reactor emblems. A Discord webhook takes an avatar
   # only as a public URL, so the images have to be served from here; without
   # this the route 500s in production and every operator quietly falls back to

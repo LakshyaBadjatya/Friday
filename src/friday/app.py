@@ -133,7 +133,7 @@ from friday.observability.replay import TurnRecorder
 from friday.observability.tracing import Tracer
 from friday.observability.usage import UsageLedger
 from friday.perception.clipboard import FakeClipboard
-from friday.perception.ocr import FakeOCR, TesseractOCR
+from friday.perception.ocr import FakeOCR, OCRProvider, TesseractOCR
 from friday.perception.screen import (
     FakeScreen,
     PerceptionService,
@@ -2560,6 +2560,39 @@ def _wire_perception(app: FastAPI, settings: Settings) -> None:
     app.state.perception = _build_perception_service()
 
 
+def _choose_vault_ocr() -> OCRProvider:
+    """Pick the reader the host can actually run.
+
+    Deliberately not gated on ``enable_perception``. That flag switches on the
+    whole heavyweight perception stack — screen capture, YOLO, opencv — and the
+    vault needs none of it; tying reading a photographed page to it meant a
+    deployment with tesseract installed still filed every capture unread, which
+    is the feature quietly not working.
+
+    So: use tesseract when the binary is on the host, and a silent fake when it
+    is not. Filing a capture unread is the honest degradation — the photograph
+    is safe either way, and OCR can be re-run later — where raising here would
+    cost the user the thing they photographed.
+    """
+    import importlib.util  # noqa: PLC0415 - lazy so the import cost lands here
+    import shutil  # noqa: PLC0415
+
+    # Both halves or neither: the binary without the wrapper (or the reverse)
+    # raises inside the pipeline, which then files the capture unread anyway —
+    # with a warning that reads like a bug rather than like a missing package.
+    has_binary = shutil.which("tesseract") is not None
+    has_wrapper = importlib.util.find_spec("pytesseract") is not None
+    if has_binary and has_wrapper:
+        return TesseractOCR()
+    logger.info(
+        "vault: no local OCR (tesseract binary: %s, pytesseract: %s), "
+        "captures will be filed unread",
+        has_binary,
+        has_wrapper,
+    )
+    return FakeOCR("")
+
+
 def _wire_vault(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
     """Build and stash the vault's index, Cloudinary provider, quota guard, and
     the solver/notes/search/exam seams that run over the shared LLM.
@@ -2652,10 +2685,7 @@ def _wire_vault(app: FastAPI, settings: Settings, llm: LLMProvider) -> None:
 
     app.state.vault_pipeline = Pipeline(
         index=index,
-        # OCR is local and runs for every capture, locked or not. Without the
-        # perception extras there is nothing to read with, and an empty read is
-        # honest where a crash would cost the user their photograph.
-        ocr=TesseractOCR() if settings.enable_perception else FakeOCR(""),
+        ocr=_choose_vault_ocr(),
         organizer_llm=llm,
         solver=app.state.vault_solver,
         quota=app.state.vault_quota,

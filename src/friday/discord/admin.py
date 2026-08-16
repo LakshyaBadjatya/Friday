@@ -116,7 +116,8 @@ async def find_member(token: str, guild: str, name: str) -> tuple[str, str] | No
 
     Nickname first, then display name, then username — people refer to each
     other by what they see, which is the nickname. A loose contains-match is the
-    last resort so "the queen" can find "the second owner 👑" without an exact spelling.
+    last resort so "the queen" finds her by her nickname without an exact
+    spelling.
     """
     query = urllib.parse.quote(name.strip()[:32])
     ok, data = await _call(
@@ -137,7 +138,7 @@ async def find_member(token: str, guild: str, name: str) -> tuple[str, str] | No
     return (str(user.get("id")), str(shown)) if user.get("id") else None
 
 
-#: "call the second owner amster", "set the second owner's nickname to X", "nickname her Amster".
+#: "call her amster", "set X's nickname to Y", "nickname them Amster".
 NICKNAME = re.compile(
     r"\b(?:set\s+)?(?:the\s+)?nick(?:name)?\s+(?:of\s+)?(?P<who>[@\w' ]{1,40}?)"
     r"\s+(?:to|as)\s+(?P<nick>.{1,32}?)\s*$"

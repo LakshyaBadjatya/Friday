@@ -66,7 +66,7 @@ _OWNER = re.compile(
 _OWNER_BASE = "that's my Boss — Lakshya. he built me."
 
 #: "remember that X" / "keep in mind that X" — a durable fact about the user.
-#: "remember that X", "remember X", "friday remember the second owner is polish". The
+#: "remember that X", "remember X", "friday remember she is polish". The
 #: "that" is optional: the transcript showed people simply saying "remember
 #: <thing>", and requiring the conjunction silently dropped it on the floor.
 _FACT_WRITE = re.compile(

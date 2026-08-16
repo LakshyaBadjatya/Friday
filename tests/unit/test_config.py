@@ -79,7 +79,9 @@ def test_gemini_fallback_defaults() -> None:
     assert s.gemini_base_url == (
         "https://generativelanguage.googleapis.com/v1beta/openai/"
     )
-    assert s.gemini_model == "gemini-2.0-flash"
+    # 2.0-flash was retired by Google and answers 404, which silently cost
+    # every image description until someone read the body of the error.
+    assert s.gemini_model == "gemini-2.5-flash"
 
 
 def test_gemini_key_is_secret_and_not_in_repr() -> None:

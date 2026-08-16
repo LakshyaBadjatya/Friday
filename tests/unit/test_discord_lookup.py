@@ -2,8 +2,8 @@
 
 The detector's exclusions matter more than its matches. A missed search costs a
 vague answer; a wrong one sends a question about the people in this server out
-to a search engine, and "who is the second owner" answered from the web would be both
-wrong and a small betrayal of the point of her having a memory at all.
+to a search engine, and a housemate's name answered from the web would be
+both wrong and a small betrayal of the point of her having a memory at all.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ def test_facts_get_looked_up(text: str) -> None:
     [
         "who am i",                    # she knows; the web does not
         "who are you",
-        "who is the second owner",               # a person in this server, not a stranger
         "what do you think about that",
         "what was the last topic",     # conversation memory, not the internet
         "what's up friday",            # a greeting wearing a question's clothes
@@ -44,6 +43,21 @@ def test_facts_get_looked_up(text: str) -> None:
 )
 def test_conversation_stays_off_the_web(text: str) -> None:
     assert lookup.wants_lookup(text) is False
+
+
+def test_private_people_never_reach_a_search_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Names configured as private are answered from memory, never searched.
+
+    The name this exists for is deliberately absent from the repository, so the
+    test supplies its own rather than writing the real one down here.
+    """
+    monkeypatch.setenv("FRIDAY_PRIVATE_NAMES", "rosalind, marchetti")
+    assert lookup.wants_lookup("who is rosalind") is False
+    assert lookup.wants_lookup("tell me about Marchetti") is False
+    # Unrelated people are still fair game.
+    assert lookup.wants_lookup("who is the president of poland") is True
 
 
 def test_query_keeps_the_subject_and_drops_the_asking() -> None:

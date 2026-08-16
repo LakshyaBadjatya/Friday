@@ -30,6 +30,7 @@ Keyless, via the DuckDuckGo endpoint the search tool already uses.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -62,15 +63,15 @@ _FACTUAL = re.compile(
 
 #: Things that look factual and are not. Anything about her, the people in the
 #: room, or the conversation itself is answered from memory and persona — a
-#: search for "who is the second owner" returns strangers, and asking the web who she is
-#: would be both wrong and a small betrayal.
+#: search for one of their names returns strangers, and asking the web who she
+#: is would be both wrong and a small betrayal.
 _PERSONAL = re.compile(
     r"\b(?:who\s+am\s+i|who\s+are\s+you|what\s+are\s+you|who\s+made\s+you"
     r"|your\s+(?:name|owner|creator|opinion|favourite|favorite)"
     r"|what\s+do\s+you\s+(?:think|feel|like|want)"
     r"|do\s+you\s+(?:think|feel|like|love|remember|know\s+me)"
     r"|last\s+topic|what\s+(?:did|were)\s+we|earlier|before\s+this"
-    r"|the second owner|lakshya|boss|queen|my\s+(?:name|nickname))\b",
+    r"|lakshya|boss|queen|my\s+(?:name|nickname))\b",
     re.IGNORECASE,
 )
 
@@ -86,12 +87,26 @@ _MAX_RESULTS = 5
 _MAX_SNIPPET = 240
 
 
+def _private_names() -> tuple[str, ...]:
+    """People whose names must never reach a search engine.
+
+    Read from the environment rather than written down here. One of these names
+    is deliberately not kept anywhere in this repository, and hardcoding it to
+    make a regex convenient would quietly undo that.
+    """
+    raw = os.environ.get("FRIDAY_PRIVATE_NAMES", "")
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 def wants_lookup(text: str) -> bool:
     """Whether this question is better answered by reading than by recalling."""
     body = (text or "").strip()
     if len(body) < 6:
         return False
     if _PERSONAL.search(body):
+        return False
+    lowered = body.lower()
+    if any(name in lowered for name in _private_names()):
         return False
     if _EXPLICIT.search(body):
         return True

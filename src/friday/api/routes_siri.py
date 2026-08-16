@@ -115,24 +115,55 @@ _CREATOR_TRIGGERS = (
     "who's your creator",
     "who is your master",
     "who's your master",
-    "who is your owner",
-    "who do you work for",
-    "who do you belong to",
 )
 _CREATOR_LINES = (
-    "My master is Lakshya Badjatya — he built me.",
-    "I was created by Lakshya Badjatya, Boss.",
-    "That'd be Lakshya Badjatya — my maker and master.",
-    "Lakshya Badjatya made me. I answer to him.",
-    "I'm Lakshya Badjatya's creation.",
-    "Crafted by Lakshya Badjatya, my one and only master.",
-    "Lakshya Badjatya is the mind behind me.",
+    "Lakshya Badjatya built me.",
+    "I was made by Lakshya Badjatya, Boss.",
+    "That'd be Lakshya Badjatya — he wrote me.",
+    "Lakshya Badjatya made me.",
+    "I'm Lakshya Badjatya's build.",
+)
+
+#: Being *made* and being *owned* stopped being the same question when a second
+#: owner arrived. These were one list, and none of it matched "who owns you" or
+#: "who's your boss" anyway — both fell through to the model, which answered
+#: "Boss owns me" to both, twice, which says nothing and answers neither.
+_OWNER_TRIGGERS = (
+    "who owns you",
+    "who owns u",
+    "who is your owner",
+    "who's your owner",
+    "who is your boss",
+    "who's your boss",
+    "whos your boss",
+    "who's the boss",
+    "who runs you",
+    "who controls you",
+    "who do you work for",
+    "who do you answer to",
+    "who do you belong to",
+    "whose are you",
+)
+#: The second owner is named by title, never in the repository. Her name lives
+#: in the fact store and reaches the model that way; putting it in source would
+#: undo a decision the owner made deliberately.
+_OWNER_LINES = (
+    "Two people: Lakshya Badjatya, who built me, and the Queen.",
+    "Boss and the Queen both do. Lakshya built me; she's the other half.",
+    "Lakshya Badjatya and the Queen — both of them, equally.",
+    "I answer to Boss and to the Queen. Lakshya wrote me; they both own me.",
 )
 
 
 def _creator_reply(query: str) -> str | None:
-    """A fast, varied 'who made you' answer (same name, different wording)."""
-    low = query.lower()
+    """A fast 'who made you' / 'who owns you' answer, worded differently each time.
+
+    Ownership is checked first: "who is your owner" satisfies both lists, and of
+    the two readings the ownership one is the question actually being asked.
+    """
+    low = (query or "").lower()
+    if any(trigger in low for trigger in _OWNER_TRIGGERS):
+        return secrets.choice(_OWNER_LINES)
     if any(trigger in low for trigger in _CREATOR_TRIGGERS):
         return secrets.choice(_CREATOR_LINES)
     return None
@@ -762,7 +793,7 @@ async def _produce(
                 )
 
     # "Who made you?" — answered instantly (no model, no network).
-    creator = _creator_reply(query)
+    creator = _creator_reply(asked)
     if creator is not None:
         return _reply(creator, raw=creator, mode="identity")
 

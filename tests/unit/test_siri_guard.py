@@ -189,3 +189,47 @@ def test_redaction_leaves_ordinary_text_alone() -> None:
 def test_redaction_handles_empty_and_missing_settings() -> None:
     assert redact("", None) == ""
     assert redact("hello", None) == "hello"
+
+
+def test_being_made_and_being_owned_are_different_questions() -> None:
+    """"Who owns you" has two answers now, and neither of them is "Boss".
+
+    Both phrasings used to miss the trigger list entirely and fall through to
+    the model, which answered "Boss owns me." to "who owns you friday" and then
+    the identical line to "who's your boss" — circular, and true of nothing.
+    """
+    from friday.api.routes_siri import _creator_reply  # noqa: PLC0415
+
+    for asked in (
+        "who owns you friday",
+        "who's your boss",
+        "who is your boss",
+        "who do you work for",
+        "who do you answer to",
+    ):
+        answer = _creator_reply(asked)
+        assert answer is not None, asked
+        assert "Queen" in answer, asked        # both owners, not just the one
+
+    for asked in ("who made you", "who built you", "who coded you"):
+        answer = _creator_reply(asked)
+        assert answer is not None, asked
+        assert "Lakshya Badjatya" in answer, asked
+
+    assert _creator_reply("what is the weather") is None
+
+
+def test_the_second_owner_is_never_named_in_source() -> None:
+    """Her name lives in the fact store, on purpose. Keep it out of the repo."""
+    from pathlib import Path  # noqa: PLC0415
+
+    import friday  # noqa: PLC0415
+
+    # Assembled at runtime so this file does not itself become the place the
+    # name is written down.
+    private = "".join(("am", "elia"))
+    roots = [Path(friday.__file__).parent, Path(__file__).parent.parent]
+    for root in roots:
+        for module in root.rglob("*.py"):
+            body = module.read_text(encoding="utf-8").lower()
+            assert private not in body, module

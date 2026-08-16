@@ -30,6 +30,7 @@ import base64
 import ipaddress
 import json
 import socket
+import urllib.error
 import urllib.request
 from typing import Any
 from urllib.parse import urlparse
@@ -141,7 +142,7 @@ async def describe(settings: Any, images: list[dict[str, str]]) -> str | None:
         return None
 
     base = str(getattr(settings, "gemini_base_url", "") or "").rstrip("/")
-    model = str(getattr(settings, "gemini_model", "gemini-2.0-flash") or "")
+    model = str(getattr(settings, "gemini_model", "gemini-2.5-flash") or "")
     return await anyio.to_thread.run_sync(_ask, base, key, model, parts)
 
 
@@ -227,8 +228,18 @@ def _ask(base: str, key: str, model: str, parts: list[dict[str, Any]]) -> str | 
     try:
         with urllib.request.urlopen(request, timeout=30) as resp:  # noqa: S310
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except Exception:  # noqa: BLE001 - vision is a bonus, never a hard failure
-        logger.warning("discord vision: model call failed")
+    except urllib.error.HTTPError as exc:
+        # The status and body, not just "failed". Google retired
+        # gemini-2.0-flash and every image silently stopped being looked at —
+        # she answered "nothing much, boss" to a screenshot for days, and the
+        # log said only that something had gone wrong, which is unfindable.
+        logger.warning(
+            "discord vision: model %s rejected the call: HTTP %s %s",
+            model, exc.code, exc.read()[:200].decode("utf-8", errors="replace"),
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 - vision is a bonus, never a hard failure
+        logger.warning("discord vision: model call failed: %s", exc)
         return None
     try:
         text = payload["choices"][0]["message"]["content"]

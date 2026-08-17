@@ -43,6 +43,11 @@ _INSTALL_HINT = (
 
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
+# Transcription gets its own model rather than borrowing the chat one. They are
+# chosen for different things: a chat model is picked for how well it reasons,
+# and reasoning is exactly what a transcriber should not spend time on.
+_DEFAULT_STT_MODEL = "gemini-3.5-flash"
+
 _GEMINI_KEY_HINT = (
     "GEMINI_API_KEY is not set. Export it in the environment (or pass it to "
     "GeminiSTT) to transcribe with the hosted Gemini adapter."
@@ -193,8 +198,12 @@ class GeminiSTT:
 
     Args:
         api_key: Gemini API key; falls back to the ``GEMINI_API_KEY`` env var.
-        model: Gemini model id. The default is a small, fast one — transcription
-            is not a reasoning task and a larger model only costs latency.
+        model: Gemini model id. Transcription is not a reasoning task, and the
+            reasoning models charge for it in latency they cannot spend
+            usefully: measured against the same clip, ``gemini-2.5-flash``
+            ranged from 2.8s to 16.5s while the default held 1.9–2.4s. On a
+            spoken turn that swing is the difference between an answer and a
+            timeout, so speed and steadiness matter more here than capability.
         base_url: API root, overridable for tests and proxies.
         mime_type: Container of the audio handed to :meth:`transcribe`.
         timeout: Per-request HTTP timeout in seconds.
@@ -203,7 +212,7 @@ class GeminiSTT:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-2.0-flash",
+        model: str = _DEFAULT_STT_MODEL,
         base_url: str = _GEMINI_BASE_URL,
         mime_type: str = "audio/wav",
         timeout: float = 60.0,
@@ -337,7 +346,7 @@ def make_stt(settings: Settings) -> STTProvider:
         key = settings.gemini_api_key
         return GeminiSTT(
             api_key=key.get_secret_value() if key is not None else None,
-            model=settings.gemini_model,
+            model=settings.stt_model or _DEFAULT_STT_MODEL,
         )
     raise ProviderError(
         f"unknown FRIDAY_STT_PROVIDER={settings.stt_provider!r}; "

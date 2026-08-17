@@ -589,6 +589,11 @@ class Settings(BaseSettings):
     # neither; "gemini" transcribes over HTTP with the key already configured
     # for the LLM, which is what a container without models can actually do.
     stt_provider: str = "faster-whisper"
+    # The model the "gemini" STT adapter transcribes with. Deliberately not
+    # GEMINI_MODEL: that one is chosen for how well it reasons, and a
+    # transcriber that stops to reason is just a slower transcriber. Empty
+    # falls back to the adapter's own default.
+    stt_model: str = ""
     wake_word_engine: str = "openwakeword"
     # "Hey FRIDAY" wake word (server-side detection). When on, the wake-word engine
     # scores mic frames for the trained phrase; on a detection the app pushes a

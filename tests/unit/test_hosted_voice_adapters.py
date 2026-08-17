@@ -17,7 +17,12 @@ import pytest
 
 from friday.config import Settings
 from friday.errors import ProviderError
-from friday.providers.stt import GeminiSTT, STTProvider, make_stt
+from friday.providers.stt import (
+    _DEFAULT_STT_MODEL,
+    GeminiSTT,
+    STTProvider,
+    make_stt,
+)
 from friday.providers.tts import (
     EdgeTTSProvider,
     TTSProvider,
@@ -254,6 +259,29 @@ def test_make_stt_selects_gemini(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "k-test")
     settings = Settings(stt_provider="gemini", gemini_api_key="k-test")
     assert isinstance(make_stt(settings), GeminiSTT)
+
+
+def test_transcription_does_not_borrow_the_chat_model() -> None:
+    """The chat model is picked for reasoning; a transcriber must not stop to reason."""
+    settings = Settings(
+        stt_provider="gemini",
+        gemini_api_key="k-test",
+        gemini_model="some-big-reasoning-model",
+    )
+    assert make_stt(settings)._model == _DEFAULT_STT_MODEL  # type: ignore[attr-defined]
+
+
+def test_stt_model_setting_wins_when_set() -> None:
+    settings = Settings(
+        stt_provider="gemini", gemini_api_key="k-test", stt_model="gemini-9-flash"
+    )
+    assert make_stt(settings)._model == "gemini-9-flash"  # type: ignore[attr-defined]
+
+
+def test_default_stt_model_is_not_a_retired_one() -> None:
+    """gemini-2.0-flash was the default until it started 404ing as retired."""
+    assert _DEFAULT_STT_MODEL != "gemini-2.0-flash"
+    assert GeminiSTT(api_key="k")._model == _DEFAULT_STT_MODEL  # type: ignore[attr-defined]
 
 
 def test_make_stt_rejects_an_unknown_name() -> None:

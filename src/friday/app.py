@@ -168,7 +168,7 @@ from friday.providers.llm import (
 )
 from friday.providers.offline import select_llm
 from friday.providers.redacting import RedactingLLM
-from friday.providers.stt import FakeSTT, FasterWhisperSTT, STTProvider
+from friday.providers.stt import FakeSTT, STTProvider, make_stt
 from friday.providers.tts import FakeTTS, TTSProvider, make_tts
 from friday.pwa import router as pwa_router
 from friday.rag.ingest import DocumentIngestor
@@ -782,21 +782,25 @@ def _build_meeting_stt(settings: Settings) -> STTProvider:
     """Select the STT provider for meeting capture (safe to call eagerly).
 
     Offline (``fake`` LLM) -> :class:`FakeSTT` (tests / no credentials). With a
-    real LLM the real :class:`FasterWhisperSTT` is preferred, but its construction
-    (which lazy-imports the optional ``faster-whisper`` voice extra) is wrapped:
-    if the extra is missing the runtime degrades to :class:`FakeSTT` rather than
-    failing startup, so the offline build (and a real-LLM build without the voice
-    extra) still boots. The ``/meetings`` route self-guards on the flag, so this
-    only affects whether a real transcript is produced once meetings are enabled.
+    real LLM the adapter named by ``FRIDAY_STT_PROVIDER`` is built, but its
+    construction is wrapped: a missing ``faster-whisper`` extra (or an absent
+    Gemini key) degrades to :class:`FakeSTT` rather than failing startup, so the
+    offline build still boots. The ``/meetings`` route self-guards on the flag,
+    so this only affects whether a real transcript is produced once meetings are
+    enabled.
+
+    Note that a long meeting suits the local adapter better: the hosted one
+    inlines its audio in the request, which puts a ceiling on recording length
+    that a whole meeting can plausibly exceed.
     """
     if settings.llm_provider == "fake":
         return FakeSTT()
     try:
-        return FasterWhisperSTT()
+        return make_stt(settings)
     except ProviderError:
         logger.info(
-            "faster-whisper not installed; meeting capture uses FakeSTT "
-            "(install voice extras for real transcription)"
+            "no STT adapter available (%s); meeting capture uses FakeSTT",
+            settings.stt_provider,
         )
         return FakeSTT()
 
@@ -2119,13 +2123,14 @@ def _build_voice_stt(settings: Settings) -> STTProvider:
 
     When the LLM provider is the offline ``fake`` (tests / no credentials) we use
     :class:`FakeSTT` so the app boots and exercises with zero models/network.
-    Otherwise the real :class:`FasterWhisperSTT` is chosen; it lazy-imports
-    ``faster-whisper`` and only fails at transcription time if the optional voice
-    extras are not installed (``make install-voice``).
+    Otherwise the adapter named by ``FRIDAY_STT_PROVIDER`` is built. This used to
+    hardcode :class:`FasterWhisperSTT`, which cannot work on a host that ships
+    neither the voice extras nor the weights — the whole point of the setting is
+    that such a host can choose the hosted adapter instead.
     """
     if settings.llm_provider == "fake":
         return FakeSTT()
-    return FasterWhisperSTT()
+    return make_stt(settings)
 
 
 def _build_voice_tts(settings: Settings) -> TTSProvider:

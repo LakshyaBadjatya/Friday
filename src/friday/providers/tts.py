@@ -57,6 +57,11 @@ _ELEVENLABS_KEY_HINT = (
 
 _ELEVENLABS_BASE_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 
+_EDGE_INSTALL_HINT = (
+    "edge-tts is not importable. It is a base dependency (Discord voice uses "
+    "it), so this means the environment is incomplete; run `uv sync`."
+)
+
 
 class VoiceConfig(BaseModel):
     """Voice-selection parameters for a synthesis request.
@@ -240,6 +245,60 @@ class ElevenLabsTTSProvider:
         return response.content
 
 
+class EdgeTTSProvider:
+    """Real :class:`TTSProvider` over Microsoft Edge's voices — no key, no model.
+
+    :class:`PiperTTSProvider` needs a binary and a voice model on local disk and
+    :class:`ElevenLabsTTSProvider` needs an account; this needs neither, which
+    makes it the adapter that can actually speak from a small container. The
+    ``edge-tts`` package is already a base dependency because Discord voice uses
+    it.
+
+    Returns MP3 bytes. Every caller today either plays them (the phone hands them
+    to MediaPlayer, which sniffs the container) or transcodes with ffmpeg, so no
+    conversion is done here.
+
+    Args:
+        voice: An Edge voice name. The default is a British female voice, the
+            closest match to how FRIDAY is written elsewhere.
+    """
+
+    def __init__(self, voice: str = "en-GB-SoniaNeural") -> None:
+        self._voice = voice
+
+    async def synthesize(self, text: str, voice: VoiceConfig) -> bytes:
+        try:
+            import edge_tts  # noqa: PLC0415 - lazy by design
+        except ImportError as exc:  # pragma: no cover - base dependency
+            raise ProviderError(_EDGE_INSTALL_HINT) from exc
+
+        # A VoiceConfig carrying the placeholder "default" means "no opinion",
+        # so the configured voice stands; anything else is an explicit request.
+        name = voice.voice_id if voice.voice_id and voice.voice_id != "default" else self._voice
+
+        out = bytearray()
+        try:
+            communicate = edge_tts.Communicate(text, name, rate=_edge_rate(voice.speed))
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    out += chunk["data"]
+        except Exception as exc:  # noqa: BLE001 - the library raises bare Exception
+            raise ProviderError(f"edge-tts synthesis failed: {exc}") from exc
+        if not out:
+            raise ProviderError("edge-tts returned no audio")
+        return bytes(out)
+
+
+def _edge_rate(speed: float) -> str:
+    """Render a speed multiplier as the percentage string edge-tts expects.
+
+    The library wants ``"+10%"`` / ``"-15%"``, not a float, and rejects a bare
+    number — so 1.0 has to become ``"+0%"`` rather than being omitted.
+    """
+    percent = round((speed - 1.0) * 100)
+    return f"{percent:+d}%"
+
+
 def make_tts(settings: Settings) -> TTSProvider:
     """Build a :class:`TTSProvider` selected by ``settings.tts_provider``.
 
@@ -262,7 +321,9 @@ def make_tts(settings: Settings) -> TTSProvider:
         return PiperTTSProvider()
     if provider == "elevenlabs":
         return ElevenLabsTTSProvider()
+    if provider == "edge":
+        return EdgeTTSProvider()
     raise ProviderError(
         f"unknown FRIDAY_TTS_PROVIDER={settings.tts_provider!r}; "
-        "expected one of: piper, elevenlabs, fake"
+        "expected one of: piper, edge, elevenlabs, fake"
     )

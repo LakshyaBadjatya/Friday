@@ -22,10 +22,12 @@ machine without the optional voice extras installed.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
+from friday.config import Settings
 from friday.errors import ProviderError
 
 _PHASE_3_NOTE = (
@@ -37,6 +39,18 @@ _INSTALL_HINT = (
     "faster-whisper is not installed. Voice extras are optional and kept out "
     "of the uv lock; install them with `make install-voice` "
     "(uv pip install -r requirements-voice.txt)."
+)
+
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+_GEMINI_KEY_HINT = (
+    "GEMINI_API_KEY is not set. Export it in the environment (or pass it to "
+    "GeminiSTT) to transcribe with the hosted Gemini adapter."
+)
+
+_GEMINI_HTTPX_HINT = (
+    "httpx is required for the Gemini STT adapter but is not importable; it is "
+    "a base dependency, so this means the environment is incomplete."
 )
 
 
@@ -163,3 +177,169 @@ class FasterWhisperSTT:
             return Transcript(text=text, lang=lang or detected)
 
         return await asyncio.get_running_loop().run_in_executor(None, _run)
+
+
+class GeminiSTT:
+    """Real :class:`STTProvider` that transcribes over HTTP, carrying no model.
+
+    :class:`FasterWhisperSTT` needs the voice extras and a few hundred megabytes
+    of weights on local disk, which a small container does not have; this adapter
+    needs only the ``GEMINI_API_KEY`` already configured for the LLM. That makes
+    it the one that can answer ``POST /voice`` on a hosted deployment.
+
+    The audio is inlined as base64 in the request, so this is for single-shot
+    turns rather than long recordings — the phone sends a few seconds of 16 kHz
+    mono WAV, which is comfortably inside the inline limit.
+
+    Args:
+        api_key: Gemini API key; falls back to the ``GEMINI_API_KEY`` env var.
+        model: Gemini model id. The default is a small, fast one — transcription
+            is not a reasoning task and a larger model only costs latency.
+        base_url: API root, overridable for tests and proxies.
+        mime_type: Container of the audio handed to :meth:`transcribe`.
+        timeout: Per-request HTTP timeout in seconds.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gemini-2.0-flash",
+        base_url: str = _GEMINI_BASE_URL,
+        mime_type: str = "audio/wav",
+        timeout: float = 60.0,
+    ) -> None:
+        key = api_key if api_key is not None else os.environ.get("GEMINI_API_KEY")
+        if not key:
+            raise ProviderError(_GEMINI_KEY_HINT)
+        self._api_key = key
+        self._model = model
+        self._base_url = base_url.rstrip("/")
+        self._mime_type = mime_type
+        self._timeout = timeout
+
+    async def transcribe(self, audio: bytes, lang: str | None) -> Transcript:
+        """Transcribe ``audio`` by asking Gemini for the words and nothing else.
+
+        The prompt is explicit that only the spoken words are wanted, because the
+        failure mode of a chat model asked to transcribe is a helpful preamble
+        ("Sure! Here is the transcription:") that would be spoken back to the
+        user as if she had said it. Silence must come back empty rather than as
+        an apology, for the same reason.
+        """
+        import base64  # noqa: PLC0415 - lazy by design
+        import json  # noqa: PLC0415
+
+        try:
+            import httpx  # noqa: PLC0415 - lazy by design
+        except ImportError as exc:  # pragma: no cover - exercised via monkeypatch
+            raise ProviderError(_GEMINI_HTTPX_HINT) from exc
+
+        instruction = (
+            "Transcribe the speech in this audio. Reply with the spoken words "
+            "only: no preamble, no quotation marks, no commentary, no timestamps. "
+            "If there is no intelligible speech, reply with nothing at all."
+        )
+        if lang:
+            instruction += f" The speech is in {lang}."
+
+        url = f"{self._base_url}/models/{self._model}:generateContent"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": instruction},
+                        {
+                            "inline_data": {
+                                "mime_type": self._mime_type,
+                                "data": base64.b64encode(audio).decode("ascii"),
+                            }
+                        },
+                    ]
+                }
+            ],
+            # Transcription is a transcription: no sampling creativity wanted.
+            "generationConfig": {"temperature": 0.0},
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": self._api_key,
+                        "content-type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"Gemini transcription failed with status "
+                f"{exc.response.status_code}: {exc.response.text}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Gemini transcription failed: {exc}") from exc
+
+        try:
+            body = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ProviderError("Gemini returned a non-JSON response") from exc
+
+        return Transcript(text=_first_text(body).strip(), lang=lang)
+
+
+def _first_text(body: object) -> str:
+    """Pull the reply text out of a Gemini ``generateContent`` body.
+
+    Every level is defensive on purpose: a blocked or empty candidate list is a
+    normal response shape, not an error, and it should read as "she said
+    nothing" rather than raise a ``KeyError`` from inside the voice route.
+    """
+    if not isinstance(body, dict):
+        return ""
+    candidates = body.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+    first = candidates[0]
+    if not isinstance(first, dict):
+        return ""
+    content = first.get("content")
+    if not isinstance(content, dict):
+        return ""
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    return "".join(
+        part["text"]
+        for part in parts
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    )
+
+
+def make_stt(settings: Settings) -> STTProvider:
+    """Build an :class:`STTProvider` selected by ``settings.stt_provider``.
+
+    Selection (env: ``FRIDAY_STT_PROVIDER``):
+
+    * ``"faster-whisper"`` -> :class:`FasterWhisperSTT` (local, needs the voice
+      extras and downloads model weights).
+    * ``"gemini"`` -> :class:`GeminiSTT` (hosted; needs only ``GEMINI_API_KEY``).
+    * ``"fake"`` -> :class:`FakeSTT` (tests / no transcription).
+
+    An unknown value raises :class:`ProviderError` so a typo fails loudly at
+    startup instead of silently transcribing nothing.
+    """
+    provider = settings.stt_provider.strip().lower()
+    if provider == "fake":
+        return FakeSTT()
+    if provider in {"faster-whisper", "faster_whisper", "whisper"}:
+        return FasterWhisperSTT()
+    if provider == "gemini":
+        key = settings.gemini_api_key
+        return GeminiSTT(
+            api_key=key.get_secret_value() if key is not None else None,
+            model=settings.gemini_model,
+        )
+    raise ProviderError(
+        f"unknown FRIDAY_STT_PROVIDER={settings.stt_provider!r}; "
+        "expected one of: faster-whisper, gemini, fake"
+    )

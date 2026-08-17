@@ -584,6 +584,11 @@ class Settings(BaseSettings):
     enable_voice: bool = False
     enable_home: bool = False
     tts_provider: str = "piper"
+    # Which STT adapter answers `POST /voice`. "faster-whisper" runs a local
+    # model and needs the voice extras, so it cannot work on a host that ships
+    # neither; "gemini" transcribes over HTTP with the key already configured
+    # for the LLM, which is what a container without models can actually do.
+    stt_provider: str = "faster-whisper"
     wake_word_engine: str = "openwakeword"
     # "Hey FRIDAY" wake word (server-side detection). When on, the wake-word engine
     # scores mic frames for the trained phrase; on a detection the app pushes a

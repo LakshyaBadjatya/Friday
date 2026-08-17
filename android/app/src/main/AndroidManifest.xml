@@ -143,6 +143,9 @@
             android:exported="true"
             android:label="FRIDAY"
             android:permission="android.permission.BIND_RECOGNITION_SERVICE">
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
             <intent-filter>
                 <action android:name="android.speech.RecognitionService" />
             </intent-filter>

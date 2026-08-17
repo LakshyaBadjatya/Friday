@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The descriptor Settings looks for before it will list FRIDAY as an assistant.
+
+    Declaring the recognition service in the manifest is not enough: Settings'
+    VoiceInputHelper loads the "android.speech" meta-data off the service and
+    throws when it is absent, which discards the recogniser and with it the
+    assistant that names it. The element carries nothing we need — its existence
+    is the whole point. No settingsActivity is declared because FRIDAY's setup
+    screen is not exported, and pointing Settings at an activity it cannot launch
+    would trade this failure for a worse one.
+-->
+<recognition-service xmlns:android="http://schemas.android.com/apk/res/android" />

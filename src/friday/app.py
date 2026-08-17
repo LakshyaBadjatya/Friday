@@ -2149,8 +2149,25 @@ def _wire_voice(app: FastAPI, settings: Settings) -> None:
     """
     if not settings.enable_voice:
         return
-    app.state.voice_stt = _build_voice_stt(settings)
-    app.state.voice_tts = _build_voice_tts(settings)
+    # Each half is wired independently, and neither may take the app down.
+    # FasterWhisperSTT raises from its CONSTRUCTOR when the voice extras are
+    # absent, so this used to turn "voice is on" into a boot crash that took
+    # every other surface with it — the vault, the HUD, Discord, all of it,
+    # because one optional feature had no wheel on the host. Setting the flag on
+    # a deployed service is what proved it: uvicorn died with _wire_voice in the
+    # traceback. A host that cannot transcribe should lose transcription.
+    #
+    # Nothing is stashed on failure: the /voice route already falls back to the
+    # fakes when app.state carries no adapter, and a half-built pair is worse
+    # than an absent one.
+    try:
+        app.state.voice_stt = _build_voice_stt(settings)
+    except (ProviderError, ImportError, OSError) as exc:
+        logger.warning("voice STT unavailable, transcription disabled: %s", exc)
+    try:
+        app.state.voice_tts = _build_voice_tts(settings)
+    except (ProviderError, ImportError, OSError) as exc:
+        logger.warning("voice TTS unavailable, speech disabled: %s", exc)
 
 
 def _wire_wake(app: FastAPI, settings: Settings) -> None:

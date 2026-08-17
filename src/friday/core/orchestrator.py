@@ -39,6 +39,7 @@ This module never imports an LLM SDK — it depends only on the
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import re
@@ -67,6 +68,7 @@ from friday.observability.metrics import Metrics
 from friday.observability.replay import TurnRecorder
 from friday.observability.tracing import Tracer
 from friday.observability.usage import UsageLedger
+from friday.pc.jobs import JobQueue
 from friday.protocols.runner import ProtocolResult, ProtocolRunner
 from friday.protocols.store import Protocol as ProtocolModel
 from friday.providers.emotion import Emotion, emotion_hint
@@ -242,6 +244,72 @@ _FORGET_RULES: tuple[re.Pattern[str], ...] = (
 # keyword are optional so "run goodnight", "run the goodnight protocol", and
 # "start my bedtime routine" all match. Detected up front (the router has no
 # PROTOCOL mode).
+#: What counts as "do this on the computer".
+#:
+#: Matched on the machine being named rather than on the verb, because the verbs
+#: are unbounded — anything a shell can do is a thing someone might ask for —
+#: while the subject is not. "Make a folder" alone stays a conversation; "make a
+#: folder on my PC" is an instruction to a machine.
+_PC_RULES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\bon\s+(?:my|the|this)\s+(pc|computer|laptop|desktop|machine|linux)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:my|the|this)\s+(pc|computer|laptop|desktop|machine)\b.*"
+        r"\b(folder|directory|file|files|disk|drive|space|find|search|list|create|make)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:connect|talk|link)\s+to\s+(?:my|the|this)\s+"
+        r"(pc|computer|laptop|desktop|machine)\b",
+        re.IGNORECASE,
+    ),
+)
+
+#: Asked of the LLM to turn a spoken sentence into one shell command.
+#:
+#: The output is executed, so the prompt is written to make anything other than
+#: a command as unlikely as possible: no prose, no explanation, no code fence,
+#: and — critically — no invention of paths that were not mentioned.
+_PC_COMMAND_PROMPT = (
+    "Translate the request into exactly one shell command for a Linux machine.\n"
+    "Rules:\n"
+    "- Output the command and nothing else: no explanation, no backticks, no "
+    "markdown, no leading '$'.\n"
+    "- Prefer reading over writing. Never delete anything.\n"
+    "- Do not invent paths. If no location is given, work from the home "
+    "directory.\n"
+    "- Keep output small: pipe long listings through head.\n"
+    "- If the request cannot be a shell command, output exactly: UNSUPPORTED\n\n"
+    "Request: "
+)
+
+#: How long a spoken turn waits for the machine. Shorter than the HTTP route's
+#: ceiling: someone is standing there listening to silence.
+_PC_TIMEOUT_SECONDS = 45.0
+
+def _is_pc_request(text: str) -> bool:
+    """Whether this turn is aimed at the computer rather than at her."""
+    return any(pattern.search(text) for pattern in _PC_RULES)
+
+
+def _clean_command(drafted: str) -> str:
+    """Strip the wrapping a model puts around a command however firmly asked.
+
+    Fences and a leading ``$`` are the two it reaches for even when told not to,
+    and both would be passed straight to a shell as part of the command.
+    """
+    text = drafted.strip()
+    if text.startswith("```"):
+        lines = [line for line in text.splitlines() if not line.startswith("```")]
+        text = "\n".join(lines).strip()
+    text = text.removeprefix("$").strip()
+    # One command, not a script: a model that ignored the instruction and
+    # explained itself would otherwise have its prose run as a second line.
+    return text.splitlines()[0].strip() if text else ""
+
+
 _RUN_PROTOCOL_RULES: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"(?:run|start|execute|activate|begin)\s+(?:the\s+|my\s+)?"
@@ -523,6 +591,7 @@ class Orchestrator:
         protocol_runner: ProtocolRunner | None = None,
         critic: SelfCritic | None = None,
         n8n_service: N8nServiceProtocol | None = None,
+        pc_jobs: JobQueue | None = None,
         roster: RosterRegistry | None = None,
         confidence: ConfidenceScorer | None = None,
         budgeter: Budgeter | None = None,
@@ -546,6 +615,7 @@ class Orchestrator:
         self._protocol_runner = protocol_runner
         self._critic = critic
         self._n8n_service = n8n_service
+        self._pc_jobs = pc_jobs
         self._roster = roster
         self._confidence = confidence
         # The per-turn budgeter (Wave 0): records each completion's usage and
@@ -1387,6 +1457,83 @@ class Orchestrator:
         return "\n".join(lines)
 
     # -- voice protocols (Tier 1) ------------------------------------------ #
+    async def _run_on_pc(self, state: GraphState) -> str:
+        """Turn a spoken request into a command, run it, and say what happened.
+
+        Two LLM calls rather than one: the first writes the command, the second
+        turns whatever the machine printed into a sentence. Reading `ls` output
+        aloud verbatim is not an answer, and a spoken turn has no screen to fall
+        back on.
+        """
+        from friday.pc.jobs import Job  # noqa: PLC0415 - keeps the import local
+        from friday.pc.safety import destructive_reason  # noqa: PLC0415
+
+        queue = self._pc_jobs
+        assert queue is not None  # guarded by the caller
+
+        drafted = await self._ask_llm(_PC_COMMAND_PROMPT + state.user_input)
+        command = _clean_command(drafted)
+        if not command or command == "UNSUPPORTED":
+            return "I couldn't turn that into something to run on the machine, Boss."
+
+        # She proposed this command from a transcript, so the gate matters more
+        # here than anywhere: nobody said these words, a model wrote them.
+        reason = destructive_reason(command)
+        if reason is not None and not state.confirmed:
+            return (
+                f"That would mean {reason}, so I'd rather you confirm it. "
+                f"I was about to run: {command}"
+            )
+
+        try:
+            future = queue.submit(
+                Job(command=command, confirmed=bool(state.confirmed))
+            )
+            result = await asyncio.wait_for(future, timeout=_PC_TIMEOUT_SECONDS)
+        except asyncio.QueueFull:
+            return "The machine has too much queued already, Boss."
+        except TimeoutError:
+            return "The machine didn't answer — the agent may not be running."
+
+        if result.status == "refused":
+            return result.detail
+        if result.status == "timeout":
+            return "That took too long on the machine, so I stopped it."
+
+        output = (result.stdout or result.stderr or "").strip()
+        if not output:
+            return (
+                "Done, Boss."
+                if result.status == "ok"
+                else f"That didn't work: {result.detail or 'no output'}"
+            )
+
+        spoken = await self._ask_llm(
+            "Answer the request in one or two short sentences, as speech. "
+            "Do not read the output verbatim and do not mention commands.\n\n"
+            f"Request: {state.user_input}\n"
+            f"Output:\n{output[:4000]}"
+        )
+        return spoken.strip() or output[:400]
+
+    async def _ask_llm(self, prompt: str) -> str:
+        """One plain completion, no persona and no history.
+
+        The PC path asks the model for a shell command and then for a sentence;
+        neither wants the persona preamble or the conversation replayed in front
+        of it, and both are cheaper and more literal without them.
+        """
+        from friday.providers.llm import Message  # noqa: PLC0415
+
+        try:
+            response = await self._llm.complete(
+                [Message(role="user", content=prompt)], tools=None
+            )
+        except ProviderError as exc:
+            logger.warning("PC command synthesis failed: %s", exc)
+            return ""
+        return str(getattr(response, "text", "") or "")
+
     def _match_protocol(self, text: str) -> ProtocolModel | None:
         """Return the enabled protocol ``text`` fires, or ``None``.
 
@@ -1621,6 +1768,15 @@ class Orchestrator:
         protocol = self._match_protocol(state.user_input)
         if protocol is not None:
             state.response = await self._run_protocol(protocol, state)
+            self._record(state)
+            return state
+
+        # 2b-i½. Anything aimed at the computer goes to the machine itself,
+        # rather than being answered from what a language model imagines it can
+        # reach. Inert unless the bridge is enabled and an agent is attached.
+        if self._pc_jobs is not None and _is_pc_request(state.user_input):
+            state.mode = Mode.DEVICE_CONTROL
+            state.response = await self._run_on_pc(state)
             self._record(state)
             return state
 

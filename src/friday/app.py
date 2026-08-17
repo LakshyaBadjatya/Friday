@@ -1796,6 +1796,10 @@ class AppRuntime:
     #: same one the ``/n8n`` routes drive and the orchestrator's "make a workflow
     #: on n8n" hook reaches; only reachable when ``enable_n8n`` is on.
     n8n_service: N8nService
+    #: The queue the PC agent drains, shared with the orchestrator so a spoken
+    #: "on my PC" turn and ``POST /pc/run`` reach the same machine. ``None`` when
+    #: ``enable_pc`` is off, which is what makes the whole bridge inert.
+    pc_jobs: JobQueue | None
     #: The tamper-evident, hash-chained audit ledger (the security spine's
     #: system-of-record). Every executed tool call appends one record here in
     #: addition to the in-memory ``audit`` log; ``GET /admin/audit/verify`` walks
@@ -2001,6 +2005,9 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
     )
     critic = _build_critic(llm)
     n8n_service = _build_n8n_service(settings, llm)
+    # Built here rather than in _wire_pc so the orchestrator can be handed the
+    # same queue the routes use; _wire_pc publishes this one on app.state.
+    pc_jobs = JobQueue() if settings.enable_pc else None
     # The persona roster (FRIDAY + eight least-privilege specialists). Always built
     # (no flag); the canonical pre-built ROSTER is reused so the registry instance
     # is shared with ``GET /roster`` and the orchestrator's address-by-name hook.
@@ -2054,6 +2061,7 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         protocol_runner=protocol_runner,
         critic=critic,
         n8n_service=n8n_service,
+        pc_jobs=pc_jobs,
         roster=roster,
         confidence=confidence,
         budgeter=budgeter,
@@ -2091,6 +2099,7 @@ def build_runtime(settings: Settings, *, repo_root: str = ".") -> AppRuntime:
         study_store=study_store,
         system_monitor=system_monitor,
         n8n_service=n8n_service,
+        pc_jobs=pc_jobs,
         hash_audit=hash_audit,
         broker=broker,
         roster=roster,
@@ -2177,7 +2186,7 @@ def _wire_voice(app: FastAPI, settings: Settings) -> None:
         logger.warning("voice TTS unavailable, speech disabled: %s", exc)
 
 
-def _wire_pc(app: FastAPI, settings: Settings) -> None:
+def _wire_pc(app: FastAPI, settings: Settings, runtime: AppRuntime) -> None:
     """Stash the PC job queue on ``app.state`` when the bridge is enabled.
 
     Nothing is connected to at startup: the queue is empty until an agent polls
@@ -2186,7 +2195,10 @@ def _wire_pc(app: FastAPI, settings: Settings) -> None:
     """
     if not settings.enable_pc:
         return
-    app.state.pc_jobs = JobQueue()
+    # The runtime's queue, not a new one: two queues would mean `POST /pc/run`
+    # and a spoken "on my PC" each waiting on a different empty queue, with the
+    # agent draining only one of them.
+    app.state.pc_jobs = runtime.pc_jobs
 
 
 def _wire_wake(app: FastAPI, settings: Settings) -> None:
@@ -2832,6 +2844,7 @@ def _install_runtime(app: FastAPI, settings: Settings) -> None:
     _wire_study(app, settings, runtime)
     _wire_system(app, settings, runtime)
     _wire_n8n(app, settings, runtime)
+    _wire_pc(app, settings, runtime)
     _wire_perception(app, settings)
     _wire_vault(app, settings, runtime.llm)
     # Plugins load LAST so every built-in tool is already registered (built-ins
@@ -3131,7 +3144,6 @@ def create_app() -> FastAPI:
     _warn_if_exposed_without_auth(settings)
     _install_runtime(app, settings)
     _wire_voice(app, settings)
-    _wire_pc(app, settings)
     _wire_wake(app, settings)
     _wire_emotion(app, settings)
     _mount_studio_static(app, settings)

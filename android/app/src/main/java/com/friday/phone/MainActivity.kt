@@ -141,6 +141,14 @@ private fun Home() {
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Talk") }
 
+        // The only way in. SetupActivity was imported here and never used, so
+        // the wake-word switch, the assistant-slot shortcut and the permission
+        // walkthrough all existed with nothing on any screen leading to them.
+        OutlinedButton(
+            onClick = { ctx.startActivity(Intent(ctx, SetupActivity::class.java)) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Setup & permissions") }
+
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(
                 onClick = { ctx.startActivity(Intent(ctx, CameraActivity::class.java)) },

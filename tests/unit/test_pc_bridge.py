@@ -207,3 +207,58 @@ async def test_the_queue_refuses_to_grow_without_bound() -> None:
 
     with pytest.raises(asyncio.QueueFull):
         queue.submit(Job(command="c"))
+
+
+# --- routing a spoken turn ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Friday, can you connect to my PC now?",
+        "make a folder called notes on my pc",
+        "find the invoice files on my computer",
+        "what's on my laptop taking up space",
+        "list the files on this machine",
+    ],
+)
+def test_requests_aimed_at_the_computer_are_recognised(text: str) -> None:
+    from friday.core.orchestrator import _is_pc_request
+
+    assert _is_pc_request(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what's the capital of France",
+        "make a folder in the vault",
+        "remind me to call at seven",
+        "how are you feeling today",
+    ],
+)
+def test_ordinary_conversation_is_not_sent_to_the_shell(text: str) -> None:
+    """The gate must be the machine being named, not a verb like 'make'."""
+    from friday.core.orchestrator import _is_pc_request
+
+    assert _is_pc_request(text) is False
+
+
+@pytest.mark.parametrize(
+    ("drafted", "expected"),
+    [
+        ("ls -la ~", "ls -la ~"),
+        ("```bash\nls -la ~\n```", "ls -la ~"),
+        ("$ ls -la ~", "ls -la ~"),
+        ("ls -la ~\nThis lists your home directory.", "ls -la ~"),
+        ("  mkdir -p ~/notes  ", "mkdir -p ~/notes"),
+        ("", ""),
+    ],
+)
+def test_the_model_s_wrapping_is_stripped_before_the_shell_sees_it(
+    drafted: str, expected: str
+) -> None:
+    """A fence or a stray '$' would otherwise be passed to the shell verbatim."""
+    from friday.core.orchestrator import _clean_command
+
+    assert _clean_command(drafted) == expected

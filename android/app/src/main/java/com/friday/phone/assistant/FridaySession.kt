@@ -5,8 +5,12 @@ import android.app.assist.AssistStructure
 import android.content.Context
 import android.os.Bundle
 import android.service.voice.VoiceInteractionSession
+import android.graphics.Color
+import android.view.Gravity
 import android.view.View
+import android.widget.FrameLayout
 import android.widget.TextView
+import com.friday.phone.ui.EdgeGlowView
 
 /**
  * What the assist gesture opens.
@@ -23,15 +27,47 @@ import android.widget.TextView
 class FridaySession(context: Context) : VoiceInteractionSession(context) {
 
     private var readout: TextView? = null
+    private var glow: EdgeGlowView? = null
 
+    /**
+     * The overlay: a glow around the edges and a line of text at the bottom.
+     *
+     * Deliberately not a panel. The assist gesture is usually pressed *about*
+     * something on screen, so covering it would hide the subject of the
+     * question. The light says she is listening; the screen underneath stays
+     * exactly where it was.
+     */
     override fun onCreateContentView(): View {
-        val view = TextView(context).apply {
+        val frame = FrameLayout(context)
+
+        val edge = EdgeGlowView(context).apply { state = EdgeGlowView.State.LISTENING }
+        frame.addView(
+            edge,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
+        val text = TextView(context).apply {
             textSize = 16f
-            setPadding(48, 48, 48, 48)
+            setTextColor(Color.parseColor("#EAFCFF"))
+            setShadowLayer(24f, 0f, 0f, Color.parseColor("#06121F"))
+            setPadding(64, 48, 64, 96)
             text = "FRIDAY is listening."
         }
-        readout = view
-        return view
+        frame.addView(
+            text,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM,
+            ),
+        )
+
+        readout = text
+        glow = edge
+        return frame
     }
 
     override fun onHandleAssist(
@@ -40,6 +76,8 @@ class FridaySession(context: Context) : VoiceInteractionSession(context) {
         content: AssistContent?,
     ) {
         val text = structure?.let { flatten(it) }.orEmpty()
+        // She has the screen now, so the glow moves from listening to working.
+        glow?.state = EdgeGlowView.State.THINKING
         readout?.text = if (text.isBlank()) {
             "FRIDAY is listening."
         } else {

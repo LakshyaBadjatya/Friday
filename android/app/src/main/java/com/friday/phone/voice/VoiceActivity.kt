@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -25,6 +26,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import com.friday.phone.ui.EdgeGlowView
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.friday.phone.ui.FridayTheme
@@ -73,6 +76,22 @@ class VoiceActivity : ComponentActivity() {
         val ask = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission(),
         ) { ok -> granted = ok }
+
+        // The same light the assist overlay uses, so a spoken turn looks the
+        // same wherever it starts from.
+        Box(modifier = Modifier.fillMaxSize()) {
+            AndroidView(
+                factory = { EdgeGlowView(it) },
+                update = { view ->
+                    view.state = when {
+                        busy && status.startsWith("Listening") -> EdgeGlowView.State.LISTENING
+                        busy -> EdgeGlowView.State.THINKING
+                        said.isNotEmpty() -> EdgeGlowView.State.SPEAKING
+                        else -> EdgeGlowView.State.IDLE
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
 
         Column(
             modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
@@ -135,6 +154,7 @@ class VoiceActivity : ComponentActivity() {
             if (said.isNotEmpty()) {
                 Text("FRIDAY: $said", color = MaterialTheme.colorScheme.onBackground)
             }
+        }
         }
     }
 }

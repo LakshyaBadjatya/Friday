@@ -485,7 +485,8 @@ GEMINI_MODEL=gemini-2.0-flash
 
 # Voice
 FRIDAY_ENABLE_VOICE=false
-FRIDAY_TTS_PROVIDER=piper          # piper | elevenlabs | fake
+FRIDAY_TTS_PROVIDER=piper          # piper | edge | elevenlabs | fake
+FRIDAY_STT_PROVIDER=faster-whisper # faster-whisper | gemini | fake
 
 # Vault (Cloudinary-backed captures; off by default)
 FRIDAY_ENABLE_VAULT=false

@@ -5,7 +5,6 @@ import android.media.MediaPlayer
 import android.util.Base64
 import com.friday.phone.Api
 import java.io.File
-import org.json.JSONObject
 
 /**
  * One spoken turn: record, send, speak the answer.
@@ -24,16 +23,57 @@ class VoiceClient(private val ctx: Context) {
     /** Result of a turn: what she heard, what she said, and how she answered. */
     data class Turn(val transcript: String, val text: String, val mode: String)
 
-    fun ask(wav: ByteArray, sessionId: String = "phone"): Turn? {
-        val audio = Base64.encodeToString(wav, Base64.NO_WRAP)
-        val reply: JSONObject = api.voice(audio, sessionId) ?: return null
+    /**
+     * Either a turn or the reason there isn't one.
+     *
+     * A failed turn used to come back as null, which the screen could only
+     * report as "no answer" — the same words for a sleeping backend, a wrong
+     * token and a fault upstream. Only one of those is worth doing anything
+     * about, so they are worth telling apart.
+     */
+    sealed interface Result {
+        data class Spoke(val turn: Turn) : Result
 
-        reply.optString("audio_b64").takeIf { it.isNotEmpty() }?.let { speak(it) }
-        return Turn(
-            transcript = reply.optString("transcript"),
-            text = reply.optString("text"),
-            mode = reply.optString("mode"),
+        /** She heard nothing intelligible — not a failure, just silence. */
+        data object Unheard : Result
+
+        data class Failed(val message: String) : Result
+    }
+
+    /** Told when she starts and stops speaking, so a caller can light something. */
+    var onSpeechStart: (() -> Unit)? = null
+    var onSpeechEnd: (() -> Unit)? = null
+
+    fun ask(wav: ByteArray, sessionId: String = "phone"): Result {
+        val audio = Base64.encodeToString(wav, Base64.NO_WRAP)
+        val reply = api.voice(audio, sessionId)
+
+        if (!reply.ok) return Result.Failed(explain(reply))
+        val body = reply.body ?: return Result.Failed("She answered with nothing at all.")
+
+        val transcript = body.optString("transcript")
+        val text = body.optString("text")
+        // The backend returns an empty turn when the audio held no speech.
+        if (transcript.isEmpty() && text.isEmpty()) return Result.Unheard
+
+        body.optString("audio_b64").takeIf { it.isNotEmpty() }?.let { speak(it) }
+        return Result.Spoke(
+            Turn(transcript = transcript, text = text, mode = body.optString("mode")),
         )
+    }
+
+    /** Say what actually went wrong, in words worth reading on a phone screen. */
+    private fun explain(reply: Api.Reply): String {
+        val detail = reply.body?.optString("detail").orEmpty()
+        return when (reply.code) {
+            Api.NO_RESPONSE -> "Couldn't reach FRIDAY. She may be asleep — try once more."
+            401, 403 -> "The token was refused. Check it in Setup."
+            404 ->
+                if (detail == "voice disabled") "Voice is switched off on the backend."
+                else "That backend has no /voice endpoint — check the URL in Setup."
+            502, 503, 504 -> "FRIDAY is awake but her voice backend isn't answering."
+            else -> "She answered ${reply.code}${if (detail.isEmpty()) "" else ": $detail"}"
+        }
     }
 
     /**
@@ -49,10 +89,14 @@ class VoiceClient(private val ctx: Context) {
         file.writeBytes(bytes)
         player = MediaPlayer().apply {
             setDataSource(file.absolutePath)
-            setOnCompletionListener { file.delete() }
+            setOnCompletionListener {
+                file.delete()
+                onSpeechEnd?.invoke()
+            }
             prepare()
             start()
         }
+        onSpeechStart?.invoke()
     }
 
     /** Silence her: used on barge-in and when the screen goes away. */

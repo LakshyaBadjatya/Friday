@@ -2,7 +2,6 @@ package com.friday.phone.ui
 
 import android.animation.ValueAnimator
 import android.content.Context
-import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
@@ -27,6 +26,14 @@ import kotlin.math.sin
  * [android.service.voice.VoiceInteractionSession] window, which is not a
  * lifecycle or saved-state owner, and a ComposeView without those crashes on
  * attach. A View costs nothing here and works in both places.
+ *
+ * **The bloom is faked with stacked strokes, not a blur.** A BlurMaskFilter
+ * forces the whole view onto the software renderer, and this view is the size
+ * of the screen: every frame was then a full-screen blurred round-rect drawn on
+ * the CPU, twice, with two filter objects allocated to do it. On a low-end
+ * phone that is the difference between a light and a slideshow. Four concentric
+ * strokes, widest and faintest first, read as the same soft edge and stay on
+ * the GPU where a 60fps animation belongs.
  */
 class EdgeGlowView @JvmOverloads constructor(
     context: Context,
@@ -38,6 +45,7 @@ class EdgeGlowView @JvmOverloads constructor(
 
     var state: State = State.LISTENING
         set(value) {
+            if (field == value) return
             field = value
             // Each state gets its own tempo. Reading the mood off the speed of
             // a light is faster than reading a label, and does not need words.
@@ -48,32 +56,38 @@ class EdgeGlowView @JvmOverloads constructor(
                 State.SPEAKING -> 3400L
             }
             if (spin.isRunning) spin.currentPlayTime = 0
-            invalidate()
         }
 
     /**
      * How loud the room is, 0..1, when listening — or how animated her reply is
      * when speaking. Drives the thickness of the light so the edge breathes with
      * the voice instead of pulsing on a timer that has nothing to do with you.
+     *
+     * Setting this does not invalidate: the animator is already redrawing every
+     * frame, and a second invalidate per 80ms audio frame only queues work the
+     * next vsync would have done anyway. It is written from the recording
+     * thread and read while drawing, hence volatile.
      */
+    @Volatile
     var amplitude: Float = 0f
         set(value) {
             field = value.coerceIn(0f, 1f)
-            invalidate()
         }
+
+    private var smoothed = 0f
 
     private val bounds = RectF()
     private var phase = 0f
     private var sweep: SweepGradient? = null
     private val spinMatrix = Matrix()
 
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-    }
-    private val bloom = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
+    /** One paint per bloom layer, allocated once. */
+    private val layers = Array(LAYERS) {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
     }
 
     private val spin = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -84,11 +98,6 @@ class EdgeGlowView @JvmOverloads constructor(
             phase = it.animatedValue as Float
             invalidate()
         }
-    }
-
-    init {
-        // Blur needs software rendering; hardware layers ignore mask filters.
-        setLayerType(LAYER_TYPE_SOFTWARE, null)
     }
 
     override fun onAttachedToWindow() {
@@ -108,21 +117,26 @@ class EdgeGlowView @JvmOverloads constructor(
         val inset = STROKE_MAX / 2f
         bounds.set(inset, inset, w - inset, h - inset)
         sweep = SweepGradient(w / 2f, h / 2f, COLORS, STOPS)
-        glow.shader = sweep
-        bloom.shader = sweep
+        layers.forEach { it.shader = sweep }
     }
 
     override fun onDraw(canvas: Canvas) {
         if (bounds.isEmpty) return
 
+        // Chase the microphone rather than snapping to it: rising fast enough
+        // to feel immediate, falling slowly enough that the gaps between words
+        // do not read as her stopping.
+        val target = amplitude
+        smoothed += (target - smoothed) * (if (target > smoothed) RISE else FALL)
+
         // Breathing: a slow sine so an idle screen still looks alive, plus
         // whatever the microphone is actually hearing.
         val breath = (sin(phase * TWO_PI) + 1f) / 2f
         val energy = when (state) {
-            State.IDLE -> 0.25f
-            State.LISTENING -> 0.45f + amplitude * 0.55f
+            State.IDLE -> 0.22f + breath * 0.10f
+            State.LISTENING -> 0.40f + smoothed * 0.60f
             State.THINKING -> 0.55f + breath * 0.45f
-            State.SPEAKING -> 0.5f + amplitude * 0.5f
+            State.SPEAKING -> 0.45f + smoothed * 0.55f
         }
 
         val radius = min(bounds.width(), bounds.height()) * 0.08f
@@ -133,23 +147,27 @@ class EdgeGlowView @JvmOverloads constructor(
         spinMatrix.setRotate(phase * 360f, bounds.centerX(), bounds.centerY())
         sweep?.setLocalMatrix(spinMatrix)
 
-        // Two passes: a wide soft bloom, then a tighter bright core. One pass
-        // alone reads as a coloured border; two read as light.
-        bloom.strokeWidth = STROKE_MIN + (STROKE_MAX - STROKE_MIN) * energy
-        bloom.maskFilter = BlurMaskFilter(bloom.strokeWidth * 1.6f, BlurMaskFilter.Blur.NORMAL)
-        bloom.alpha = (110 * energy).toInt().coerceIn(24, 140)
-        canvas.drawRoundRect(bounds, radius, radius, bloom)
-
-        glow.strokeWidth = (STROKE_MIN * 0.55f) + (STROKE_MIN * 0.75f) * energy
-        glow.maskFilter = BlurMaskFilter(glow.strokeWidth, BlurMaskFilter.Blur.NORMAL)
-        glow.alpha = (200 * (0.55f + energy * 0.45f)).toInt().coerceIn(60, 255)
-        canvas.drawRoundRect(bounds, radius, radius, glow)
+        val core = STROKE_MIN * (0.5f + energy * 0.5f)
+        for (i in layers.indices) {
+            // Widest and faintest on the outside, tightening to a bright core.
+            val spread = 1f - i.toFloat() / LAYERS
+            val paint = layers[i]
+            paint.strokeWidth = core + (STROKE_MAX - core) * spread * energy
+            paint.alpha = (BASE_ALPHA[i] * (0.45f + energy * 0.55f)).toInt().coerceIn(8, 255)
+            canvas.drawRoundRect(bounds, radius, radius, paint)
+        }
     }
 
     private companion object {
         const val TWO_PI = (Math.PI * 2).toFloat()
-        const val STROKE_MIN = 14f
-        const val STROKE_MAX = 46f
+        const val STROKE_MIN = 12f
+        const val STROKE_MAX = 54f
+        const val LAYERS = 4
+        const val RISE = 0.45f
+        const val FALL = 0.12f
+
+        /** Outermost layer faintest; the innermost carries the colour. */
+        val BASE_ALPHA = floatArrayOf(26f, 48f, 96f, 210f)
 
         /**
          * FRIDAY's palette, not Google's four.

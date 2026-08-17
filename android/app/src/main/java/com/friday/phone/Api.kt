@@ -28,8 +28,19 @@ import org.json.JSONObject
  */
 class Api(private val ctx: Context) {
 
+    /**
+     * The read timeout is the one that matters, and OkHttp's default of ten
+     * seconds is far too short here. A free-tier host sleeps when idle and
+     * takes the better part of a minute to wake, during which it sends nothing
+     * at all — indistinguishable, to a ten-second reader, from a backend that
+     * is never going to answer. That is what made the first question after a
+     * quiet hour fail while the second one worked.
+     */
     private val http = OkHttpClient.Builder()
-        .callTimeout(120, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .callTimeout(180, TimeUnit.SECONDS)
         .build()
 
     /** An HTTP answer: the status we got, and the body if there was one. */
@@ -110,8 +121,14 @@ class Api(private val ctx: Context) {
      * The socket at /ws/voice cannot do this — it carries control frames only —
      * so the phone's voice goes over plain HTTP like the Siri shortcut's does.
      */
-    fun voice(audioB64: String, sessionId: String = "phone"): JSONObject? =
-        post(
+    /**
+     * Returns the status alongside the body, unlike the vault calls, because a
+     * person is waiting on this one. "No answer" covers a dead network, an
+     * expired token and a backend fault equally badly — and only one of those
+     * is worth reaching for the phone over.
+     */
+    fun voice(audioB64: String, sessionId: String = "phone"): Reply =
+        postReply(
             "/voice",
             JSONObject().put("audio_b64", audioB64).put("session_id", sessionId),
         )

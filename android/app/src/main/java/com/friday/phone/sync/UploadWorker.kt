@@ -37,16 +37,48 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
                 continue
             }
 
+            // Already signed on an earlier run? Ask her to commit it before
+            // sending anything. An upload can succeed on Cloudinary and still
+            // look like a failure here — a timeout after the last byte reads
+            // exactly like a timeout before the first — and starting over from
+            // sign in that case mints a second item and stores the same
+            // photograph twice. Commit is the cheap question that settles it,
+            // because the server verifies with Cloudinary rather than with us.
+            if (capture.itemId.isNotEmpty()) {
+                val reply = api.commit(capture.itemId)
+                when {
+                    reply.ok -> {
+                        file.delete()
+                        dao.remove(capture.id)
+                        continue
+                    }
+                    // Cloudinary really does not have it: the bytes never
+                    // landed, so forget this item and send them properly.
+                    reply.code == HTTP_CONFLICT -> dao.setItemId(capture.id, "")
+                    // Could not ask (offline, 5xx, cold start). Try later
+                    // rather than duplicate an upload that may have worked.
+                    else -> {
+                        retry = true
+                        continue
+                    }
+                }
+            }
+
             val signed = api.sign(capture.source, capture.privacy)
             if (signed == null) {
                 retry = true
                 continue
             }
+            val itemId = signed.getString("item_id")
+            // Record the item BEFORE the upload, so a crash or a timeout during
+            // it still leaves the retry something to commit against.
+            dao.setItemId(capture.id, itemId)
+
             if (!api.uploadToCloudinary(signed.getJSONObject("upload"), file)) {
                 retry = true
                 continue
             }
-            if (api.commit(signed.getString("item_id")) == null) {
+            if (!api.commit(itemId).ok) {
                 retry = true
                 continue
             }
@@ -59,6 +91,9 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
     }
 
     companion object {
+        /** Cloudinary does not have the asset: the upload genuinely did not land. */
+        private const val HTTP_CONFLICT = 409
+
         /**
          * Queue a drain for when there is a network.
          *

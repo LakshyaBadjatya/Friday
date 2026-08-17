@@ -32,6 +32,26 @@ class Api(private val ctx: Context) {
         .callTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /** An HTTP answer: the status we got, and the body if there was one. */
+    data class Reply(val code: Int, val body: JSONObject?) {
+        val ok: Boolean get() = code in 200..299
+    }
+
+    private fun postReply(path: String, body: JSONObject): Reply {
+        val base = Config.baseUrl(ctx).ifEmpty { return Reply(NO_RESPONSE, null) }
+        val request = Request.Builder()
+            .url("$base$path")
+            .addHeader("Authorization", "Bearer ${Config.token(ctx)}")
+            .post(body.toString().toRequestBody(JSON))
+            .build()
+        return runCatching {
+            http.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                Reply(response.code, runCatching { JSONObject(text) }.getOrNull())
+            }
+        }.getOrDefault(Reply(NO_RESPONSE, null))
+    }
+
     private fun post(path: String, body: JSONObject): JSONObject? {
         val base = Config.baseUrl(ctx).ifEmpty { return null }
         val request = Request.Builder()
@@ -74,9 +94,15 @@ class Api(private val ctx: Context) {
         }.getOrDefault(false)
     }
 
-    /** Step 3: FRIDAY verifies with Cloudinary herself before trusting it. */
-    fun commit(itemId: String): JSONObject? =
-        post("/vault/items/$itemId/commit", JSONObject())
+    /**
+     * Step 3: FRIDAY verifies with Cloudinary herself before trusting it.
+     *
+     * Returns the HTTP status as well as the body, because the caller has to
+     * tell two failures apart: 409 means Cloudinary genuinely does not have the
+     * asset (so the bytes must be sent again), while a timeout or a 5xx means
+     * we could not ask (so sending them again would just duplicate them).
+     */
+    fun commit(itemId: String): Reply = postReply("/vault/items/$itemId/commit", JSONObject())
 
     /**
      * One spoken turn: base64 WAV in, transcript + reply + reply audio out.
@@ -97,8 +123,11 @@ class Api(private val ctx: Context) {
             JSONObject().put("item_ids", JSONArray(itemIds)).put("prompt", prompt),
         )
 
-    private companion object {
-        val JSON = "application/json".toMediaType()
-        val JPEG = "image/jpeg".toMediaType()
+    companion object {
+        /** No status at all: the request never got an answer. */
+        const val NO_RESPONSE = -1
+
+        private val JSON = "application/json".toMediaType()
+        private val JPEG = "image/jpeg".toMediaType()
     }
 }

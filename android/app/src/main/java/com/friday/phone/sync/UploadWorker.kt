@@ -52,8 +52,16 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
                         dao.remove(capture.id)
                         continue
                     }
-                    // Cloudinary really does not have it: the bytes never
-                    // landed, so forget this item and send them properly.
+                    // 409 says Cloudinary does not have it — but it says that
+                    // about an asset it accepted seconds ago too, because the
+                    // Admin API can lag behind the upload that fed it. Trusting
+                    // the first one re-uploads bytes that are already there:
+                    // one duplicate out of two captures, measured. So the first
+                    // 409 only buys a later look; a second one is believed.
+                    reply.code == HTTP_CONFLICT && runAttemptCount < BELIEVE_409_AFTER -> {
+                        retry = true
+                        continue
+                    }
                     reply.code == HTTP_CONFLICT -> dao.setItemId(capture.id, "")
                     // Could not ask (offline, 5xx, cold start). Try later
                     // rather than duplicate an upload that may have worked.
@@ -91,8 +99,17 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
     }
 
     companion object {
-        /** Cloudinary does not have the asset: the upload genuinely did not land. */
+        /** Cloudinary does not have the asset — or has not indexed it yet. */
         private const val HTTP_CONFLICT = 409
+
+        /**
+         * How many runs a 409 must survive before the bytes are sent again.
+         *
+         * One is enough: the indexing lag is seconds, and the retry after it is
+         * at least thirty. Higher would strand a genuinely missing upload for
+         * no gain.
+         */
+        private const val BELIEVE_409_AFTER = 1
 
         /**
          * Queue a drain for when there is a network.

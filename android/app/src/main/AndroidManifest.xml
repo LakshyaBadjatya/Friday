@@ -134,6 +134,20 @@
             android:exported="true"
             android:permission="android.permission.BIND_VOICE_INTERACTION" />
 
+        <!-- Not on FRIDAY's path — the session does its own recording. The
+             platform refuses to parse an assistant whose metadata names no
+             recogniser, and drops it from the Settings list without a word,
+             so this has to exist for her to be selectable at all. -->
+        <service
+            android:name=".assistant.FridayRecognitionService"
+            android:exported="true"
+            android:label="FRIDAY"
+            android:permission="android.permission.BIND_RECOGNITION_SERVICE">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>

@@ -2,5 +2,6 @@
 <voice-interaction-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.friday.phone.assistant.FridaySessionService"
+    android:recognitionService="com.friday.phone.assistant.FridayRecognitionService"
     android:supportsAssist="true"
     android:supportsLaunchVoiceAssistFromKeyguard="true" />

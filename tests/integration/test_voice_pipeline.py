@@ -244,3 +244,34 @@ def test_post_voice_enabled_transcribes_and_orchestrates(
     assert body["mode"] == "CONVERSATION"
     # Audio echoed back as base64 of the FakeTTS bytes.
     assert base64.b64decode(body["audio_b64"]) == b"fake-audio-bytes"
+
+
+def test_post_voice_returns_silence_rather_than_erroring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quiet room must not read as a failure.
+
+    Hosted transcribers report unintelligible audio as an empty string. Passing
+    that on would drive the orchestrator on "" and then ask the synthesizer to
+    speak the result, which raises — turning a silent tap into a 502. The turn
+    should come back empty and successful instead.
+    """
+    import friday.app as app_module
+
+    monkeypatch.setattr(app_module, "get_settings", _enable_voice_settings)
+
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.settings = _enable_voice_settings()
+        app.state.orchestrator = _orchestrator("should never be reached")
+        app.state.voice_stt = _ScriptedSTT("   ")
+        app.state.voice_tts = FakeTTS()
+
+        wav_b64 = base64.b64encode(make_wav(seconds=0.1)).decode()
+        resp = client.post("/voice", json={"audio_b64": wav_b64})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["transcript"] == ""
+    assert body["text"] == ""
+    assert body["audio_b64"] == ""

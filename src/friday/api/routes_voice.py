@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from friday.core.orchestrator import Orchestrator
-from friday.core.state import GraphState
+from friday.core.state import GraphState, Mode
 from friday.errors import FridayError, PermissionError, ProviderError
 from friday.logging import get_logger
 from friday.providers.stt import FakeSTT, STTProvider
@@ -186,6 +186,18 @@ async def voice(request: Request) -> JSONResponse:
 
     try:
         transcript = await stt.transcribe(audio, lang)
+        # Nothing intelligible in the audio. Hosted transcribers report that as
+        # an empty string, and answering it would mean driving the orchestrator
+        # on "" and then asking the synthesizer to speak whatever came back —
+        # which fails, so a quiet room would surface as a 502. Say she heard
+        # nothing instead; the caller can tell that apart from an error.
+        if not transcript.text.strip():
+            return JSONResponse(
+                status_code=200,
+                content=VoiceResponse(
+                    transcript="", text="", mode=Mode.IDLE.value, audio_b64=""
+                ).model_dump(),
+            )
         state = GraphState(session_id=session_id, user_input=transcript.text)
         result = await orchestrator.handle(state)
         response_text = result.response or ""

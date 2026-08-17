@@ -583,6 +583,11 @@ class Settings(BaseSettings):
     # --- Feature flags (default off) ---
     enable_voice: bool = False
     enable_home: bool = False
+    # The bridge to a PC running `friday pc-agent`. Off by default and worth
+    # keeping that way on any deployment that does not need it: with it on, the
+    # API token is enough to run shell commands on whichever machine has the
+    # agent attached.
+    enable_pc: bool = False
     tts_provider: str = "piper"
     # Which STT adapter answers `POST /voice`. "faster-whisper" runs a local
     # model and needs the voice extras, so it cannot work on a host that ships

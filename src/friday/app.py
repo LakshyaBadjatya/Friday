@@ -66,6 +66,7 @@ from friday.api.routes_memory import router as memory_router
 from friday.api.routes_models import router as models_router
 from friday.api.routes_multimodal import router as multimodal_router
 from friday.api.routes_n8n import router as n8n_router
+from friday.api.routes_pc import router as pc_router
 from friday.api.routes_perception import router as perception_router
 from friday.api.routes_planner import router as planner_router
 from friday.api.routes_plugins import router as plugins_router
@@ -132,6 +133,7 @@ from friday.observability.otel import build_trace_exporter
 from friday.observability.replay import TurnRecorder
 from friday.observability.tracing import Tracer
 from friday.observability.usage import UsageLedger
+from friday.pc.jobs import JobQueue
 from friday.perception.clipboard import FakeClipboard
 from friday.perception.ocr import FakeOCR, OCRProvider, TesseractOCR
 from friday.perception.screen import (
@@ -2175,6 +2177,18 @@ def _wire_voice(app: FastAPI, settings: Settings) -> None:
         logger.warning("voice TTS unavailable, speech disabled: %s", exc)
 
 
+def _wire_pc(app: FastAPI, settings: Settings) -> None:
+    """Stash the PC job queue on ``app.state`` when the bridge is enabled.
+
+    Nothing is connected to at startup: the queue is empty until an agent polls
+    it, so wiring this costs nothing on a deployment where the PC is asleep or
+    was never set up.
+    """
+    if not settings.enable_pc:
+        return
+    app.state.pc_jobs = JobQueue()
+
+
 def _wire_wake(app: FastAPI, settings: Settings) -> None:
     """Stash the :class:`WakeService` on ``app.state`` when the wake word is enabled.
 
@@ -3074,6 +3088,7 @@ def create_app() -> FastAPI:
     # index (SQLite or Firestore) + Cloudinary provider (real or fake) + quota
     # guard are wired onto app.state only when enabled.
     app.include_router(vault_router)
+    app.include_router(pc_router)
     # n8n integration (Tier 2) — always registered but self-guards on
     # FRIDAY_ENABLE_N8N (404 when off), so the offline default exposes no n8n
     # surface. The shared N8nService (REST client + LLM drafter + docker
@@ -3116,6 +3131,7 @@ def create_app() -> FastAPI:
     _warn_if_exposed_without_auth(settings)
     _install_runtime(app, settings)
     _wire_voice(app, settings)
+    _wire_pc(app, settings)
     _wire_wake(app, settings)
     _wire_emotion(app, settings)
     _mount_studio_static(app, settings)

@@ -130,6 +130,42 @@ def _handle_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_pc_agent(args: argparse.Namespace) -> int:
+    """Attach this machine to FRIDAY so she can run commands on it.
+
+    Runs until interrupted. The token is read from the environment by default
+    rather than the command line, because an argument is visible to every other
+    process on the machine in ``ps`` — and this particular token is now enough
+    to run a shell here.
+    """
+    import os  # noqa: PLC0415 — local keeps import light
+    from pathlib import Path  # noqa: PLC0415
+
+    from friday.pc.agent import serve  # noqa: PLC0415
+
+    url = args.url or os.environ.get("FRIDAY_PC_URL", "")
+    token = args.token or os.environ.get("FRIDAY_PC_TOKEN", "")
+    if not url or not token:
+        print(
+            "pc-agent needs a URL and a token: pass --url/--token, or set "
+            "FRIDAY_PC_URL and FRIDAY_PC_TOKEN.",
+        )
+        return 2
+
+    root = Path(args.cwd).expanduser() if args.cwd else Path.home()
+    if not root.is_dir():
+        print(f"not a directory: {root}")
+        return 2
+
+    print(f"FRIDAY may now run commands here, starting in {root}.")
+    print("Every command is appended to ~/.friday/pc-audit.log. Ctrl-C to stop.")
+    try:
+        serve(url, token, root)
+    except KeyboardInterrupt:
+        print("\nstopped; FRIDAY can no longer reach this machine.")
+    return 0
+
+
 def _handle_doctor(args: argparse.Namespace) -> int:
     """Run the one-shot health self-test; exit non-zero if any check fails."""
     from friday.broker import HashChainedAudit  # noqa: PLC0415 — local keeps import light
@@ -297,6 +333,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     version = subparsers.add_parser("version", help="print the package version")
     version.set_defaults(func=_handle_version)
+
+    pc_agent = subparsers.add_parser(
+        "pc-agent",
+        help="let FRIDAY run commands on this machine (outbound only)",
+    )
+    pc_agent.add_argument(
+        "--url",
+        default="",
+        help="FRIDAY's base URL; defaults to $FRIDAY_PC_URL",
+    )
+    pc_agent.add_argument(
+        "--token",
+        default="",
+        help="API token; defaults to $FRIDAY_PC_TOKEN (keeps it out of `ps`)",
+    )
+    pc_agent.add_argument(
+        "--cwd",
+        default="",
+        help="directory commands start in (default: your home directory)",
+    )
+    pc_agent.set_defaults(func=_handle_pc_agent)
 
     doctor = subparsers.add_parser("doctor", help="one-shot health self-test")
     doctor.set_defaults(func=_handle_doctor)

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -65,10 +66,34 @@ _UA = "FRIDAY (https://friday.sukhma.in, 1.0)"
 #: without this a slow turn can be collected mid-await and the reply never lands.
 _IN_FLIGHT: set[asyncio.Task[None]] = set()
 
+#: Worth trying again when replacing the deferred placeholder. A 429 carrying
+#: Cloudflare's code 1015 means this host's outbound IP is throttled rather than
+#: anything being wrong with the request, and it clears on its own.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+#: Kept inside the fifteen minutes an interaction token stays valid, with room to
+#: spare — ~1s + 2s + 4s at worst.
+_EDIT_ATTEMPTS = 4
+
 
 def _enabled(request: Request) -> bool:
     settings = getattr(request.app.state, "settings", None)
     return bool(getattr(settings, "enable_discord", False))
+
+
+def _app_id(payload: dict[str, Any], settings: Any) -> str:
+    """The application id the follow-up must be addressed to.
+
+    Discord names it in every interaction it sends, so the payload is both the
+    authoritative source and the one that cannot be left unset. The configured
+    value remains as a fallback, but it is no longer the *only* way this can be
+    known: with ``FRIDAY_DISCORD_APPLICATION_ID`` unset, :func:`_edit` had no URL
+    to PATCH and no way to say so, and every deferred reply sat on "thinking…"
+    for ever while the service looked perfectly healthy.
+    """
+    from_payload = str(payload.get("application_id") or "")
+    if from_payload:
+        return from_payload
+    return str(getattr(settings, "discord_application_id", "") or "")
 
 
 def _verify(request: Request, body: bytes, public_key: str) -> bool:
@@ -159,7 +184,7 @@ async def discord_interactions(request: Request) -> Any:
         await _spawn(
             _transcript_job(
                 request, payload,
-                str(getattr(settings, "discord_application_id", "") or ""),
+                _app_id(payload, settings),
                 str(payload.get("token") or ""),
             )
         )
@@ -175,7 +200,7 @@ async def discord_interactions(request: Request) -> Any:
     await _followup(
         request,
         text,
-        str(getattr(settings, "discord_application_id", "") or ""),
+        _app_id(payload, settings),
         str(payload.get("token") or ""),
     )
     return JSONResponse(status_code=200, content={"type": _DEFERRED})
@@ -287,6 +312,15 @@ async def _followup(request: Request, text: str, app_id: str, token: str) -> Non
 async def _edit(app_id: str, token: str, content: str) -> None:
     """Replace the "thinking…" placeholder with the real answer."""
     if not app_id or not token:
+        # Returning quietly here is what made a dead slash command indistinguishable
+        # from a slow one: Discord has already been told "thinking…", and without
+        # the id there is no URL to replace it with. Say so, loudly.
+        logger.error(
+            "discord follow-up impossible (application id %s, token %s) — the "
+            "deferred reply will sit on 'thinking…' for ever",
+            "set" if app_id else "MISSING",
+            "set" if token else "MISSING",
+        )
         return
     import urllib.request  # noqa: PLC0415
 
@@ -309,18 +343,37 @@ async def _edit(app_id: str, token: str, content: str) -> None:
     )
 
     def _send() -> None:
-        try:
-            with urllib.request.urlopen(req, timeout=15):  # noqa: S310
+        for attempt in range(_EDIT_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(req, timeout=15):  # noqa: S310
+                    return
+            except urllib.error.HTTPError as exc:
+                # The body carries Discord's actual complaint. Logging only "it
+                # failed" is what made this take three rounds to find.
+                detail = (exc.read() or b"")[:300].decode("utf-8", "replace")
+                retryable = exc.code in _RETRY_STATUSES
+                if not retryable or attempt == _EDIT_ATTEMPTS - 1:
+                    logger.warning(
+                        "discord follow-up edit failed (attempt %d): HTTP %s %s",
+                        attempt + 1, exc.code, detail,
+                    )
+                    return
+                # A 1015 here is Cloudflare throttling this host's IP, not the
+                # token — it clears, and if the retry lands the placeholder gets
+                # replaced instead of sitting on "thinking…" for ever.
+                header = exc.headers.get("Retry-After") if exc.headers else None
+                try:
+                    delay = min(float(header), 30.0) if header else min(2.0**attempt, 30.0)
+                except (TypeError, ValueError):
+                    delay = min(2.0**attempt, 30.0)
+                logger.warning(
+                    "discord follow-up throttled, retrying in %.1fs: HTTP %s %s",
+                    delay, exc.code, detail,
+                )
+                time.sleep(delay)
+            except Exception:  # noqa: BLE001 - never raise out of the follow-up
+                logger.warning("discord follow-up edit failed (no response)")
                 return
-        except urllib.error.HTTPError as exc:
-            # The body carries Discord's actual complaint. Logging only "it
-            # failed" is what made this take three rounds to find.
-            detail = (exc.read() or b"")[:300].decode("utf-8", "replace")
-            logger.warning(
-                "discord follow-up edit failed: HTTP %s %s", exc.code, detail
-            )
-        except Exception:  # noqa: BLE001 - never raise out of the follow-up
-            logger.warning("discord follow-up edit failed (no response)")
 
     await anyio.to_thread.run_sync(_send)
 

@@ -2928,9 +2928,18 @@ def create_app() -> FastAPI:
         container — a second always-on host would be the alternative.
         """
         settings_now = getattr(app.state, "settings", None)
+        # Both of these used to return in silence, which meant the difference
+        # between "Discord is switched off" and "Discord is on but she is deaf"
+        # left no trace anywhere. Startup says which it is, once.
         if not getattr(settings_now, "enable_discord", False):
+            logger.info("discord gateway: FRIDAY_ENABLE_DISCORD is off; not connecting")
             return
         if getattr(settings_now, "discord_bot_token", None) is None:
+            logger.warning(
+                "discord gateway: FRIDAY_ENABLE_DISCORD is on but "
+                "FRIDAY_DISCORD_BOT_TOKEN is unset — slash commands will answer, "
+                "normal messages and presence will not"
+            )
             return
         from friday.discord.gateway import run as run_gateway  # noqa: PLC0415
 

@@ -29,6 +29,7 @@ import json
 import re
 import secrets
 import time
+import urllib.error
 import urllib.request
 from typing import Any, cast
 
@@ -49,7 +50,7 @@ _PRESENCE_UPDATE, _RECONNECT = 3, 7
 _INVALID_SESSION = 9
 
 #: GUILDS | GUILD_VOICE_STATES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS |
-#: MESSAGE_CONTENT.
+#: DIRECT_MESSAGES | MESSAGE_CONTENT.
 #: MESSAGE_CONTENT is privileged and must be switched on in the Developer Portal
 #: — without it every message arrives with an empty ``content`` and she looks
 #: deaf while appearing perfectly healthy. The reactions bit is separate: without
@@ -57,7 +58,12 @@ _INVALID_SESSION = 9
 #: GUILD_VOICE_STATES (bit 7) is the one that makes her able to follow anyone
 #: into a call. Without it VOICE_STATE_UPDATE is never delivered, so she agrees
 #: to join, waits for an event that cannot arrive, and simply never turns up.
-_INTENTS = (1 << 0) | (1 << 7) | (1 << 9) | (1 << 10) | (1 << 15)
+#: DIRECT_MESSAGES (bit 12) is what lets a DM reach her at all. Without it she
+#: sits in the member list looking perfectly well and never receives a word sent
+#: to her privately — the event is never delivered, so nothing appears in the log
+#: either. Sending her a DM is the most obvious way to talk to a bot, and it was
+#: the one place she could not hear.
+_INTENTS = (1 << 0) | (1 << 7) | (1 << 9) | (1 << 10) | (1 << 12) | (1 << 15)
 
 #: Reconnect backoff.
 _RETRY_BASE = 2.0
@@ -131,7 +137,9 @@ async def _session(app: Any) -> None:
                 event = json.loads(raw)
                 op = event.get("op")
                 name = event.get("t")
-                if op == _DISPATCH and name == "MESSAGE_CREATE":
+                if op == _DISPATCH and name == "READY":
+                    _remember_self(app, event.get("d") or {})
+                elif op == _DISPATCH and name == "MESSAGE_CREATE":
                     tg.start_soon(_on_message, app, token, event.get("d") or {})
                 elif op == _DISPATCH and name == "MESSAGE_REACTION_ADD":
                     tg.start_soon(_on_reaction, app, token, event.get("d") or {})
@@ -679,6 +687,10 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         return
     if message.get("guild_id"):
         _guilds(app)[channel] = str(message["guild_id"])
+    # No guild means a DM, and a DM is addressed to her by definition — there is
+    # nobody else in the room to be talking to. Requiring her name there made her
+    # ignore the most direct way there is to reach her.
+    is_dm = not message.get("guild_id")
     author_id = str((message.get("author") or {}).get("id") or "")
     if _who_is(app, author_id) == "owner":
         _owner_seen(app)[channel] = time.monotonic()
@@ -762,7 +774,7 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     try:
         reply = await _compose(
             app, content, channel,
-            forced=bool(operator) or bool(mentioned or replying_to_her)
+            forced=is_dm or bool(operator) or bool(mentioned or replying_to_her)
             or bool(seen and not banter.addressed(content)),
             asker=str((message.get("author") or {}).get("id") or ""),
             operator=operator,
@@ -1051,8 +1063,33 @@ def _who_is(app: Any, user_id: str) -> str:
     return "owner" if user_id == owners[0] else "queen"
 
 
+def _remember_self(app: Any, ready: dict[str, Any]) -> None:
+    """Record her own user id from the READY dispatch.
+
+    Discord states it on every connection, which makes it the one source that
+    cannot be misconfigured. It used to be read from ``discord_application_id``
+    alone, so an unset environment variable left the id empty — and an empty id
+    quietly turns "was she @-mentioned?" into "does any mention carry a blank
+    id?", which is never true. She ignored every mention and every reply to her
+    while looking entirely healthy, because no part of that fails loudly.
+    """
+    me = str((ready.get("user") or {}).get("id") or "")
+    if not me:
+        logger.warning("discord READY carried no user id")
+        return
+    app.state._discord_self_id = me  # noqa: SLF001 - app state is a namespace
+    logger.info("discord gateway ready as %s", me)
+
+
 def _self_id(app: Any) -> str:
-    """The bot's own user id — its application id, which Discord keeps identical."""
+    """The bot's own user id, as Discord stated it on READY.
+
+    Falls back to the configured application id — which Discord keeps identical
+    to the bot's user id — for the window before READY lands.
+    """
+    live = str(getattr(app.state, "_discord_self_id", "") or "")
+    if live:
+        return live
     settings = getattr(app.state, "settings", None)
     return str(getattr(settings, "discord_application_id", "") or "")
 
@@ -1145,8 +1182,10 @@ async def _react(token: str, channel: str, message_id: str, emoji: str) -> None:
         try:
             with urllib.request.urlopen(request, timeout=10):  # noqa: S310
                 return
-        except Exception:  # noqa: BLE001 - a missed reaction is not worth a crash
-            logger.warning("discord reaction failed")
+        except Exception as exc:  # noqa: BLE001 - a missed reaction is not worth a crash
+            logger.warning(
+                "discord reaction failed (channel %s): %s", channel, _why(exc)
+            )
 
     await anyio.to_thread.run_sync(_put)
 
@@ -1184,6 +1223,58 @@ def split_for_discord(text: str, limit: int = _LIMIT) -> list[str]:
     if current:
         pieces.append(current)
     return pieces
+
+
+#: Statuses worth trying again. A Cloudflare 1015 — which is what Discord's edge
+#: returns when the *outbound IP* is throttled rather than the token — clears on
+#: its own, and on a shared host like Render's free tier it can be triggered by
+#: traffic that is not even ours. Without a retry a single one of these lost the
+#: reply for ever: she composed the answer, spent the model call, and dropped it
+#: on the floor. Answering a few seconds late is the difference between looking
+#: slow and looking dead.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+#: Four tries, so ~1s + 2s + 4s of waiting at worst. Kept short deliberately: a
+#: chat reply that lands a minute later is worse than no reply, and a deferred
+#: slash reply has a fifteen-minute token to stay inside.
+_SEND_ATTEMPTS = 4
+
+
+def _retry_after(exc: urllib.error.HTTPError, attempt: int) -> float:
+    """How long to wait before repeating a throttled call.
+
+    Discord's own 429 names the wait in ``Retry-After`` and it is rude to ignore
+    it; Cloudflare's 1015 usually does not, so fall back to doubling. Capped
+    either way — a reply nobody is still waiting for is not worth sending.
+    """
+    header = exc.headers.get("Retry-After") if exc.headers else None
+    if header:
+        try:
+            return min(float(header), 30.0)
+        except (TypeError, ValueError):
+            pass
+    return min(2.0**attempt, 30.0)
+
+
+def _why(exc: BaseException) -> str:
+    """One line naming why a call to Discord's REST API failed.
+
+    Every send here is deliberately non-fatal — a dropped message must not take
+    the socket down with it — but "discord send failed" on its own was true and
+    useless. It cannot tell a revoked token from a missing Send Messages
+    permission from a rate limit, and those are the whole list of reasons she goes
+    quiet while still sitting in the member list looking perfectly healthy.
+    Discord puts a numeric code and a sentence in the body of every rejection, so
+    the body is the part worth keeping.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:400]
+        except Exception:  # noqa: BLE001 - the status alone is still worth having
+            detail = "<body unreadable>"
+        return f"HTTP {exc.code} {exc.reason}: {detail}"
+    if isinstance(exc, urllib.error.URLError):
+        return f"unreachable: {exc.reason}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def _send(
@@ -1227,12 +1318,28 @@ async def _send_one(
     )
 
     def _post() -> str:
-        try:
-            with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310
-                sent = json.loads(resp.read().decode("utf-8", errors="replace"))
-            return str(sent.get("id") or "")
-        except Exception:  # noqa: BLE001 - a failed send is not worth a crash
-            logger.warning("discord send failed")
-            return ""
+        for attempt in range(_SEND_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310
+                    sent = json.loads(resp.read().decode("utf-8", errors="replace"))
+                return str(sent.get("id") or "")
+            except urllib.error.HTTPError as exc:
+                last = attempt == _SEND_ATTEMPTS - 1
+                if exc.code not in _RETRY_STATUSES or last:
+                    logger.warning(
+                        "discord send failed (channel %s, attempt %d): %s",
+                        channel, attempt + 1, _why(exc),
+                    )
+                    return ""
+                delay = _retry_after(exc, attempt)
+                logger.warning(
+                    "discord send throttled (channel %s), retrying in %.1fs: %s",
+                    channel, delay, _why(exc),
+                )
+                time.sleep(delay)
+            except Exception as exc:  # noqa: BLE001 - a failed send is not worth a crash
+                logger.warning("discord send failed (channel %s): %s", channel, _why(exc))
+                return ""
+        return ""
 
     return str(await anyio.to_thread.run_sync(_post))

@@ -1239,20 +1239,31 @@ _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 _SEND_ATTEMPTS = 4
 
 
-def _retry_after(exc: urllib.error.HTTPError, attempt: int) -> float:
-    """How long to wait before repeating a throttled call.
+#: The longest wait worth sitting through. Cloudflare's 1015 can name minutes or
+#: an hour, and a chat reply that arrives an hour after the question is worse than
+#: no reply at all: better to give up at once, say out loud how long the edge
+#: asked for, and leave the worker free for the next message. Capping the *sleep*
+#: instead — which is what this did first — just burned four attempts against a
+#: block that was never going to lift inside two minutes, and reported "30.0s"
+#: for what was really far longer.
+_MAX_WAIT = 30.0
 
-    Discord's own 429 names the wait in ``Retry-After`` and it is rude to ignore
-    it; Cloudflare's 1015 usually does not, so fall back to doubling. Capped
-    either way — a reply nobody is still waiting for is not worth sending.
+
+def _retry_after(exc: urllib.error.HTTPError, attempt: int) -> float:
+    """How long the far end asked us to wait, uncapped.
+
+    Discord's own 429 names it in ``Retry-After`` and it is rude to ignore; the
+    Cloudflare 1015 that fronts the API does not always send one, so fall back to
+    doubling. Returned as asked for, so the caller can tell a two-second hiccup
+    from an hour-long block and log the real number either way.
     """
     header = exc.headers.get("Retry-After") if exc.headers else None
     if header:
         try:
-            return min(float(header), 30.0)
+            return float(header)
         except (TypeError, ValueError):
             pass
-    return min(2.0**attempt, 30.0)
+    return 2.0**attempt
 
 
 def _why(exc: BaseException) -> str:
@@ -1324,19 +1335,20 @@ async def _send_one(
                     sent = json.loads(resp.read().decode("utf-8", errors="replace"))
                 return str(sent.get("id") or "")
             except urllib.error.HTTPError as exc:
+                wait = _retry_after(exc, attempt)
                 last = attempt == _SEND_ATTEMPTS - 1
-                if exc.code not in _RETRY_STATUSES or last:
+                if exc.code not in _RETRY_STATUSES or last or wait > _MAX_WAIT:
                     logger.warning(
-                        "discord send failed (channel %s, attempt %d): %s",
-                        channel, attempt + 1, _why(exc),
+                        "discord send failed (channel %s, attempt %d, far end asked "
+                        "for %.0fs): %s",
+                        channel, attempt + 1, wait, _why(exc),
                     )
                     return ""
-                delay = _retry_after(exc, attempt)
                 logger.warning(
                     "discord send throttled (channel %s), retrying in %.1fs: %s",
-                    channel, delay, _why(exc),
+                    channel, wait, _why(exc),
                 )
-                time.sleep(delay)
+                time.sleep(wait)
             except Exception as exc:  # noqa: BLE001 - a failed send is not worth a crash
                 logger.warning("discord send failed (channel %s): %s", channel, _why(exc))
                 return ""

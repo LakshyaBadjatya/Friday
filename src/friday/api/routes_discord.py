@@ -73,6 +73,9 @@ _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 #: Kept inside the fifteen minutes an interaction token stays valid, with room to
 #: spare — ~1s + 2s + 4s at worst.
 _EDIT_ATTEMPTS = 4
+#: The longest wait worth sitting through before giving up and saying so. Matches
+#: :data:`friday.discord.gateway._MAX_WAIT`.
+_MAX_WAIT = 30.0
 
 
 def _enabled(request: Request) -> bool:
@@ -351,26 +354,30 @@ async def _edit(app_id: str, token: str, content: str) -> None:
                 # The body carries Discord's actual complaint. Logging only "it
                 # failed" is what made this take three rounds to find.
                 detail = (exc.read() or b"")[:300].decode("utf-8", "replace")
-                retryable = exc.code in _RETRY_STATUSES
-                if not retryable or attempt == _EDIT_ATTEMPTS - 1:
-                    logger.warning(
-                        "discord follow-up edit failed (attempt %d): HTTP %s %s",
-                        attempt + 1, exc.code, detail,
-                    )
-                    return
                 # A 1015 here is Cloudflare throttling this host's IP, not the
                 # token — it clears, and if the retry lands the placeholder gets
-                # replaced instead of sitting on "thinking…" for ever.
+                # replaced instead of sitting on "thinking…" for ever. But it can
+                # name a wait far longer than the interaction token lives, and
+                # sleeping through that helps nobody, so the real figure is logged
+                # and we stop.
                 header = exc.headers.get("Retry-After") if exc.headers else None
                 try:
-                    delay = min(float(header), 30.0) if header else min(2.0**attempt, 30.0)
+                    wait = float(header) if header else 2.0**attempt
                 except (TypeError, ValueError):
-                    delay = min(2.0**attempt, 30.0)
+                    wait = 2.0**attempt
+                retryable = exc.code in _RETRY_STATUSES
+                if not retryable or attempt == _EDIT_ATTEMPTS - 1 or wait > _MAX_WAIT:
+                    logger.warning(
+                        "discord follow-up edit failed (attempt %d, far end asked "
+                        "for %.0fs): HTTP %s %s",
+                        attempt + 1, wait, exc.code, detail,
+                    )
+                    return
                 logger.warning(
                     "discord follow-up throttled, retrying in %.1fs: HTTP %s %s",
-                    delay, exc.code, detail,
+                    wait, exc.code, detail,
                 )
-                time.sleep(delay)
+                time.sleep(wait)
             except Exception:  # noqa: BLE001 - never raise out of the follow-up
                 logger.warning("discord follow-up edit failed (no response)")
                 return

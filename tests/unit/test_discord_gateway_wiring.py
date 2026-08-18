@@ -134,10 +134,16 @@ def test_a_nonsense_retry_after_does_not_raise() -> None:
     assert gateway._retry_after(_throttled("soon"), 1) == 2.0
 
 
-def test_the_wait_is_capped() -> None:
-    """A reply nobody is still waiting for is not worth sending."""
-    assert gateway._retry_after(_throttled("9999"), 0) == 30.0
-    assert gateway._retry_after(_throttled(), 20) == 30.0
+def test_the_real_wait_is_reported_not_a_clamped_one() -> None:
+    """Clamping the number before logging it hid an hour-long block behind "30.0s"."""
+    assert gateway._retry_after(_throttled("3600"), 0) == 3600.0
+
+
+def test_a_wait_longer_than_we_will_sit_through_is_recognisable() -> None:
+    """The caller gives up on these rather than burning four doomed attempts."""
+    assert gateway._retry_after(_throttled("3600"), 0) > gateway._MAX_WAIT
+    assert gateway._retry_after(_throttled("2"), 0) <= gateway._MAX_WAIT
+    assert routes_discord._MAX_WAIT == gateway._MAX_WAIT
 
 
 def test_the_follow_up_retries_on_the_same_statuses() -> None:

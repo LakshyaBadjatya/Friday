@@ -40,13 +40,13 @@ from typing import Any
 
 import anyio
 
-from friday.discord import emblem
+from friday.discord import emblem, endpoint
 from friday.logging import get_logger
 from friday.roster import ROSTER
 
 logger = get_logger("friday.discord.operators")
 
-_API = "https://discord.com/api/v10"
+_API = endpoint.api_base()
 _AGENT = "FRIDAY (https://friday.sukhma.in, 1.0)"
 
 #: The webhook every operator speaks through. One per channel, reused; Discord

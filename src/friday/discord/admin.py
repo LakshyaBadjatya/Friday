@@ -28,11 +28,12 @@ from typing import Any
 
 import anyio
 
+from friday.discord import endpoint
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.admin")
 
-_API = "https://discord.com/api/v10"
+_API = endpoint.api_base()
 
 #: "create a queen role", "make a role called X". The name is captured before
 #: the word "role" because that is how people say it out loud.

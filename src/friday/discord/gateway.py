@@ -35,14 +35,14 @@ from typing import Any, cast
 
 import anyio
 
-from friday.discord import admin, banter, lang, lookup, operators, vision
+from friday.discord import admin, banter, endpoint, lang, lookup, operators, vision
 from friday.discord.voice import VoiceConnection
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.gateway")
 
 _GATEWAY = "wss://gateway.discord.gg/?v=10&encoding=json"
-_API = "https://discord.com/api/v10"
+_API = endpoint.api_base()
 
 # Opcodes.
 _DISPATCH, _HEARTBEAT, _IDENTIFY = 0, 1, 2

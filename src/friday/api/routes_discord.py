@@ -39,6 +39,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from friday.api.routes_siri import _MAX_QUERY, _produce, _session_id
+from friday.discord import endpoint
 from friday.logging import get_logger
 
 logger = get_logger("friday.api.routes_discord")
@@ -56,7 +57,7 @@ _DEFERRED = 5
 _EPHEMERAL = 64
 
 #: Discord's API base, for editing a deferred reply.
-_API = "https://discord.com/api/v10"
+_API = endpoint.api_base()
 
 #: Discord requires a User-Agent on every API request and rejects those without
 #: one. Its documented form is the product, a URL and a version.

@@ -27,11 +27,12 @@ from typing import Any
 
 import anyio
 
+from friday.discord import endpoint
 from friday.logging import get_logger
 
 logger = get_logger("friday.discord.transcript")
 
-_API = "https://discord.com/api/v10"
+_API = endpoint.api_base()
 #: Discord's per-request maximum.
 _PAGE = 100
 #: Default depth, and the ceiling. Five hundred covers any conversation worth

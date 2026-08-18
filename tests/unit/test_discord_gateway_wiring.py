@@ -12,6 +12,8 @@ import urllib.error
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
+
 from friday.api import routes_discord
 from friday.discord import gateway
 
@@ -165,8 +167,6 @@ def _message(text: str, *, dm: bool = False) -> dict[str, Any]:
 
 def _run_on_message(monkeypatch: Any, message: dict[str, Any]) -> list[str]:
     """Drive ``_on_message`` with the model and the network stubbed out."""
-    import anyio
-
     seen: list[str] = []
 
     async def fake_compose(*_a: Any, **_k: Any) -> str:
@@ -200,3 +200,60 @@ def test_a_dm_gets_the_same_courtesy(monkeypatch: Any) -> None:
 def test_she_does_not_type_at_a_room_she_is_not_answering(monkeypatch: Any) -> None:
     """Typing dots followed by nothing reads worse than staying quiet."""
     assert "typing" not in _run_on_message(monkeypatch, _message("just chatting"))
+
+
+# --- reaching the machine --------------------------------------------------- #
+def test_the_owner_s_name_means_the_same_machine_as_my() -> None:
+    """"lakshya's pc" fell through to a chat answer about a Mac."""
+    from friday.core.orchestrator import _is_pc_request
+
+    assert _is_pc_request("friday what is running on lakshya's pc")
+    assert _is_pc_request("what is running on my pc")
+
+
+def test_asking_whether_she_can_reach_it_counts() -> None:
+    """She could, and said she could not, because nothing matched."""
+    from friday.core.orchestrator import _is_pc_request
+
+    assert _is_pc_request("Friday can you access my pc")
+    assert _is_pc_request("friday check my pc")
+
+
+def test_ordinary_talk_about_a_pc_is_still_just_talk() -> None:
+    from friday.core.orchestrator import _is_pc_request
+
+    assert not _is_pc_request("friday hello")
+    assert not _is_pc_request("my pc game is fun")
+
+
+def test_a_machine_turn_is_given_room_to_finish() -> None:
+    """Two model calls around a 45s job cannot fit a spoken one-liner's budget."""
+    from friday.api import routes_siri
+
+    assert routes_siri._PC_TURN_SECONDS > 45.0
+
+
+def test_a_guest_may_ask_her_anything_but_not_the_pc() -> None:
+    """A Discord channel has other people in it, and the prompt quotes them."""
+    import anyio
+
+    app = _App(discord_owner_id="111,222", discord_application_id="")
+    out = anyio.run(
+        lambda: gateway._compose(app, "what is running on lakshya's pc", "chan")
+    )
+    assert out is None or "owner-only" in out
+
+
+def test_the_gate_only_turns_away_guests() -> None:
+    """The owner's side is asserted here rather than by driving ``_compose``.
+
+    Reaching the machine through ``_compose`` means the real brain, and stubbing
+    it layer by layer tests the stubs. What matters and can be pinned down is
+    that the gate keys on being a guest and on nothing else.
+    """
+    owned = _App(discord_owner_id="111,222")
+    assert gateway._who_is(owned, "111") == "owner"
+    assert gateway._who_is(owned, "222") == "queen"
+    assert gateway._who_is(owned, "999") == "guest"
+    # Unconfigured stays trusting, as it was before any of this.
+    assert gateway._who_is(_App(discord_owner_id=""), "999") == "owner"

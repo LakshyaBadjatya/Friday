@@ -824,6 +824,18 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     await _maybe_stand_in(app, token, channel, message)
 
 
+def _wants_the_machine(text: str) -> bool:
+    """Whether this turn is aimed at the PC rather than at her.
+
+    Shares the orchestrator's rules rather than keeping a second copy: two lists
+    of phrasings would drift, and the half that drifted would be the one deciding
+    who is allowed.
+    """
+    from friday.core.orchestrator import _is_pc_request  # noqa: PLC0415
+
+    return _is_pc_request(text)
+
+
 async def _compose(
     app: Any, content: str, channel: str, *, forced: bool = False,
     asker: str = "", spoken: bool = False, operator: Any = None,
@@ -843,6 +855,13 @@ async def _compose(
     social = banter.reaction(content)
     if social is not None:
         return social
+
+    # Driving the machine is owner-only, and this is the surface where that
+    # matters: a voice turn comes from whoever is holding the phone, but a Discord
+    # channel has other people in it, and the prompt is built partly from what
+    # they type. A guest may ask her anything; a guest may not ask the PC.
+    if _wants_the_machine(content) and _who_is(app, asker) == "guest":
+        return "that one's owner-only, sorry."
 
     # "talk to me in polish" sticks for the conversation, not just this line.
     asked = lang.requested(content)

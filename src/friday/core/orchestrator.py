@@ -265,6 +265,21 @@ _PC_RULES: tuple[re.Pattern[str], ...] = (
         r"(pc|computer|laptop|desktop|machine)\b",
         re.IGNORECASE,
     ),
+    # "lakshya's pc" is the same machine as "my pc". Requiring the possessive
+    # *my* meant naming the owner instead of saying "my" fell straight through to
+    # a chat answer, which is exactly how "what is running on lakshya's pc" got
+    # answered with a guess about a Mac.
+    re.compile(
+        r"\b\w+(?:'s|s')\s+(pc|computer|laptop|desktop|machine)\b",
+        re.IGNORECASE,
+    ),
+    # Asking whether she can reach it at all. She could, and said she could not,
+    # because nothing matched and the model answered from its own idea of itself.
+    re.compile(
+        r"\b(?:access|reach|see|check|get\s+(?:in)?to)\s+(?:my|the|this|\w+(?:'s|s'))\s+"
+        r"(pc|computer|laptop|desktop|machine)\b",
+        re.IGNORECASE,
+    ),
 )
 
 #: Asked of the LLM to turn a spoken sentence into one shell command.

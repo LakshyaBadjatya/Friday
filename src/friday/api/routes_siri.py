@@ -361,6 +361,12 @@ def _memory(request: Request) -> Any:
     return getattr(request.app.state, "short_term", None)
 
 
+#: Budget for a turn aimed at the machine. The orchestrator's PC path allows the
+#: job itself 45s and wraps it in two model calls, so anything near the spoken
+#: budget guarantees a timeout rather than an answer.
+_PC_TURN_SECONDS = 60.0
+
+
 def _deadline(request: Request) -> float:
     """Wall-clock seconds allowed for one spoken answer (see ``siri_timeout_seconds``)."""
     settings = getattr(request.app.state, "settings", None)
@@ -892,7 +898,26 @@ async def _produce(
     # Falls through to the orchestrator below when it yields nothing. Kill-switch:
     # FRIDAY_SIRI_FAST_PATH=false.
     settings = getattr(request.app.state, "settings", None)
-    if getattr(settings, "siri_fast_path", True):
+    # A request aimed at the machine must not be answered *about* the machine.
+    # The orchestrator has known how to run a command on the PC for a while, but
+    # only a voice turn ever got there: the fast path answers first and answers
+    # everything, so Discord and Siri asked her about the PC and received a
+    # guess. "I'm not even connected to your pc" was a true statement about the
+    # capabilities she could reach and a false one about the machine, which was
+    # sitting there polling for work the whole time. So this one class of turn
+    # skips the shortcut and falls through to the graph that can act.
+    from friday.core.orchestrator import _is_pc_request  # noqa: PLC0415
+
+    aimed_at_the_machine = _is_pc_request(asked or query)
+    if aimed_at_the_machine:
+        # Running something on the PC is two model calls with a round trip to the
+        # machine between them, so it cannot fit in the budget sized for a spoken
+        # one-liner: it timed out every time and answered "ask me again in a
+        # moment" instead. Nobody is standing there listening to a Discord reply,
+        # and the job itself is already bounded by the agent's own timeout, so the
+        # ceiling here can afford to be the job's rather than speech's.
+        deadline = max(deadline, _PC_TURN_SECONDS)
+    if getattr(settings, "siri_fast_path", True) and not aimed_at_the_machine:
         try:
             fast = await _fast_answer(
                 request, query, history, deadline, session_id, persona

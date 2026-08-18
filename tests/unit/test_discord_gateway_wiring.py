@@ -150,3 +150,53 @@ def test_the_follow_up_retries_on_the_same_statuses() -> None:
     """The frozen "thinking…" placeholder came from this path giving up at once."""
     assert routes_discord._RETRY_STATUSES == gateway._RETRY_STATUSES
     assert routes_discord._EDIT_ATTEMPTS >= 2
+
+
+# --- looking alive while she thinks ----------------------------------------- #
+def _message(text: str, *, dm: bool = False) -> dict[str, Any]:
+    m: dict[str, Any] = {
+        "id": "1", "content": text, "channel_id": "999",
+        "author": {"id": "42", "username": "someone"}, "mentions": [],
+    }
+    if not dm:
+        m["guild_id"] = "1538168912225636466"
+    return m
+
+
+def _run_on_message(monkeypatch: Any, message: dict[str, Any]) -> list[str]:
+    """Drive ``_on_message`` with the model and the network stubbed out."""
+    import anyio
+
+    seen: list[str] = []
+
+    async def fake_compose(*_a: Any, **_k: Any) -> str:
+        return "a reply"
+
+    async def fake_typing(_token: str, _channel: str) -> None:
+        seen.append("typing")
+
+    async def fake_send(*_a: Any, **_k: Any) -> str:
+        seen.append("send")
+        return "id"
+
+    monkeypatch.setattr(gateway, "_compose", fake_compose)
+    monkeypatch.setattr(gateway, "_typing", fake_typing)
+    monkeypatch.setattr(gateway, "_send", fake_send)
+
+    app = _App(discord_application_id="", discord_owner_id="")
+    anyio.run(gateway._on_message, app, "tok", message)
+    return seen
+
+
+def test_she_shows_she_is_working_on_it(monkeypatch: Any) -> None:
+    """Three to six seconds of silence is most of what "slow" meant."""
+    assert "typing" in _run_on_message(monkeypatch, _message("friday hello"))
+
+
+def test_a_dm_gets_the_same_courtesy(monkeypatch: Any) -> None:
+    assert "typing" in _run_on_message(monkeypatch, _message("hello", dm=True))
+
+
+def test_she_does_not_type_at_a_room_she_is_not_answering(monkeypatch: Any) -> None:
+    """Typing dots followed by nothing reads worse than staying quiet."""
+    assert "typing" not in _run_on_message(monkeypatch, _message("just chatting"))

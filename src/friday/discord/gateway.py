@@ -771,6 +771,14 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         if operator is not None:
             handoff = operators.handoff_line(operator)
 
+    # Tell the channel she is working on it, before the slow part rather than
+    # after. Only when the answer is actually coming: typing dots followed by
+    # nothing reads worse than silence, so an uninvited interjection — which may
+    # well decide to stay quiet — does not get them.
+    if is_dm or operator is not None or mentioned or replying_to_her \
+            or banter.addressed(content) or seen:
+        _start_typing(token, channel)
+
     try:
         reply = await _compose(
             app, content, channel,
@@ -1286,6 +1294,52 @@ def _why(exc: BaseException) -> str:
     if isinstance(exc, urllib.error.URLError):
         return f"unreachable: {exc.reason}"
     return f"{type(exc).__name__}: {exc}"
+
+
+#: Strong references to in-flight typing pings. asyncio keeps only a weak one, so
+#: without this a ping can be collected before it is sent.
+_TYPING: set[asyncio.Task[None]] = set()
+
+
+def _start_typing(token: str, channel: str) -> None:
+    """Show "FRIDAY is typing…" for the seconds the answer takes to build.
+
+    A turn is three to six seconds — a model call, and often a web lookup before
+    it — and for that entire time she was indistinguishable from a bot that had
+    ignored you. That is most of what "she is slow" actually meant: not the wait,
+    but the silence during it. Discord holds the indicator for about ten seconds
+    per ping, which covers a normal turn.
+
+    Deliberately not awaited. The whole value is in reaching Discord *before* the
+    slow part starts, so putting it in the critical path would defeat the point,
+    and a failed ping is not worth interrupting a reply for.
+    """
+    task = asyncio.create_task(_typing(token, channel))
+    _TYPING.add(task)
+    task.add_done_callback(_TYPING.discard)
+
+
+async def _typing(token: str, channel: str) -> None:
+    """One typing ping. Best effort, never raises."""
+    request = urllib.request.Request(  # noqa: S310
+        f"{_API}/channels/{channel}/typing",
+        data=b"",
+        method="POST",
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Length": "0",
+            "User-Agent": "FRIDAY (https://friday.sukhma.in, 1.0)",
+        },
+    )
+
+    def _post() -> None:
+        try:
+            with urllib.request.urlopen(request, timeout=10):  # noqa: S310
+                return
+        except Exception as exc:  # noqa: BLE001 - cosmetic; never worth a crash
+            logger.info("discord typing ping failed (channel %s): %s", channel, _why(exc))
+
+    await anyio.to_thread.run_sync(_post)
 
 
 async def _send(

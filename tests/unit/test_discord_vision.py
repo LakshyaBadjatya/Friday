@@ -158,11 +158,18 @@ def test_a_busy_model_is_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(bodies) == 2
 
 
-def test_a_rejected_request_is_not_repeated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 400 will be a 400 again; retrying it just spends the time twice."""
+def test_a_rejected_request_is_never_repeated_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same 400 twice is just spending the time twice.
+
+    The one exception is the thinking argument, which some models reject — that
+    is dropped and tried once more, covered separately below. What must never
+    happen is the identical body going out again.
+    """
     bodies = _capture(monkeypatch, [_http_error(400)])
     assert vision._ask("https://x.invalid", "k", "m", [{"type": "text"}]) is None
-    assert len(bodies) == 1
+    assert bodies[0] != bodies[1]
 
 
 def test_it_gives_up_rather_than_retrying_forever(
@@ -276,3 +283,20 @@ def test_the_instructions_are_read_before_the_picture(
     parts = bodies[0]["contents"][0]["parts"]
     assert "text" in parts[0]
     assert parts[1]["inline_data"]["mime_type"] == "image/png"
+
+
+def test_a_model_that_refuses_the_thinking_knob_is_asked_again_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3.5-flash-lite 400s on reasoning_effort; a model swap must not blind her."""
+    bodies = _capture(monkeypatch, [_http_error(400), "the page"])
+    assert vision._ask("https://x.invalid", "k", "m", [{"type": "text"}]) == "the page"
+    assert "reasoning_effort" in bodies[0]
+    assert "reasoning_effort" not in bodies[1]
+
+
+def test_the_plain_retry_happens_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If it 400s without the knob too, the request is simply wrong."""
+    bodies = _capture(monkeypatch, [_http_error(400)])
+    assert vision._ask("https://x.invalid", "k", "m", [{"type": "text"}]) is None
+    assert len(bodies) == 2

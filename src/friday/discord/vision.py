@@ -312,10 +312,21 @@ def _ask(base: str, key: str, model: str, parts: list[dict[str, Any]]) -> str | 
 
     Blocking; callers run it in a worker thread.
     """
+    plain = False
     for attempt in range(_ATTEMPTS):
-        answer, retry = _ask_once(base, key, model, parts)
-        if answer is not None or not retry:
+        answer, retry = _ask_once(base, key, model, parts, plain=plain)
+        if answer is not None:
             return answer
+        if not retry:
+            if plain:
+                return None
+            # A rejected request is normally not worth repeating — but the one
+            # argument here that a model can refuse is the thinking knob, and
+            # losing every image to a model swap is a bad way to find that out.
+            # Drop it and ask once more before giving up.
+            logger.info("discord vision: retrying without the thinking argument")
+            plain = True
+            continue
         if attempt < _ATTEMPTS - 1:
             time.sleep(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
     logger.warning("discord vision: gave up after %d attempts", _ATTEMPTS)
@@ -323,21 +334,25 @@ def _ask(base: str, key: str, model: str, parts: list[dict[str, Any]]) -> str | 
 
 
 def _ask_once(
-    base: str, key: str, model: str, parts: list[dict[str, Any]]
+    base: str, key: str, model: str, parts: list[dict[str, Any]],
+    *, plain: bool = False,
 ) -> tuple[str | None, bool]:
     """The answer, and whether a failure is worth another attempt."""
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": [{"role": "user", "content": parts}],
-            "max_tokens": _MAX_TOKENS,
-            # Reading a page is not a reasoning task, and on a 2.5-series model
-            # the thinking tokens are charged against ``max_tokens`` — two
-            # hundred of them were being spent, and taken out of the budget for
-            # the answer, to transcribe six lines of handwriting.
-            "reasoning_effort": "none",
-        }
-    ).encode()
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": parts}],
+        "max_tokens": _MAX_TOKENS,
+    }
+    if not plain:
+        # Reading a page is not a reasoning task, and on a 2.5-series model the
+        # thinking tokens are charged against ``max_tokens`` — two hundred of
+        # them were being spent, and taken out of the budget for the answer, to
+        # transcribe six lines of handwriting. Not every model accepts the knob
+        # though (3.5-flash-lite rejects it outright), which is what ``plain``
+        # is for: the caller drops it and asks again rather than treating a
+        # model swap as an unreadable image.
+        payload["reasoning_effort"] = "none"
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(  # noqa: S310
         f"{base}/chat/completions",
         data=body,

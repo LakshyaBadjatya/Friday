@@ -22,6 +22,8 @@ import asyncio
 import base64
 import json
 import struct
+import time
+import urllib.error
 import urllib.request
 from typing import Any
 
@@ -45,6 +47,16 @@ _STT_PROMPT = (
     "Nothing else — no commentary, no speaker labels, no timestamps. If there is "
     "no intelligible speech, reply with nothing at all."
 )
+
+
+#: Asking again through a busy model, as the vision and tutor paths do.
+#:
+#: It matters more here than anywhere: a dropped transcription is not an error
+#: anyone sees, it is her not replying. Someone speaks in a voice channel and
+#: nothing happens, which is exactly what a quiet room looks like.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_ATTEMPTS = 3
+_BACKOFF_SECONDS = (2.0, 5.0)
 
 
 def wav(pcm: bytes) -> bytes:
@@ -84,7 +96,7 @@ async def transcribe(settings: Any, pcm: bytes) -> tuple[str, str] | None:
     if not key or len(pcm) < MIN_SPEECH_BYTES:
         return None
     audio = wav(pcm[:MAX_SPEECH_BYTES])
-    model = str(getattr(settings, "stt_model", "") or "gemini-2.5-flash")
+    model = str(getattr(settings, "stt_model", "") or "gemini-3.5-flash")
     raw = await anyio.to_thread.run_sync(_gemini_stt, key, model, audio)
     if not raw:
         return None
@@ -123,14 +135,28 @@ def _gemini_stt(key: str, model: str, audio: bytes) -> str | None:
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=45) as resp:  # noqa: S310
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-        text = payload["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:  # noqa: BLE001 - a failed transcription is silence, not a crash
-        logger.warning("voice: transcription failed")
-        return None
-    return (text or "").strip() or None
+    for attempt in range(_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=45) as resp:  # noqa: S310
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            text = payload["candidates"][0]["content"]["parts"][0]["text"]
+            return (text or "").strip() or None
+        except urllib.error.HTTPError as exc:
+            # Which failure it was, not just that there was one. A failed
+            # transcription here is indistinguishable from silence — she simply
+            # does not answer — so the log is the only place it can ever show up.
+            logger.warning(
+                "voice: transcription rejected: HTTP %s %s",
+                exc.code, exc.read()[:200].decode("utf-8", errors="replace"),
+            )
+            if exc.code not in _RETRY_STATUSES or attempt == _ATTEMPTS - 1:
+                return None
+        except Exception as exc:  # noqa: BLE001 - a failure is silence, not a crash
+            logger.warning("voice: transcription failed: %s", exc)
+            if attempt == _ATTEMPTS - 1:
+                return None
+        time.sleep(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
+    return None
 
 
 async def speak(text: str, voice: str | None = None) -> list[bytes]:

@@ -80,8 +80,12 @@ def test_gemini_fallback_defaults() -> None:
         "https://generativelanguage.googleapis.com/v1beta/openai/"
     )
     # 2.0-flash was retired by Google and answers 404, which silently cost
-    # every image description until someone read the body of the error.
-    assert s.gemini_model == "gemini-2.5-flash"
+    # every image description until someone read the body of the error. 2.5
+    # went the same way a generation later: 503 "high demand", then 429 on
+    # every call, while 2.5-flash-lite had already started answering 404 with
+    # "no longer available to new users". Pinned here because the failure is
+    # always silent — the image simply stops being read.
+    assert s.gemini_model == "gemini-3.5-flash"
 
 
 def test_gemini_key_is_secret_and_not_in_repr() -> None:

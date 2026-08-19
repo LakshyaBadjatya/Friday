@@ -38,7 +38,7 @@ logger = get_logger("friday.discord.tutor")
 
 #: A reasoning-grade model. The chat model is chosen for speed and personality;
 #: this one is chosen for getting the number right.
-_MODEL = "gemini-2.5-flash"
+_MODEL = "gemini-3.5-flash"
 
 _PROMPT = (
     "You are solving a problem for a Class 12 PCM student preparing for exams. "

@@ -70,9 +70,12 @@ _TRANSCRIBE_PROMPT = (
     "Transcribe everything written in this image, exactly, line by line.\n"
     "- Keep every number, unit, symbol, subscript and vector notation as written.\n"
     "- Where a question is numbered or lettered, keep the numbering.\n"
-    "- Note briefly which parts are handwritten and which are printed, and the "
-    "pen colour when more than one is used — it is often how the question being "
-    "asked is singled out from the rest of the page.\n"
+    "- If more than one colour or hand appears, put ONE short line at the top "
+    "saying which is which — it is often how the question being asked is singled "
+    "out from the rest of the page. If it is all one colour, say nothing about "
+    "colour at all.\n"
+    "- Plain text only: no markdown, no headings, no '---' rules, no bullet "
+    "points. This goes straight into a message, not onto a page.\n"
     "- Transcribe only. Do not solve anything, and do not comment on it."
 )
 
@@ -224,7 +227,7 @@ async def describe(
         return None
 
     base = str(getattr(settings, "gemini_base_url", "") or "").rstrip("/")
-    model = str(getattr(settings, "gemini_model", "gemini-2.5-flash") or "")
+    model = str(getattr(settings, "gemini_model", "gemini-3.5-flash") or "")
     return await anyio.to_thread.run_sync(_ask, base, key, model, parts)
 
 

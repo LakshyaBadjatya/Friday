@@ -724,8 +724,19 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     # herself having seen it — the vision model never addresses the room.
     pictures = vision.images_in(message)
     seen: str | None = None
+    verbatim = False
     if pictures and (banter.addressed(content) or not content):
-        seen = await vision.describe(getattr(app.state, "settings", None), pictures)
+        # "solve the question in blue pen" posted with a photo of the question:
+        # the picture is not the subject of the sentence, it is the question, and
+        # a two-sentence description of it throws away every number needed to
+        # answer. Decided on what was actually typed, before the description is
+        # folded into it below.
+        verbatim = vision.wants_transcription(content) or banter.is_study_question(
+            content
+        )
+        seen = await vision.describe(
+            getattr(app.state, "settings", None), pictures, verbatim=verbatim
+        )
 
     if not content and seen is None:
         # Something was posted that could not be read. Counted towards
@@ -734,8 +745,11 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         banter.note_message(app.state, channel)
         return
     if seen:
+        # Labelled for what it is. "described" invites the model to treat it as
+        # someone's impression of the page; a transcription is the page.
+        label = "transcribed from the attached image" if verbatim else "described"
         content = (
-            f"{content}\n\n[attached image, described: {seen}]" if content
+            f"{content}\n\n[attached image, {label}: {seen}]" if content
             else f"[image posted, described: {seen}] — react to this naturally."
         )
 

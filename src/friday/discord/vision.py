@@ -29,7 +29,9 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import re
 import socket
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -56,6 +58,58 @@ _PROMPT = (
     "the content actually is — quote any text you can read. Do not editorialise, "
     "and do not describe anything you cannot actually make out."
 )
+
+#: Asked instead when the picture *is* the question.
+#:
+#: A photographed exam question described in "one or two plain sentences" comes
+#: back as "a handwritten physics problem", which is a true sentence that throws
+#: away the entire question: the numbers, the units and the vectors are the
+#: problem. Nothing downstream can solve what was summarised away, so a turn
+#: that means to work the problem transcribes it instead of describing it.
+_TRANSCRIBE_PROMPT = (
+    "Transcribe everything written in this image, exactly, line by line.\n"
+    "- Keep every number, unit, symbol, subscript and vector notation as written.\n"
+    "- Where a question is numbered or lettered, keep the numbering.\n"
+    "- Note briefly which parts are handwritten and which are printed, and the "
+    "pen colour when more than one is used — it is often how the question being "
+    "asked is singled out from the rest of the page.\n"
+    "- Transcribe only. Do not solve anything, and do not comment on it."
+)
+
+#: Output ceiling for one look.
+#:
+#: Was 300, which truncated: a six-line physics question came back cut off mid-word
+#: at "charge to ma", with ``finish_reason=length``, and a truncated question is
+#: not a question. It has to cover a whole page of transcription now, and the
+#: thinking tokens a 2.5-series model spends are charged against this same
+#: ceiling — which is why they are turned off below rather than left to eat it.
+_MAX_TOKENS = 1500
+
+#: How long the model gets to look.
+#:
+#: Measured, not guessed: transcribing one page takes this model around fifty
+#: seconds even for a ten-kilobyte image over a fast link. The old thirty-second
+#: ceiling therefore expired before nearly every real call, and ``describe``
+#: returned None — so she said, correctly by her own rules and uselessly, that
+#: she could not see the picture that was right there.
+_TIMEOUT_SECONDS = 90
+
+
+#: A turn where the picture carries the question rather than being the subject.
+#:
+#: "solve the question in blue pen" is not a request to be told what the photo
+#: is of; the photo is the problem statement, and every number on it is needed.
+_VERBATIM_RULES = re.compile(
+    r"\b(?:solve|answer|work\s+(?:it|this|them)\s+out|read|transcribe"
+    r"|what\s+does\s+(?:it|this|that)\s+say|questions?|problems?|sums?"
+    r"|exercise|homework|assignment|derive|calculate|prove)\b",
+    re.IGNORECASE,
+)
+
+
+def wants_transcription(text: str) -> bool:
+    """Whether to read the page out in full rather than say what it is."""
+    return bool(_VERBATIM_RULES.search(text or ""))
 
 
 def images_in(message: dict[str, Any]) -> list[dict[str, str]]:
@@ -121,19 +175,25 @@ def _looks_like_image(url: str) -> bool:
     )
 
 
-async def describe(settings: Any, images: list[dict[str, str]]) -> str | None:
+async def describe(
+    settings: Any, images: list[dict[str, str]], *, verbatim: bool = False
+) -> str | None:
     """Describe the images, or ``None`` when they cannot be read.
 
     ``None`` is a real answer and the caller must say so plainly rather than
     guess — describing an image nothing looked at is the exact failure that
     produced "a document from your finance folder".
+
+    With ``verbatim`` the page is transcribed rather than summarised, for the
+    turn where the picture carries a problem to be worked.
     """
     secret = getattr(settings, "gemini_api_key", None)
     key = secret.get_secret_value() if secret is not None else ""
     if not key or not images:
         return None
 
-    parts: list[dict[str, Any]] = [{"type": "text", "text": _PROMPT}]
+    prompt = _TRANSCRIBE_PROMPT if verbatim else _PROMPT
+    parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for image in images:
         encoded = await anyio.to_thread.run_sync(_fetch, image["url"])
         if encoded is not None:
@@ -211,13 +271,49 @@ def _resolves_publicly(url: str) -> bool:
     return bool(infos)
 
 
+#: Statuses worth asking again about, and how many times to ask in total.
+#:
+#: "This model is currently experiencing high demand" is the common one and it
+#: is genuinely temporary — it came back on roughly two calls in five while this
+#: was being measured. One 503 currently costs the whole picture: ``describe``
+#: returns None, the caller refuses to invent a description, and she tells
+#: someone she cannot see an image that is sitting in front of her. Asking twice
+#: turns most of those back into an answer.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_ATTEMPTS = 3
+#: Waited between attempts. Short: someone is watching the channel.
+_BACKOFF_SECONDS = (2.0, 5.0)
+
+
 def _ask(base: str, key: str, model: str, parts: list[dict[str, Any]]) -> str | None:
-    """One vision completion. Blocking; callers run it in a worker thread."""
+    """One vision completion, retried through a busy model.
+
+    Blocking; callers run it in a worker thread.
+    """
+    for attempt in range(_ATTEMPTS):
+        answer, retry = _ask_once(base, key, model, parts)
+        if answer is not None or not retry:
+            return answer
+        if attempt < _ATTEMPTS - 1:
+            time.sleep(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
+    logger.warning("discord vision: gave up after %d attempts", _ATTEMPTS)
+    return None
+
+
+def _ask_once(
+    base: str, key: str, model: str, parts: list[dict[str, Any]]
+) -> tuple[str | None, bool]:
+    """The answer, and whether a failure is worth another attempt."""
     body = json.dumps(
         {
             "model": model,
             "messages": [{"role": "user", "content": parts}],
-            "max_tokens": 300,
+            "max_tokens": _MAX_TOKENS,
+            # Reading a page is not a reasoning task, and on a 2.5-series model
+            # the thinking tokens are charged against ``max_tokens`` — two
+            # hundred of them were being spent, and taken out of the budget for
+            # the answer, to transcribe six lines of handwriting.
+            "reasoning_effort": "none",
         }
     ).encode()
     request = urllib.request.Request(  # noqa: S310
@@ -226,7 +322,9 @@ def _ask(base: str, key: str, model: str, parts: list[dict[str, Any]]) -> str | 
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as resp:  # noqa: S310
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=_TIMEOUT_SECONDS
+        ) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         # The status and body, not just "failed". Google retired
@@ -237,12 +335,19 @@ def _ask(base: str, key: str, model: str, parts: list[dict[str, Any]]) -> str | 
             "discord vision: model %s rejected the call: HTTP %s %s",
             model, exc.code, exc.read()[:200].decode("utf-8", errors="replace"),
         )
-        return None
+        # A 400 means the request is wrong and will be wrong again; a 503 means
+        # the model is busy. Only one of those is worth repeating.
+        return None, exc.code in _RETRY_STATUSES
+    except TimeoutError:
+        logger.warning("discord vision: model call timed out")
+        return None, True
     except Exception as exc:  # noqa: BLE001 - vision is a bonus, never a hard failure
         logger.warning("discord vision: model call failed: %s", exc)
-        return None
+        return None, True
     try:
         text = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
-        return None
-    return (text or "").strip() or None
+        return None, False
+    # An empty body from a healthy call is not worth asking again for; it is
+    # what the model had to say.
+    return ((text or "").strip() or None), False

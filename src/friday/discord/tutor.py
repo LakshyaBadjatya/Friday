@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any
@@ -66,18 +68,31 @@ _PROMPT = (
 )
 
 
-async def solve(settings: Any, question: str) -> str | None:
+async def solve(
+    settings: Any, question: str, images: list[str] | None = None
+) -> str | None:
     """Work a problem carefully, or ``None`` when the model is unavailable.
 
     ``None`` means the caller falls back to the ordinary path — a slower answer
     from the usual model beats no answer, and this is an upgrade rather than a
     dependency.
+
+    ``images`` are ``data:`` URIs of pictures posted with the question, handed to
+    the model directly. Transcription carries a written question perfectly well
+    and cannot carry a drawn one: a circuit, a free-body diagram or a graph *is*
+    the problem statement, and the most faithful paragraph about it still throws
+    away which node connects to which. Where there is a picture, the model that
+    has to do the physics should be looking at it.
     """
     secret = getattr(settings, "gemini_api_key", None)
     key = secret.get_secret_value() if secret is not None else ""
-    if not key or not question.strip():
+    # A picture with no words is still a question. It is only the pair of them
+    # being empty that means there is nothing to work on.
+    if not key or not (question.strip() or images):
         return None
-    return await anyio.to_thread.run_sync(_ask, key, question.strip())
+    return await anyio.to_thread.run_sync(
+        _ask, key, question.strip(), "", list(images or ())
+    )
 
 
 #: ``{channel: (problem, answer)}``. Asked to "reanalyse your answer" she had no
@@ -227,13 +242,44 @@ _COMPUTE_PROMPT = (
 )
 
 
-def _ask(key: str, question: str, system: str = "") -> str | None:
+#: Asking again through a busy model.
+#:
+#: Not shared with the vision module deliberately — that one talks to the
+#: OpenAI-compatible endpoint and this one to generateContent, so only the
+#: policy is common, not the call. The policy is common because the failure is:
+#: "high demand" came back on roughly two calls in five while this was being
+#: measured, and here it meant a physics question got the small chat model's
+#: answer instead of the reasoning model's, silently, with nothing in the reply
+#: to say which one had answered.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_ATTEMPTS = 3
+_BACKOFF_SECONDS = (2.0, 5.0)
+
+
+def _inline(data_uri: str) -> dict[str, Any] | None:
+    """Turn a ``data:`` URI into the shape this API wants, or None if it is not one."""
+    if not data_uri.startswith("data:") or ";base64," not in data_uri:
+        return None
+    head, encoded = data_uri.split(";base64,", 1)
+    return {"inline_data": {"mime_type": head[len("data:"):], "data": encoded}}
+
+
+def _ask(
+    key: str, question: str, system: str = "", images: list[str] | None = None
+) -> str | None:
     """One reasoning call. Blocking; callers use a worker thread."""
+    parts: list[dict[str, Any]] = [
+        {"text": f"{system or _PROMPT}\n\nProblem:\n{question}"}
+    ]
+    # After the text, so the instructions are read before the picture rather
+    # than the picture being met with no idea what to do about it.
+    for uri in images or ():
+        part = _inline(uri)
+        if part is not None:
+            parts.append(part)
     body = json.dumps(
         {
-            "contents": [
-                {"parts": [{"text": f"{system or _PROMPT}\n\nProblem:\n{question}"}]}
-            ],
+            "contents": [{"parts": parts}],
             "generationConfig": {
                 # Deterministic. A physics answer should not vary between asks,
                 # and sampling is what lets a plausible-looking wrong step
@@ -258,12 +304,26 @@ def _ask(key: str, question: str, system: str = "") -> str | None:
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as resp:  # noqa: S310
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-        text = payload["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:  # noqa: BLE001 - fall back to the ordinary path
-        logger.warning("tutor: solve failed")
+    for attempt in range(_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as resp:  # noqa: S310
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            text = payload["candidates"][0]["content"]["parts"][0]["text"]
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read()[:200].decode("utf-8", errors="replace")
+            # The status and the body, not just "failed". "tutor: solve failed"
+            # was true of a retired model, a malformed request and a busy one
+            # alike, and told you which of them it was in none of those cases.
+            logger.warning("tutor: solve rejected: HTTP %s %s", exc.code, detail)
+            if exc.code not in _RETRY_STATUSES or attempt == _ATTEMPTS - 1:
+                return None
+        except Exception as exc:  # noqa: BLE001 - fall back to the ordinary path
+            logger.warning("tutor: solve failed: %s", exc)
+            if attempt == _ATTEMPTS - 1:
+                return None
+        time.sleep(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
+    else:  # pragma: no cover - the loop returns or breaks
         return None
     answer = (text or "").strip()
     # No trimming to Discord's message limit here any more. That cap used to be

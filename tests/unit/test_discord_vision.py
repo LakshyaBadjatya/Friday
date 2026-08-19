@@ -171,3 +171,108 @@ def test_it_gives_up_rather_than_retrying_forever(
     bodies = _capture(monkeypatch, [_http_error(503)])
     assert vision._ask("https://x.invalid", "k", "m", [{"type": "text"}]) is None
     assert len(bodies) == vision._ATTEMPTS
+
+
+# --- handing the picture to the solver ---------------------------------------
+#
+# A transcription carries a written question perfectly and a drawn one not at
+# all: a circuit or a free-body diagram IS the problem statement, and the most
+# careful paragraph about it still loses which node joins which. The solver only
+# ever received words.
+
+
+@pytest.mark.asyncio
+async def test_the_image_is_downloaded_once_and_used_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetching again for the solver would double the slowest step in the turn."""
+    downloads: list[str] = []
+
+    def _fake_fetch(url: str) -> str:
+        downloads.append(url)
+        return "data:image/png;base64,AA=="
+
+    monkeypatch.setattr(vision, "_fetch", _fake_fetch)
+    monkeypatch.setattr(vision, "_ask", lambda *a: "read")
+
+    images = [{"url": "https://cdn.discordapp.com/a.png", "name": "a"}]
+    fetched = await vision.fetch_all(images)
+    assert fetched == ["data:image/png;base64,AA=="]
+
+    await vision.describe(_Settings(), images, verbatim=True, fetched=fetched)
+    assert len(downloads) == 1  # describe reused them rather than re-downloading
+
+
+def test_a_data_uri_becomes_an_inline_image() -> None:
+    from friday.discord import tutor
+
+    part = tutor._inline("data:image/jpeg;base64,QUJD")
+    assert part == {"inline_data": {"mime_type": "image/jpeg", "data": "QUJD"}}
+    assert tutor._inline("https://example.invalid/a.png") is None
+
+
+@pytest.mark.asyncio
+async def test_the_solver_is_given_the_picture_as_well_as_the_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from friday.discord import tutor
+
+    seen: dict[str, Any] = {}
+
+    def _fake_ask(
+        key: str, question: str, system: str = "", images: list[str] | None = None
+    ) -> str:
+        seen["question"] = question
+        seen["images"] = images
+        return "worked"
+
+    monkeypatch.setattr(tutor, "_ask", _fake_ask)
+    await tutor.solve(
+        _Settings(), "solve this", ["data:image/png;base64,AA=="]
+    )
+    assert seen["images"] == ["data:image/png;base64,AA=="]
+    assert seen["question"] == "solve this"
+
+
+@pytest.mark.asyncio
+async def test_a_picture_with_no_words_is_still_a_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an empty message AND no picture means there is nothing to work on."""
+    from friday.discord import tutor
+
+    monkeypatch.setattr(tutor, "_ask", lambda *a, **k: "worked")
+    assert await tutor.solve(_Settings(), "", ["data:image/png;base64,AA=="])
+    assert await tutor.solve(_Settings(), "", []) is None
+
+
+def test_the_instructions_are_read_before_the_picture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A picture met with no idea what to do about it is just a picture."""
+    from friday.discord import tutor
+
+    bodies: list[dict] = []
+
+    class _Resp:
+        def read(self) -> bytes:
+            return json.dumps(
+                {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+            ).encode()
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def _fake_urlopen(request: Any, timeout: float = 0) -> Any:
+        bodies.append(json.loads(request.data.decode()))
+        return _Resp()
+
+    monkeypatch.setattr(tutor.urllib.request, "urlopen", _fake_urlopen)
+    tutor._ask("k", "a problem", "", ["data:image/png;base64,AA=="])
+
+    parts = bodies[0]["contents"][0]["parts"]
+    assert "text" in parts[0]
+    assert parts[1]["inline_data"]["mime_type"] == "image/png"

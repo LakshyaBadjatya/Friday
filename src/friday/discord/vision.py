@@ -175,8 +175,30 @@ def _looks_like_image(url: str) -> bool:
     )
 
 
+async def fetch_all(images: list[dict[str, str]]) -> list[str]:
+    """Download the images once, as ``data:`` URIs.
+
+    Split out from :func:`describe` because the bytes are wanted twice now: once
+    to read the page, and again to hand the picture itself to the solver. A
+    diagram is not transcribable — a circuit or a free-body sketch is the
+    question, and no description of it can be worked from — so the solver gets
+    the image rather than a paragraph about it. Downloading it a second time to
+    do that would double the latency of the slowest thing in the turn.
+    """
+    fetched: list[str] = []
+    for image in images:
+        encoded = await anyio.to_thread.run_sync(_fetch, image["url"])
+        if encoded is not None:
+            fetched.append(encoded)
+    return fetched
+
+
 async def describe(
-    settings: Any, images: list[dict[str, str]], *, verbatim: bool = False
+    settings: Any,
+    images: list[dict[str, str]],
+    *,
+    verbatim: bool = False,
+    fetched: list[str] | None = None,
 ) -> str | None:
     """Describe the images, or ``None`` when they cannot be read.
 
@@ -194,10 +216,10 @@ async def describe(
 
     prompt = _TRANSCRIBE_PROMPT if verbatim else _PROMPT
     parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for image in images:
-        encoded = await anyio.to_thread.run_sync(_fetch, image["url"])
-        if encoded is not None:
-            parts.append({"type": "image_url", "image_url": {"url": encoded}})
+    if fetched is None:
+        fetched = await fetch_all(images)
+    for encoded in fetched:
+        parts.append({"type": "image_url", "image_url": {"url": encoded}})
     if len(parts) == 1:  # nothing downloaded
         return None
 

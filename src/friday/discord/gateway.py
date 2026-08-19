@@ -725,6 +725,7 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     pictures = vision.images_in(message)
     seen: str | None = None
     verbatim = False
+    fetched: list[str] = []
     if pictures and (banter.addressed(content) or not content):
         # "solve the question in blue pen" posted with a photo of the question:
         # the picture is not the subject of the sentence, it is the question, and
@@ -734,8 +735,15 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
         verbatim = vision.wants_transcription(content) or banter.is_study_question(
             content
         )
+        # Downloaded once and used twice: to read the page, and — if this turns
+        # out to be a problem to work — handed to the solver as the picture it
+        # actually is.
+        fetched = await vision.fetch_all(pictures)
         seen = await vision.describe(
-            getattr(app.state, "settings", None), pictures, verbatim=verbatim
+            getattr(app.state, "settings", None),
+            pictures,
+            verbatim=verbatim,
+            fetched=fetched,
         )
 
     if not content and seen is None:
@@ -800,6 +808,7 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
             or bool(seen and not banter.addressed(content)),
             asker=str((message.get("author") or {}).get("id") or ""),
             operator=operator,
+            images=fetched,
         )
     except Exception:  # noqa: BLE001 - one bad message must not kill the socket
         logger.exception("discord message handling failed")
@@ -862,6 +871,7 @@ def _wants_the_machine(app: Any, text: str) -> bool:
 async def _compose(
     app: Any, content: str, channel: str, *, forced: bool = False,
     asker: str = "", spoken: bool = False, operator: Any = None,
+    images: list[str] | None = None,
 ) -> str | None:
     """The reply, or ``None`` to stay quiet.
 
@@ -1002,7 +1012,10 @@ async def _compose(
             return worked
 
     if banter.is_study_question(content):
-        worked = await tutor.solve(settings, content)
+        # The transcription goes in the text and the picture goes alongside it.
+        # A written question survives being transcribed; a drawn one does not,
+        # and until now the solver only ever got words.
+        worked = await tutor.solve(settings, content, images)
         if worked:
             tutor.remember(channel, content, worked)
             return worked

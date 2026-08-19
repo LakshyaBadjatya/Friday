@@ -128,7 +128,16 @@ def images_in(message: dict[str, Any]) -> list[dict[str, str]]:
         ctype = (att.get("content_type") or "").split(";")[0].strip().lower()
         url = att.get("url") or ""
         if url and _allowed_host(url) and (ctype in _LOOKABLE or _looks_like_image(url)):
-            found.append({"url": url, "name": att.get("filename") or "image"})
+            # Discord serves the same attachment from two hosts and hands us
+            # both. The signed cdn link is the primary; media.discordapp.net is
+            # kept as a fallback because losing the picture to one host having
+            # a bad minute is a poor reason to tell someone you cannot see it.
+            proxy = att.get("proxy_url") or ""
+            found.append({
+                "url": url,
+                "name": att.get("filename") or "image",
+                "fallback": proxy if proxy and _allowed_host(proxy) else "",
+            })
     for embed in message.get("embeds") or []:
         for key in ("image", "thumbnail", "video"):
             block = embed.get(key) or {}
@@ -191,8 +200,15 @@ async def fetch_all(images: list[dict[str, str]]) -> list[str]:
     fetched: list[str] = []
     for image in images:
         encoded = await anyio.to_thread.run_sync(_fetch, image["url"])
+        if encoded is None and image.get("fallback"):
+            logger.info("discord vision: retrying the image from its proxy host")
+            encoded = await anyio.to_thread.run_sync(_fetch, image["fallback"])
         if encoded is not None:
             fetched.append(encoded)
+    if images and not fetched:
+        logger.warning(
+            "discord vision: none of the %d image(s) could be downloaded", len(images)
+        )
     return fetched
 
 
@@ -258,8 +274,21 @@ def _fetch(url: str) -> str | None:
                 logger.info("discord vision: attachment exceeded the cap while reading")
                 return None
             ctype = (resp.headers.get("Content-Type") or "image/png").split(";")[0]
-    except Exception:  # noqa: BLE001 - an unreadable image is not an error
-        logger.warning("discord vision: fetch failed")
+    except urllib.error.HTTPError as exc:
+        # The status, and from which host. Without this the only symptom of a
+        # failed download is her saying she cannot see the picture — which is
+        # also what she says when the model refuses, when the key is missing,
+        # and when the file is too big. Four different faults, one sentence.
+        logger.warning(
+            "discord vision: %s refused the image: HTTP %s",
+            urlparse(url).hostname, exc.code,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 - an unreadable image is not an error
+        logger.warning(
+            "discord vision: could not download from %s: %s: %s",
+            urlparse(url).hostname, type(exc).__name__, exc,
+        )
         return None
     return f"data:{ctype};base64,{base64.b64encode(raw).decode()}"
 

@@ -726,7 +726,16 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     seen: str | None = None
     verbatim = False
     fetched: list[str] = []
-    if pictures and (banter.addressed(content) or not content):
+    # Replying to her with the photo is asking her about the photo. The gate
+    # used to be "did they type her name", so "here it is" attached to the very
+    # question she had just said was missing went unlooked at, and she answered
+    # "nothing's changed" about an image she never opened. Being replied to, or
+    # @-mentioned, or in a DM is being spoken to just as plainly as typing
+    # "Friday" — the rest of this function already treats it that way.
+    if pictures and (
+        banter.addressed(content) or not content
+        or mentioned or replying_to_her or is_dm
+    ):
         # "solve the question in blue pen" posted with a photo of the question:
         # the picture is not the subject of the sentence, it is the question, and
         # a two-sentence description of it throws away every number needed to

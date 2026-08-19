@@ -277,6 +277,27 @@ _PC_RULES: tuple[re.Pattern[str], ...] = (
         r"\b\w+(?:'s|s')\s+(pc|computer|laptop|desktop|machine)\b",
         re.IGNORECASE,
     ),
+    # "pc temp", "laptop battery", "cpu usage on the desktop" — the machine
+    # named without a possessive, next to something only the machine can
+    # answer. Without this, "pc temp?" was answered "pc temp is 25c rn", which
+    # was invented: it was seventy-five at the time.
+    re.compile(
+        r"\b(?:pc|computer|laptop|desktop|machine)\b[^.?!]*"
+        r"\b(?:temp\w*|cpu|gpu|ram|memory|disk|storage|uptime|batter\w+|specs?"
+        r"|volume|wi-?fi|network|ip)\b"
+        r"|\b(?:temp\w*|cpu|gpu|ram|memory|disk|storage|uptime|batter\w+|specs?"
+        r"|volume|wi-?fi|network|ip)\b[^.?!]*"
+        r"\b(?:pc|computer|laptop|desktop|machine)\b",
+        re.IGNORECASE,
+    ),
+    # The same question with the machine left implicit. Narrow on purpose: a
+    # bare "temperature" is the weather, but nobody asks their assistant about
+    # "cpu temp" meaning anything other than this computer.
+    re.compile(
+        r"\b(?:cpu|gpu)\s+(?:temp\w*|usage|load)\b"
+        r"|\b(?:ram|disk|memory)\s+usage\b",
+        re.IGNORECASE,
+    ),
     # Asking whether she can reach it at all. She could, and said she could not,
     # because nothing matched and the model answered from its own idea of itself.
     re.compile(
@@ -537,7 +558,7 @@ _PC_RECIPES: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            r"\b(?:memory|ram)\b[^.?!]*\b(?:using|used|eating|hogging|taking|free)\b"
+            r"\b(?:memory|ram)\b[^.?!]*\b(?:using|used|usage|eating|hogging|taking|free)\b"
             r"|\b(?:using|eating|hogging|taking)\b[^.?!]*\b(?:memory|ram)\b",
             re.IGNORECASE,
         ),

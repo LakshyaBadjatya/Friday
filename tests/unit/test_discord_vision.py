@@ -300,3 +300,81 @@ def test_the_plain_retry_happens_only_once(monkeypatch: pytest.MonkeyPatch) -> N
     bodies = _capture(monkeypatch, [_http_error(400)])
     assert vision._ask("https://x.invalid", "k", "m", [{"type": "text"}]) is None
     assert len(bodies) == 2
+
+
+# --- the picture attached to a reply ----------------------------------------
+
+
+def test_the_proxy_host_is_kept_as_a_fallback() -> None:
+    """Two hosts serve the same attachment; one having a bad minute is not a
+    reason to tell someone you cannot see their picture."""
+    msg = {
+        "attachments": [{
+            "filename": "q.jpg",
+            "content_type": "image/jpeg",
+            "url": "https://cdn.discordapp.com/attachments/1/2/q.jpg?ex=a&is=b&hm=c",
+            "proxy_url": "https://media.discordapp.net/attachments/1/2/q.jpg",
+        }],
+        "embeds": [],
+    }
+    found = vision.images_in(msg)
+    assert found[0]["url"].startswith("https://cdn.discordapp.com/")
+    assert found[0]["fallback"].startswith("https://media.discordapp.net/")
+
+
+def test_an_untrusted_proxy_host_is_not_kept() -> None:
+    """The fallback is a URL from the message, so it gets the same allow-list."""
+    msg = {
+        "attachments": [{
+            "filename": "q.jpg",
+            "content_type": "image/jpeg",
+            "url": "https://cdn.discordapp.com/attachments/1/2/q.jpg",
+            "proxy_url": "http://169.254.169.254/latest/meta-data/q.jpg",
+        }],
+        "embeds": [],
+    }
+    assert vision.images_in(msg)[0]["fallback"] == ""
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_host_is_tried_when_the_first_one_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tried: list[str] = []
+
+    def _fake_fetch(url: str) -> str | None:
+        tried.append(url)
+        return None if "cdn." in url else "data:image/png;base64,AA=="
+
+    monkeypatch.setattr(vision, "_fetch", _fake_fetch)
+    got = await vision.fetch_all([{
+        "url": "https://cdn.discordapp.com/a.png",
+        "name": "a",
+        "fallback": "https://media.discordapp.net/a.png",
+    }])
+    assert got == ["data:image/png;base64,AA=="]
+    assert len(tried) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_download_failure_says_which_host_and_why(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """"fetch failed" was true of a 403, a timeout and an oversized file alike.
+
+    All three surface to the person as her saying she cannot see the picture,
+    so the log is the only place the difference can ever appear.
+    """
+    def _boom(request: Any, timeout: float = 0) -> Any:
+        raise vision.urllib.error.HTTPError(
+            "u", 403, "Forbidden", {}, None  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(vision.urllib.request, "build_opener",
+                        lambda *_a: type("_O", (), {"open": staticmethod(_boom)})())
+    monkeypatch.setattr(vision, "_resolves_publicly", lambda _u: True)
+    with caplog.at_level("WARNING"):
+        assert vision._fetch("https://cdn.discordapp.com/a.png") is None
+    assert "cdn.discordapp.com" in caplog.text
+    assert "403" in caplog.text

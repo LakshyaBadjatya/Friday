@@ -629,3 +629,46 @@ def test_the_commands_are_single_line() -> None:
     """A stray newline would make everything after it a second command."""
     for name, command in _every_command():
         assert "\n" not in command, name
+
+
+@pytest.mark.parametrize(
+    ("text", "command"),
+    [
+        ("pc temp", "_PC_TEMPERATURE_COMMAND"),
+        ("pc temp?", "_PC_TEMPERATURE_COMMAND"),
+        ("cpu temp", "_PC_TEMPERATURE_COMMAND"),
+        ("whats the pc temp rn", "_PC_TEMPERATURE_COMMAND"),
+        ("laptop battery", "_PC_BATTERY_COMMAND"),
+        ("ram usage", "_PC_MEMORY_COMMAND"),
+        ("cpu usage", "_PC_CPU_COMMAND"),
+        ("computer uptime", "_PC_UPTIME_COMMAND"),
+        ("pc specs", "_PC_SPECS_COMMAND"),
+    ],
+)
+def test_the_machine_named_without_a_possessive(text: str, command: str) -> None:
+    """"pc temp?" was answered "pc temp is 25c rn". It was 75 at the time.
+
+    The rules wanted "my pc"; nobody types that. Naming the machine at all,
+    next to something only the machine can answer, is naming the machine.
+    """
+    import friday.core.orchestrator as orch
+
+    assert orch._is_pc_request(text) is True
+    assert orch._pc_recipe(text) == getattr(orch, command)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what's the temperature outside",
+        "what is a good cpu for gaming",
+        "remind me to call mum at seven",
+        "what's the capital of France",
+        "how are you feeling today",
+    ],
+)
+def test_the_machine_does_not_swallow_the_rest_of_the_language(text: str) -> None:
+    """A bare "temperature" is the weather; "cpu" alone can be shopping."""
+    import friday.core.orchestrator as orch
+
+    assert orch._is_pc_request(text) is False

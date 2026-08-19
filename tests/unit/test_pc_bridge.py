@@ -9,6 +9,8 @@ harmless ones, in a tmp_path, and the destructive cases are asserted to be
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -527,3 +529,103 @@ async def test_the_surfaces_can_see_a_follow_up_before_the_graph_does() -> None:
     assert orchestrator.aims_at_machine("what am I doing on it", "s3") is True
     # A different channel never inherits another one's machine turn.
     assert orchestrator.aims_at_machine("what am I doing on it", "other") is False
+
+
+# --- the rest of the questions people actually ask -------------------------- #
+#
+# Each of these is a command written down rather than one a model invents per
+# turn. The routing matters as much as the commands: "check my pc temperature"
+# reaching the general status recipe would answer a question nobody asked.
+
+_ROUTING: tuple[tuple[str, str | None], ...] = (
+    ("what did I download recently", "_PC_DOWNLOADS_COMMAND"),
+    ("is my bluetooth speaker connected", "_PC_BLUETOOTH_COMMAND"),
+    ("how hot is my pc", "_PC_TEMPERATURE_COMMAND"),
+    ("is it running hot", "_PC_TEMPERATURE_COMMAND"),
+    ("what's the volume on my pc", "_PC_VOLUME_COMMAND"),
+    ("are there updates waiting on my pc", "_PC_UPDATES_COMMAND"),
+    ("what's plugged into my pc", "_PC_USB_COMMAND"),
+    ("what usb devices are connected", "_PC_USB_COMMAND"),
+    ("is my mouse battery low", "_PC_BATTERY_COMMAND"),
+    ("is my screen locked", "_PC_LOCKED_COMMAND"),
+    ("what was I working on", "_PC_RECENT_FILES_COMMAND"),
+    ("what recent files did I edit on my pc", "_PC_RECENT_FILES_COMMAND"),
+    ("what wifi am I on", "_PC_NETWORK_COMMAND"),
+    ("is my pc online", "_PC_NETWORK_COMMAND"),
+    ("what's my ip address", "_PC_NETWORK_COMMAND"),
+    ("how much space is left on my pc", "_PC_DISK_COMMAND"),
+    ("is the disk full", "_PC_DISK_COMMAND"),
+    ("what's using my memory", "_PC_MEMORY_COMMAND"),
+    ("what's eating the ram", "_PC_MEMORY_COMMAND"),
+    ("what's using the cpu on my pc", "_PC_CPU_COMMAND"),
+    ("why is my pc so slow", "_PC_CPU_COMMAND"),
+    ("how many processes are running", "_PC_PROCESSES_COMMAND"),
+    ("what are my pc specs", "_PC_SPECS_COMMAND"),
+    ("what gpu does my pc have", "_PC_SPECS_COMMAND"),
+    ("how long has my pc been on", "_PC_UPTIME_COMMAND"),
+    ("what is open in my pc", "_PC_OPEN_APPS_COMMAND"),
+    ("what am I doing on it", "_PC_OPEN_APPS_COMMAND"),
+    ("check my pc", "_PC_STATUS_COMMAND"),
+    # Still the model's job: these want a shell, not an answer off a shelf.
+    ("make a folder called notes on my pc", None),
+    ("find the invoice files on my computer", None),
+    ("what's on my laptop taking up space", None),
+    ("list the files on this machine", None),
+)
+
+
+@pytest.mark.parametrize(("text", "expected"), _ROUTING)
+def test_each_question_reaches_its_own_command(text: str, expected: str | None) -> None:
+    import friday.core.orchestrator as orch
+
+    got = orch._pc_recipe(text)
+    assert got == (getattr(orch, expected) if expected else None)
+
+
+def _every_command() -> list[tuple[str, str]]:
+    import friday.core.orchestrator as orch
+
+    return [
+        (name, getattr(orch, name))
+        for name in sorted(dir(orch))
+        if name.startswith("_PC_") and name.endswith("_COMMAND")
+    ]
+
+
+def test_no_written_down_command_needs_confirming() -> None:
+    """A recipe that trips the safety gate cannot answer anything.
+
+    This is not hypothetical: the "any updates?" command tidied up after itself
+    with ``rm -f`` and was refused outright — by its own safety gate, correctly,
+    which is a fine thing for the gate to do and a useless way to answer a
+    question about updates.
+    """
+    offenders = {
+        name: destructive_reason(command)
+        for name, command in _every_command()
+        if destructive_reason(command) is not None
+    }
+    assert offenders == {}
+
+
+def test_every_written_down_command_is_valid_shell() -> None:
+    """Parsed, not run — CI has no sensors, no nmcli and no desktop session.
+
+    These strings are assembled in Python, quotes and backslashes included, and
+    then handed straight to a shell. ``bash -n`` catches a mangled quote here
+    rather than on the machine, where the symptom is an empty answer.
+    """
+    bash = shutil.which("bash")
+    if bash is None:  # pragma: no cover - every target platform has one
+        pytest.skip("no bash to parse with")
+    for name, command in _every_command():
+        parsed = subprocess.run(  # noqa: S603 - parses, never executes
+            [bash, "-n", "-c", command], capture_output=True, text=True
+        )
+        assert parsed.returncode == 0, f"{name}: {parsed.stderr.strip()}"
+
+
+def test_the_commands_are_single_line() -> None:
+    """A stray newline would make everything after it a second command."""
+    for name, command in _every_command():
+        assert "\n" not in command, name

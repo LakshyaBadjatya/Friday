@@ -367,12 +367,211 @@ _PC_STATUS_COMMAND = (
     "uptime | grep -o 'load average.*'"
 )
 
+#: Everything else she gets asked about the machine, as commands rather than as
+#: prompts. Same reasoning as the two above, at scale: these are the questions
+#: that recur, a drafted command costs a model call and a second of latency
+#: every time, and the draft is a guess about a machine the model cannot see.
+#: Every one of these was run on the actual PC before being written down —
+#: which is how ``du -h -d1 ~`` (times out scanning a home directory) and
+#: ``docker ps`` (the socket refuses the agent) ended up not being here.
+_PC_NETWORK_COMMAND = (
+    "nmcli -t -f NAME,TYPE,DEVICE con show --active 2>/dev/null "
+    "| grep -vE ':(loopback|bridge):' | sed 's/:/ | /g'; "
+    "nmcli -t -f ACTIVE,SSID,SIGNAL dev wifi list 2>/dev/null "
+    "| grep '^yes' | cut -d: -f2,3 --output-delimiter=' — signal '; "
+    "hostname -I | awk '{print \"ip \"$1}'"
+)
+_PC_DISK_COMMAND = (
+    "df -h --output=target,size,used,avail,pcent "
+    "-x tmpfs -x devtmpfs -x efivarfs 2>/dev/null | head -6"
+)
+#: "What is eating the memory" wants the names, so it reports names and sizes
+#: rather than the totals the status recipe already gives.
+_PC_MEMORY_COMMAND = (
+    "ps -eo rss=,comm= --sort=-rss | head -8 "
+    "| awk '{printf \"%.1f GB  %s\\n\", $1/1048576, $2}'; "
+    "free -h | awk 'NR==2{print \"total: \"$3\" of \"$2\" used\"}'"
+)
+#: The pipeline excludes itself. Asked what was eating the processor, the first
+#: answer was "ps" at 400% — true, and entirely an artefact of the measuring.
+_PC_CPU_COMMAND = (
+    "ps -eo pcpu=,comm= --sort=-pcpu "
+    "| grep -vE '[[:space:]](ps|awk|sort|head|grep|sh|bash)$' | head -8 "
+    "| awk '{printf \"%s%%  %s\\n\", $1, $2}'; "
+    "uptime | sed 's/.*load average/load average/'"
+)
+_PC_DOWNLOADS_COMMAND = (
+    "ls -lt --time-style=+'%d %b' ~/Downloads 2>/dev/null "
+    "| tail -n +2 | head -10 | awk '{$1=$2=$3=$4=$5=\"\"; print}' "
+    "| sed 's/^ *//' || echo 'no Downloads folder'"
+)
+#: This machine has no internal battery — the only batteries upower knows about
+#: are the wireless mouse and keyboard, which is exactly what "is my mouse
+#: dying" means on a desktop.
+_PC_BATTERY_COMMAND = (
+    "upower -e | grep -i batt | while read -r d; do "
+    "upower -i \"$d\" | awk '/model/{m=$2} /percentage/{print m\" \"$2}'; done "
+    "| grep . || echo 'no batteries reported'"
+)
+_PC_TEMPERATURE_COMMAND = (
+    "sensors 2>/dev/null | awk '/^Core |^temp1|^Package/{gsub(/[+]/,\"\"); "
+    "print $1$2, $3, $NF ~ /ALARM|CRIT/ ? \"(HOT)\" : \"\"}' | head -6 "
+    "|| echo 'no sensors'"
+)
+_PC_VOLUME_COMMAND = (
+    "wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null "
+    "| awk '{printf \"volume %.0f%%%s\\n\", $2*100, / MUTED/ ? \" (muted)\" : \"\"}'; "
+    "wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null "
+    "| awk '{printf \"mic %.0f%%%s\\n\", $2*100, / MUTED/ ? \" (muted)\" : \"\"}'"
+)
+#: Held in a variable rather than a temp file: the tidy-up would have been
+#: ``rm -f``, and ``destructive_reason`` refuses that — rightly, since a recipe
+#: that needs confirming to answer a question is not much of a recipe.
+_PC_UPDATES_COMMAND = (
+    "upg=$(apt list --upgradable 2>/dev/null | tail -n +2); "
+    "printf '%s\\n' \"$upg\" | grep . | cut -d/ -f1 | head -10; "
+    "printf '%s\\n' \"$upg\" | grep -c . | sed 's/$/ waiting/'"
+)
+_PC_BLUETOOTH_COMMAND = (
+    "bluetoothctl devices Connected 2>/dev/null | cut -d' ' -f3- "
+    "| grep . || echo 'nothing connected'"
+)
+_PC_USB_COMMAND = (
+    "lsusb | cut -d' ' -f7- | grep -viE 'root hub' | head -8"
+)
+_PC_UPTIME_COMMAND = "uptime -p; echo \"booted $(uptime -s)\""
+_PC_RECENT_FILES_COMMAND = (
+    "find ~ -maxdepth 4 -type f -mmin -240 -not -path '*/.*' "
+    "-not -path '*/node_modules/*' -printf '%TH:%TM  %p\\n' 2>/dev/null "
+    "| sort -r | head -10 | grep . || echo 'nothing touched in the last 4 hours'"
+)
+#: Answered over D-Bus because there is no window server to ask: the agent's
+#: environment has the session bus but no DISPLAY and no WAYLAND_DISPLAY.
+_PC_LOCKED_COMMAND = (
+    "gdbus call --session --dest org.gnome.ScreenSaver "
+    "--object-path /org/gnome/ScreenSaver "
+    "--method org.gnome.ScreenSaver.GetActive 2>/dev/null "
+    "| grep -q true && echo 'screen is locked' || echo 'screen is unlocked'"
+)
+#: ``nproc`` rather than lscpu's CPU(s) line, which is not the only line
+#: beginning that way: matching it loosely reported the core count as "100%",
+#: having found "CPU(s) scaling MHz".
+_PC_SPECS_COMMAND = (
+    "lscpu | grep -m1 'Model name' | sed 's/.*: *//; s/^/cpu /'; "
+    "nproc | sed 's/^/cores /'; "
+    "free -h | awk 'NR==2{print \"memory \"$2}'; "
+    "lspci | grep -iE 'vga|3d' | cut -d: -f3- | sed 's/^ */gpu /' | head -2"
+)
+_PC_PROCESSES_COMMAND = (
+    "echo \"$(ps -e --no-headers | wc -l) processes running\"; "
+    "uptime | sed 's/.*load average/load average/'"
+)
+
 #: Questions answered by a written-down command, tried before the model drafts one.
 #:
-#: Ordered: the narrower "what is open" question is tried before the general
-#: "how is it doing" one, so "check what's open on it" is not answered with
-#: uptime and a disk figure.
+#: Ordered specific-to-general, and that order is load-bearing. "check my pc
+#: temperature" must reach the temperature recipe rather than the general
+#: status one, and "what is using the CPU" must reach the CPU recipe rather
+#: than the hardware-specs one that also mentions CPUs. The two vague entries
+#: — what is open, and how is it doing — are last for the same reason.
 _PC_RECIPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bdownload(?:s|ed|ing)?\b", re.IGNORECASE), _PC_DOWNLOADS_COMMAND),
+    (re.compile(r"\bblue\s?tooth\b", re.IGNORECASE), _PC_BLUETOOTH_COMMAND),
+    (
+        re.compile(
+            r"\b(?:temperature|temp|thermals?|overheat\w*|how\s+hot|running\s+hot)\b",
+            re.IGNORECASE,
+        ),
+        _PC_TEMPERATURE_COMMAND,
+    ),
+    (
+        re.compile(r"\b(?:volume|muted|how\s+loud|sound\s+level)\b", re.IGNORECASE),
+        _PC_VOLUME_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:updates?|upgrades?|upgradable|patches)\b(?!\s+me\b)",
+            re.IGNORECASE,
+        ),
+        _PC_UPDATES_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:usb|plugged\s+in(?:to)?|webcam)\b", re.IGNORECASE
+        ),
+        _PC_USB_COMMAND,
+    ),
+    (
+        re.compile(r"\b(?:batter(?:y|ies)|mouse|keyboard)\b", re.IGNORECASE),
+        _PC_BATTERY_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:locked|unlocked|screen\s*lock|screensaver)\b", re.IGNORECASE
+        ),
+        _PC_LOCKED_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\brecent(?:ly)?\b[^.?!]*\b(?:files?|worked?|working|edited|changed|touched)\b"
+            r"|\bwhat\b[^.?!]*\bwas\s+I\s+working\s+on\b",
+            re.IGNORECASE,
+        ),
+        _PC_RECENT_FILES_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:wi-?fi|network|internet|online|ip\s+address|connected\s+to)\b",
+            re.IGNORECASE,
+        ),
+        _PC_NETWORK_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:disk|storage)\s+(?:space|usage)\b|\bfree\s+space\b"
+            r"|\bhow\s+(?:much|many)\b[^.?!]*\bspace\b"
+            r"|\b(?:disk|drive|storage)\b[^.?!]*\b(?:full|left|remaining|free|available)\b",
+            re.IGNORECASE,
+        ),
+        _PC_DISK_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:memory|ram)\b[^.?!]*\b(?:using|used|eating|hogging|taking|free)\b"
+            r"|\b(?:using|eating|hogging|taking)\b[^.?!]*\b(?:memory|ram)\b",
+            re.IGNORECASE,
+        ),
+        _PC_MEMORY_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:cpu|processor)\b[^.?!]*\b(?:using|used|usage|eating|hogging|busy|load)\b"
+            r"|\b(?:using|eating|hogging|slowing)\b[^.?!]*\b(?:cpu|processor)\b"
+            r"|\bwhy\b[^.?!]*\b(?:slow|lagging)\b",
+            re.IGNORECASE,
+        ),
+        _PC_CPU_COMMAND,
+    ),
+    (
+        re.compile(r"\b(?:processes|how\s+many\s+programs)\b", re.IGNORECASE),
+        _PC_PROCESSES_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:specs?|specifications|hardware|gpu|graphics\s+card"
+            r"|what\s+kind\s+of\s+(?:pc|computer|machine))\b",
+            re.IGNORECASE,
+        ),
+        _PC_SPECS_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:uptime|booted|boot\s+time"
+            r"|how\s+long\b[^.?!]*\b(?:on|up|running|been))\b",
+            re.IGNORECASE,
+        ),
+        _PC_UPTIME_COMMAND,
+    ),
     (
         re.compile(
             r"\b(?:what|which)\b.*\b(?:open|running|doing|using|up\s+to)\b",
@@ -390,21 +589,26 @@ _PC_RECIPES: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
-#: Words that mean the question is about the disk, not about the desktop, and so
-#: belongs to the model rather than to the "what is open" recipe above.
+#: The two entries above that match on almost any phrasing, and so are the two
+#: that need protecting from a question that only looks like them.
+_PC_VAGUE_COMMANDS = frozenset({_PC_OPEN_APPS_COMMAND, _PC_STATUS_COMMAND})
+
+#: Words that mean a question is about the disk or a service rather than about
+#: the desktop, and so belongs to the model rather than to the vague recipes.
 _PC_RECIPE_VETO = re.compile(
-    r"\b(files?|folders?|director(?:y|ies)|disk|drive|space|port|service|docker)\b",
+    r"\b(files?|folders?|director(?:y|ies)|port|service|docker)\b",
     re.IGNORECASE,
 )
 
 
 def _pc_recipe(text: str) -> str | None:
     """The written-down command for ``text``, or None to let the model draft one."""
-    if _PC_RECIPE_VETO.search(text):
-        return None
     for pattern, command in _PC_RECIPES:
-        if pattern.search(text):
-            return command
+        if not pattern.search(text):
+            continue
+        if command in _PC_VAGUE_COMMANDS and _PC_RECIPE_VETO.search(text):
+            return None
+        return command
     return None
 
 

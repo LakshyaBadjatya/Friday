@@ -251,8 +251,12 @@ _FORGET_RULES: tuple[re.Pattern[str], ...] = (
 #: while the subject is not. "Make a folder" alone stays a conversation; "make a
 #: folder on my PC" is an instruction to a machine.
 _PC_RULES: tuple[re.Pattern[str], ...] = (
+    # "on my pc" and "in my pc" are the same sentence with a different
+    # preposition, and only one of them used to count. "What is open in my pc"
+    # fell through to a chat answer for exactly that reason.
     re.compile(
-        r"\bon\s+(?:my|the|this)\s+(pc|computer|laptop|desktop|machine|linux)\b",
+        r"\b(?:on|in|to)\s+(?:my|the|this)\s+"
+        r"(pc|computer|laptop|desktop|machine|linux)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -307,6 +311,101 @@ _PC_TIMEOUT_SECONDS = 45.0
 def _is_pc_request(text: str) -> bool:
     """Whether this turn is aimed at the computer rather than at her."""
     return any(pattern.search(text) for pattern in _PC_RULES)
+
+
+#: What a follow-up to a PC turn looks like when the machine is not named again.
+#:
+#: Nobody says "my PC" twice. They ask about the computer, and then they say
+#: "what am I doing on it" — and that sentence, read alone, is about nothing at
+#: all. These patterns are only ever consulted when the *previous* turn went to
+#: the machine (see ``_handle_inner``), which is what keeps them from swallowing
+#: an ordinary question that happens to contain the word "it".
+_PC_FOLLOWUP_RULES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:on|in|to|with|from)\s+(?:it|there|that)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:check|look\s+at|refresh|update|recheck)\s+(?:it|that|again)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bcheck\s+again\b", re.IGNORECASE),
+    # "and now?" / "what about now" — a request to look again, with no subject
+    # left in the sentence at all.
+    re.compile(r"^\s*(?:and\s+)?(?:what\s+about\s+)?now\s*\??\s*$", re.IGNORECASE),
+)
+
+
+def _is_pc_followup(text: str) -> bool:
+    """Whether this turn continues the last one, which was aimed at the computer."""
+    return any(pattern.search(text) for pattern in _PC_FOLLOWUP_RULES)
+
+
+#: The question about the desktop that gets asked more than any other, answered
+#: with a command instead of by asking a model to invent one.
+#:
+#: Two reasons it is written down rather than drafted. It is asked constantly,
+#: and a drafted command costs a model call and a second of latency every time;
+#: and the obvious drafts are all wrong here — ``wmctrl`` and ``xdotool`` see
+#: nothing under Wayland, and GNOME refuses ``Introspect.GetWindows`` to anything
+#: outside the shell. What does work is the session manager: GNOME starts every
+#: launched application in its own scope, so the scopes *are* the open apps. The
+#: fallback covers a machine whose desktop is not GNOME, where the honest answer
+#: is the heaviest processes rather than nothing at all.
+_PC_OPEN_APPS_COMMAND = (
+    "systemctl --user list-units 'app-*.scope' --no-legend --plain 2>/dev/null "
+    "| grep -i 'launched by gnome-shell' | awk '{print $1}' "
+    "| sed -E 's/^app-gnome-//; s/-[0-9]+\\.scope$//; s/\\\\x2d/-/g' | sort -u "
+    "| grep . || ps -eo comm= --sort=-%mem | head -12 | sort -u"
+)
+
+#: "How is the machine doing" — asked with no particular thing in mind, and so
+#: the request most likely to be drafted into a command that answers something
+#: narrower than was asked and then summarised into "everything looks good".
+#: Four numbers someone actually wants, printed with their own labels.
+_PC_STATUS_COMMAND = (
+    "uptime -p; "
+    "free -h | awk 'NR==2{print \"memory: \"$3\" used of \"$2}'; "
+    "df -h / | awk 'NR==2{print \"disk: \"$3\" used of \"$2\" (\"$5\" full)\"}'; "
+    "uptime | grep -o 'load average.*'"
+)
+
+#: Questions answered by a written-down command, tried before the model drafts one.
+#:
+#: Ordered: the narrower "what is open" question is tried before the general
+#: "how is it doing" one, so "check what's open on it" is not answered with
+#: uptime and a disk figure.
+_PC_RECIPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\b(?:what|which)\b.*\b(?:open|running|doing|using|up\s+to)\b",
+            re.IGNORECASE,
+        ),
+        _PC_OPEN_APPS_COMMAND,
+    ),
+    (
+        re.compile(
+            r"\b(?:check|status|how(?:'s| is)|is\s+(?:my|the|this))\b"
+            r"[^.?!]*\b(?:pc|computer|laptop|desktop|machine)\b",
+            re.IGNORECASE,
+        ),
+        _PC_STATUS_COMMAND,
+    ),
+)
+
+#: Words that mean the question is about the disk, not about the desktop, and so
+#: belongs to the model rather than to the "what is open" recipe above.
+_PC_RECIPE_VETO = re.compile(
+    r"\b(files?|folders?|director(?:y|ies)|disk|drive|space|port|service|docker)\b",
+    re.IGNORECASE,
+)
+
+
+def _pc_recipe(text: str) -> str | None:
+    """The written-down command for ``text``, or None to let the model draft one."""
+    if _PC_RECIPE_VETO.search(text):
+        return None
+    for pattern, command in _PC_RECIPES:
+        if pattern.search(text):
+            return command
+    return None
 
 
 def _clean_command(drafted: str) -> str:
@@ -631,6 +730,10 @@ class Orchestrator:
         self._critic = critic
         self._n8n_service = n8n_service
         self._pc_jobs = pc_jobs
+        #: Sessions whose last turn was answered by the machine. Consumed (and
+        #: cleared) on the next turn, so a follow-up like "what am I doing on it"
+        #: goes back to the PC while an unrelated question does not inherit it.
+        self._pc_recent: dict[str, bool] = {}
         self._roster = roster
         self._confidence = confidence
         # The per-turn budgeter (Wave 0): records each completion's usage and
@@ -1472,6 +1575,21 @@ class Orchestrator:
         return "\n".join(lines)
 
     # -- voice protocols (Tier 1) ------------------------------------------ #
+    def aims_at_machine(self, text: str, session_id: str) -> bool:
+        """Whether this turn belongs to the PC, bare follow-ups included.
+
+        Public because every surface needs this answer *before* the turn reaches
+        the graph: the fast path answers first and answers everything, so a turn
+        it resolves as chat never reaches the machine at all — which is how "what
+        am I doing on it" came back as a guess about a Wikipedia article.
+
+        Non-consuming, unlike the check inside the turn itself: asking whether a
+        turn is aimed at the machine must not change whether the next one is.
+        """
+        if _is_pc_request(text):
+            return True
+        return self._pc_recent.get(session_id, False) and _is_pc_followup(text)
+
     async def _run_on_pc(self, state: GraphState) -> str:
         """Turn a spoken request into a command, run it, and say what happened.
 
@@ -1486,8 +1604,24 @@ class Orchestrator:
         queue = self._pc_jobs
         assert queue is not None  # guarded by the caller
 
-        drafted = await self._ask_llm(_PC_COMMAND_PROMPT + state.user_input)
-        command = _clean_command(drafted)
+        # A written-down command for the question that gets asked constantly,
+        # before spending a model call on re-inventing it (and getting it wrong:
+        # the obvious answers do not work under Wayland).
+        command = _pc_recipe(state.user_input)
+        if command is None:
+            # The last few turns go in front of the model because the request
+            # often does not survive being read alone: "what am I doing on it"
+            # is only a question if you know what "it" was.
+            recent = self._memory.history(state.session_id)[-4:]
+            context = "\n".join(f"{m.role}: {m.content}" for m in recent)
+            prompt = _PC_COMMAND_PROMPT
+            if context:
+                prompt += (
+                    "Resolve any pronoun from the conversation so far:\n"
+                    f"{context}\n\nNow the request: "
+                )
+            drafted = await self._ask_llm(prompt + state.user_input)
+            command = _clean_command(drafted)
         if not command or command == "UNSUPPORTED":
             return "I couldn't turn that into something to run on the machine, Boss."
 
@@ -1523,9 +1657,18 @@ class Orchestrator:
                 else f"That didn't work: {result.detail or 'no output'}"
             )
 
+        # "Everything looks good, your PC is healthy" is what the old wording
+        # produced from a real listing, and it is indistinguishable from a guess.
+        # The names and numbers ARE the answer; summarising them away leaves a
+        # sentence that would have been just as true if nothing had been run.
         spoken = await self._ask_llm(
-            "Answer the request in one or two short sentences, as speech. "
-            "Do not read the output verbatim and do not mention commands.\n\n"
+            "Answer the request in one or two short sentences, as speech, using "
+            "only what the output actually says.\n"
+            "- Name the specifics you were given: app names, numbers, filenames.\n"
+            "- Never claim something is fine, healthy or normal unless the "
+            "output says so; you are reporting, not reassuring.\n"
+            "- If the output does not answer the request, say exactly that.\n"
+            "- Do not read it out verbatim and do not mention commands.\n\n"
             f"Request: {state.user_input}\n"
             f"Output:\n{output[:4000]}"
         )
@@ -1789,9 +1932,27 @@ class Orchestrator:
         # 2b-i½. Anything aimed at the computer goes to the machine itself,
         # rather than being answered from what a language model imagines it can
         # reach. Inert unless the bridge is enabled and an agent is attached.
-        if self._pc_jobs is not None and _is_pc_request(state.user_input):
+        # Consumed on every turn, so the machine is inherited by the turn
+        # immediately after a PC turn and by no other one.
+        followed_on = self._pc_recent.pop(state.session_id, False)
+        if _is_pc_request(state.user_input) or (
+            followed_on and _is_pc_followup(state.user_input)
+        ):
+            if self._pc_jobs is None:
+                # Say it plainly rather than let the turn fall through to a chat
+                # answer. Asked about a machine it cannot see, a language model
+                # does not decline — it describes one, in detail, convincingly.
+                state.mode = Mode.CONVERSATION
+                state.response = (
+                    f"I can't reach your PC right now, {get_settings().owner_address}"
+                    " — the bridge isn't running, so anything I said about what's "
+                    "on it would be a guess."
+                )
+                self._record(state)
+                return state
             state.mode = Mode.DEVICE_CONTROL
             state.response = await self._run_on_pc(state)
+            self._pc_recent[state.session_id] = True
             self._record(state)
             return state
 

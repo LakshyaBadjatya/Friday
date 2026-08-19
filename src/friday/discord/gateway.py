@@ -824,15 +824,24 @@ async def _on_message(app: Any, token: str, message: dict[str, Any]) -> None:
     await _maybe_stand_in(app, token, channel, message)
 
 
-def _wants_the_machine(text: str) -> bool:
+def _wants_the_machine(app: Any, text: str) -> bool:
     """Whether this turn is aimed at the PC rather than at her.
 
     Shares the orchestrator's rules rather than keeping a second copy: two lists
     of phrasings would drift, and the half that drifted would be the one deciding
     who is allowed.
+
+    Follow-ups count, and on this surface that is a permission question rather
+    than a convenience one. The "last turn was a PC turn" marker is held per
+    *channel*, not per person, so without this a guest could finish the owner's
+    sentence — "what's on it" straight after the owner asked — and reach a
+    machine they may not ask about directly.
     """
     from friday.core.orchestrator import _is_pc_request  # noqa: PLC0415
 
+    brain = getattr(getattr(app, "state", None), "orchestrator", None)
+    if brain is not None and hasattr(brain, "aims_at_machine"):
+        return bool(brain.aims_at_machine(text, discord_session(app)))
     return _is_pc_request(text)
 
 
@@ -860,7 +869,7 @@ async def _compose(
     # matters: a voice turn comes from whoever is holding the phone, but a Discord
     # channel has other people in it, and the prompt is built partly from what
     # they type. A guest may ask her anything; a guest may not ask the PC.
-    if _wants_the_machine(content) and _who_is(app, asker) == "guest":
+    if _wants_the_machine(app, content) and _who_is(app, asker) == "guest":
         return "that one's owner-only, sorry."
 
     # "talk to me in polish" sticks for the conversation, not just this line.

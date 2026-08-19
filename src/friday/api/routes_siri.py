@@ -908,7 +908,17 @@ async def _produce(
     # skips the shortcut and falls through to the graph that can act.
     from friday.core.orchestrator import _is_pc_request  # noqa: PLC0415
 
-    aimed_at_the_machine = _is_pc_request(asked or query)
+    # Asked through the orchestrator rather than the bare rules, because a
+    # follow-up names no machine: "what am I doing on it" is only a question
+    # about the PC if the turn before it was. The orchestrator is the only thing
+    # that knows that, and the fast path has to know it too — a turn answered
+    # here never reaches the graph that could have run the command.
+    _pc_brain = getattr(request.app.state, "orchestrator", None)
+    aimed_at_the_machine = (
+        bool(_pc_brain.aims_at_machine(asked or query, session_id))
+        if _pc_brain is not None and hasattr(_pc_brain, "aims_at_machine")
+        else _is_pc_request(asked or query)
+    )
     if aimed_at_the_machine:
         # Running something on the PC is two model calls with a round trip to the
         # machine between them, so it cannot fit in the budget sized for a spoken

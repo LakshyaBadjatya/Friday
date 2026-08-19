@@ -262,3 +262,268 @@ def test_the_model_s_wrapping_is_stripped_before_the_shell_sees_it(
     from friday.core.orchestrator import _clean_command
 
     assert _clean_command(drafted) == expected
+
+
+# --- the follow-up turn ------------------------------------------------------
+#
+# The bug these cover: "check my pc" reached the machine, and then "what am I
+# doing on it" did not — nothing in the sentence named the computer, so the turn
+# fell through to a chat answer and the model made one up. A machine that
+# answers the first question and invents the second is worse than one that
+# never answers, because there is no way to tell the two replies apart.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "What is open in my pc",
+        "what's open on my computer",
+        "what am I doing on my pc",
+        "what apps are running on my laptop",
+        "whats open in my machine right now",
+    ],
+)
+def test_asking_what_is_open_reaches_the_machine(text: str) -> None:
+    from friday.core.orchestrator import _is_pc_request
+
+    assert _is_pc_request(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "What am I doing on it",
+        "Check and tell what am I doing on it",
+        "what's open on it",
+        "check it again",
+        "and now?",
+        "what about now",
+    ],
+)
+def test_a_follow_up_stays_with_the_machine(text: str) -> None:
+    """Said right after a PC turn, these mean the PC and nothing else."""
+    from friday.core.orchestrator import _is_pc_followup
+
+    assert _is_pc_followup(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what's the capital of France",
+        "remind me to call mum at seven",
+        "what am I doing tomorrow",
+        "how are you feeling today",
+    ],
+)
+def test_an_unrelated_turn_does_not_inherit_the_machine(text: str) -> None:
+    """Following a PC turn must not swallow the next real question."""
+    from friday.core.orchestrator import _is_pc_followup
+
+    assert _is_pc_followup(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "What is open in my pc",
+        "what am I doing on it",
+        "what apps are open",
+        "what's running right now",
+    ],
+)
+def test_the_open_windows_question_needs_no_model_call(text: str) -> None:
+    """A question asked this often should not be re-invented by an LLM each time."""
+    from friday.core.orchestrator import _pc_recipe
+
+    command = _pc_recipe(text)
+    assert command is not None
+    assert "app-*.scope" in command
+
+
+def test_a_command_shaped_request_still_goes_to_the_model() -> None:
+    """The recipes are a shortcut, not a whitelist."""
+    from friday.core.orchestrator import _pc_recipe
+
+    assert _pc_recipe("make a folder called notes on my pc") is None
+
+
+# --- the follow-up, end to end -----------------------------------------------
+
+
+async def _pretend_to_be_the_pc(queue: JobQueue, stdout: str) -> list[str]:
+    """Stand in for the agent on the machine: take one job, answer it."""
+    seen: list[str] = []
+    job = await queue.take(timeout=5.0)
+    assert job is not None
+    seen.append(job.command)
+    queue.complete(JobResult(id=job.id, status="ok", stdout=stdout, exit_code=0))
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_is_answered_by_the_machine_not_by_the_model() -> None:
+    """The whole bug in one test: turn one reaches the PC, turn two must too."""
+    from pathlib import Path as _Path
+
+    from friday.core.orchestrator import Orchestrator
+    from friday.core.state import GraphState, Mode
+    from friday.memory.short_term import ShortTermMemory
+    from friday.providers.llm import FakeLLM, LLMResponse, Usage
+    from friday.tools.registry import ToolRegistry
+
+    persona = (
+        _Path(__file__).resolve().parents[2]
+        / "src" / "friday" / "persona" / "friday.md"
+    )
+    queue = JobQueue()
+    # Only ONE scripted reply is needed per turn: the "what is open" question is
+    # a written-down command, so nothing is spent drafting one.
+    orchestrator = Orchestrator(
+        llm=FakeLLM(
+            [
+                LLMResponse(text="Chrome and VS Code.", tool_calls=[], usage=Usage()),
+                LLMResponse(text="Chrome and VS Code.", tool_calls=[], usage=Usage()),
+            ]
+        ),
+        registry=ToolRegistry(),
+        memory=ShortTermMemory(),
+        persona_path=persona,
+        pc_jobs=queue,
+    )
+
+    async def _turn(text: str) -> GraphState:
+        pc = asyncio.create_task(_pretend_to_be_the_pc(queue, "code\ngoogle-chrome"))
+        state = await orchestrator.handle(
+            GraphState(session_id="s1", user_input=text)
+        )
+        await pc
+        return state
+
+    first = await _turn("What is open in my pc")
+    assert first.mode is Mode.DEVICE_CONTROL
+
+    # Names no machine at all — and used to be answered with an invention.
+    second = await _turn("What am I doing on it")
+    assert second.mode is Mode.DEVICE_CONTROL
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_question_after_a_pc_turn_is_not_hijacked() -> None:
+    from pathlib import Path as _Path
+
+    from friday.core.orchestrator import Orchestrator
+    from friday.core.state import GraphState, Mode
+    from friday.memory.short_term import ShortTermMemory
+    from friday.providers.llm import FakeLLM, LLMResponse, Usage
+    from friday.tools.registry import ToolRegistry
+
+    persona = (
+        _Path(__file__).resolve().parents[2]
+        / "src" / "friday" / "persona" / "friday.md"
+    )
+    queue = JobQueue()
+    orchestrator = Orchestrator(
+        llm=FakeLLM([LLMResponse(text="Chrome.", tool_calls=[], usage=Usage())] * 6),
+        registry=ToolRegistry(),
+        memory=ShortTermMemory(),
+        persona_path=persona,
+        pc_jobs=queue,
+    )
+    pc = asyncio.create_task(_pretend_to_be_the_pc(queue, "code"))
+    await orchestrator.handle(
+        GraphState(session_id="s2", user_input="What is open in my pc")
+    )
+    await pc
+
+    after = await orchestrator.handle(
+        GraphState(session_id="s2", user_input="what's the capital of France")
+    )
+    assert after.mode is not Mode.DEVICE_CONTROL
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Friday check my pc", "Check the pc", "is my pc ok", "how's my computer"],
+)
+def test_a_vague_check_gets_real_numbers(text: str) -> None:
+    """"Check my pc" used to be answered with "everything looks good"."""
+    from friday.core.orchestrator import _PC_STATUS_COMMAND, _pc_recipe
+
+    assert _pc_recipe(text) == _PC_STATUS_COMMAND
+
+
+def test_asking_what_is_open_beats_the_general_status_recipe() -> None:
+    """"check what's open on it" is a narrower question; uptime does not answer it."""
+    from friday.core.orchestrator import _PC_OPEN_APPS_COMMAND, _pc_recipe
+
+    assert _pc_recipe("check what's open on my pc") == _PC_OPEN_APPS_COMMAND
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "make a folder called notes on my pc",
+        "find the invoice files on my computer",
+        "what's on my laptop taking up space",
+        "list the files on this machine",
+    ],
+)
+def test_real_instructions_are_still_drafted_by_the_model(text: str) -> None:
+    """The recipes must not swallow the requests the shell exists for."""
+    from friday.core.orchestrator import _pc_recipe
+
+    assert _pc_recipe(text) is None
+
+
+@pytest.mark.parametrize("name", ["_PC_STATUS_COMMAND", "_PC_OPEN_APPS_COMMAND"])
+def test_the_written_down_commands_run_and_are_not_gated(name: str) -> None:
+    """They are executed verbatim, so they are asserted verbatim: quoting included."""
+    import friday.core.orchestrator as orch
+
+    command = getattr(orch, name)
+    assert destructive_reason(command) is None
+    result = run_job(Job(command=command), Path.home())
+    assert result.status == "ok", result.stderr
+    assert result.stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_the_surfaces_can_see_a_follow_up_before_the_graph_does() -> None:
+    """The fast path answers first; if it cannot see this, the fix never runs."""
+    from pathlib import Path as _Path
+
+    from friday.core.orchestrator import Orchestrator
+    from friday.core.state import GraphState
+    from friday.memory.short_term import ShortTermMemory
+    from friday.providers.llm import FakeLLM, LLMResponse, Usage
+    from friday.tools.registry import ToolRegistry
+
+    persona = (
+        _Path(__file__).resolve().parents[2]
+        / "src" / "friday" / "persona" / "friday.md"
+    )
+    queue = JobQueue()
+    orchestrator = Orchestrator(
+        llm=FakeLLM([LLMResponse(text="Chrome.", tool_calls=[], usage=Usage())] * 4),
+        registry=ToolRegistry(),
+        memory=ShortTermMemory(),
+        persona_path=persona,
+        pc_jobs=queue,
+    )
+
+    # Cold: a bare follow-up belongs to nobody.
+    assert orchestrator.aims_at_machine("what am I doing on it", "s3") is False
+    assert orchestrator.aims_at_machine("What is open in my pc", "s3") is True
+
+    pc = asyncio.create_task(_pretend_to_be_the_pc(queue, "code"))
+    await orchestrator.handle(
+        GraphState(session_id="s3", user_input="What is open in my pc")
+    )
+    await pc
+
+    # Warm, and asking must not consume it — the surfaces ask before the graph.
+    assert orchestrator.aims_at_machine("what am I doing on it", "s3") is True
+    assert orchestrator.aims_at_machine("what am I doing on it", "s3") is True
+    # A different channel never inherits another one's machine turn.
+    assert orchestrator.aims_at_machine("what am I doing on it", "other") is False
